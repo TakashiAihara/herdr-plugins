@@ -30,18 +30,21 @@ n=${#tail4[@]}
 bottom="${tail4[n-3]}|${tail4[n-2]}|${tail4[n-1]}"
 [[ "$bottom" == "❯ 1. I am using this for local development|2. Exit|Enter to confirm"* ]] || exit 0
 
-# Each event runs its own hook, so two blocked events for one dialog would both see it.
-# The first to create the pane's lock sends; others within 10 s stop. An empty stamp
-# means the owner has not written it yet, which also counts as fresh.
-state="${HERDR_PLUGIN_STATE_DIR:-${TMPDIR:-/tmp}}"
-lock="$state/sent-${pane//[^A-Za-z0-9]/_}"
-now=$(date +%s)
-if ! mkdir "$lock" 2>/dev/null; then
-  last=$(cat "$lock/at" 2>/dev/null)
-  [[ -n "$last" ]] && (( now - last >= 10 )) || exit 0
-  rm -rf "$lock"
-  mkdir "$lock" 2>/dev/null || exit 0
-fi
-echo "$now" > "$lock/at"
+# Each event runs its own hook, and herdr can report the same status twice, so one
+# dialog can reach here more than once; a second Enter would answer whatever prompt
+# comes next. Enter is sent once per pane and foreground process group: the group is
+# the claude that showed this dialog, so a claude started again in the same pane gets
+# a new group and is answered too. mkdir is the atomic claim.
+info="$("$herdr" pane process-info --pane "$pane" 2>/dev/null)" || exit 0
+re_pg='"foreground_process_group_id":([0-9]+)'
+[[ "$info" =~ $re_pg ]] || exit 0
+pg="${BASH_REMATCH[1]}"
+state="${HERDR_PLUGIN_STATE_DIR:-}"
+[[ -n "$state" && -d "$state" ]] || exit 0
+key="sent-${pane//[^A-Za-z0-9]/_}"
+mkdir "$state/$key-$pg" 2>/dev/null || exit 0
+for old in "$state/$key"-*; do
+  [[ "$old" == "$state/$key-$pg" ]] || rm -rf "$old"
+done
 
 exec "$herdr" pane send-keys "$pane" Enter

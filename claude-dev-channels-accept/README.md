@@ -29,7 +29,7 @@ Herdr marks the pane `blocked` while the dialog is up. On every `pane.agent_stat
 
 Only then does it send `Enter`, which picks the highlighted first option. A tool-permission prompt or question puts its own options on the bottom lines, so it is left for you even when the dialog's words are still visible higher up (for example after Claude printed this README).
 
-At most one `Enter` is sent per pane in 10 seconds, so two status events for the same dialog do not answer the next prompt too.
+`Enter` is sent once per `claude` process in a pane (keyed by the pane's foreground process group), so a repeated status event for the same dialog does not answer the next prompt too. Starting `claude` again in the same pane is a new process and is answered again.
 
 ## Limits
 
