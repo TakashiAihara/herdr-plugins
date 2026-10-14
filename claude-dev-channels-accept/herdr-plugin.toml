@@ -1,0 +1,10 @@
+id = "takashiaihara.claude-dev-channels-accept"
+name = "Claude dev channels accept"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "Answer Claude Code's development-channels warning dialog so claude can be started without a wrapper"
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bash", "hook.sh"]
