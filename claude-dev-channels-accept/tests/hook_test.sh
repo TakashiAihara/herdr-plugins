@@ -46,13 +46,14 @@ run() {
   printf '%s\n' "$2" > "$tmp/screen"
   HERDR_PLUGIN_EVENT_JSON="$1" HERDR_BIN_PATH="$tmp/herdr" HERDR_PLUGIN_STATE_DIR="$tmp/state" \
     FAKE_SCREEN="$tmp/screen" FAKE_SENT="$tmp/sent" FAKE_PG="${FAKE_PG:-100}" "$BASH" "$hook"
+  rc=$?
 }
 sent() { cat "$tmp/sent"; }
 check() {
   local name="$1" json="$2" screen="$3" want="$4"
   rm -rf "$tmp/state"; mkdir -p "$tmp/state"; : > "$tmp/sent"
   run "$json" "$screen"
-  if [[ "$(sent)" == "$want" ]]; then pass "$name"; else fail "$name" "want [$want] got [$(sent)]"; fi
+  if [[ "$(sent)" == "$want" && "$rc" == 0 ]]; then pass "$name"; else fail "$name" "want [$want] rc 0, got [$(sent)] rc $rc"; fi
 }
 
 ev() { printf '{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"%s","workspace_id":"w9","agent_status":"%s","agent":"%s"%s}}' "$1" "$2" "$3" "${4:-}"; }
@@ -88,12 +89,14 @@ if [[ "$(sent)" == "w9:p10 Enter" && -d "$tmp/state/sent-w9_p1-200" && -d "$tmp/
 
 rm -rf "$tmp/state"; mkdir -p "$tmp/state"; : > "$tmp/sent"
 FAKE_SEND_FAIL=1 run "$(ev w9:p1 blocked claude)" "$dialog"
+if [[ "$rc" == 1 && -z "$(sent)" && -z "$(ls "$tmp/state")" ]]; then pass "a failed send exits 1 and gives the claim back"; else fail "failed send" "rc $rc got [$(sent)] $(ls "$tmp/state")"; fi
 run "$(ev w9:p1 blocked claude)" "$dialog"
-if [[ "$(sent)" == "w9:p1 Enter" ]]; then pass "a failed send leaves the dialog open to the next event"; else fail "failed send" "got [$(sent)] $(ls "$tmp/state")"; fi
+if [[ "$(sent)" == "w9:p1 Enter" ]]; then pass "the next event for that dialog sends Enter"; else fail "retry" "got [$(sent)] $(ls "$tmp/state")"; fi
 
-rm -rf "$tmp/state"; mkdir -p "$tmp/state/sent-w8_p3-50" "$tmp/state/sent-w8_p4-60"; touch -t 202001010000 "$tmp/state/sent-w8_p3-50"; : > "$tmp/sent"
+rm -rf "$tmp/state"; mkdir -p "$tmp/state/sent-w8_p3-50" "$tmp/state/sent-w8_p4-60"; : > "$tmp/sent"
+perl -e 'utime(time-25*3600, time-25*3600, $ARGV[0]); utime(time-23*3600, time-23*3600, $ARGV[1])' "$tmp/state/sent-w8_p3-50" "$tmp/state/sent-w8_p4-60"
 run "$(ev w9:p1 blocked claude)" "$dialog"
-if [[ ! -e "$tmp/state/sent-w8_p3-50" && -d "$tmp/state/sent-w8_p4-60" ]]; then pass "claims older than a day are swept, recent ones kept"; else fail "sweep" "$(ls "$tmp/state")"; fi
+if [[ ! -e "$tmp/state/sent-w8_p3-50" && -d "$tmp/state/sent-w8_p4-60" ]]; then pass "a 25 h old claim is swept, a 23 h old one kept"; else fail "sweep" "$(ls "$tmp/state")"; fi
 
 mkdir -p "$tmp/state/sent-w9_p10-300"; : > "$tmp/sent"
 FAKE_PG=400 run "$(ev w9:p1 blocked claude)" "$dialog"
@@ -102,6 +105,7 @@ if [[ -d "$tmp/state/sent-w9_p10-300" ]]; then pass "a pane whose id extends thi
 rm -rf "$tmp/state"; : > "$tmp/sent"
 printf '%s\n' "$dialog" > "$tmp/screen"
 HERDR_PLUGIN_EVENT_JSON="$(ev w9:p1 blocked claude)" HERDR_BIN_PATH="$tmp/herdr" FAKE_SCREEN="$tmp/screen" FAKE_SENT="$tmp/sent" FAKE_PG=100 "$BASH" "$hook"
-if [[ -z "$(sent)" ]]; then pass "without a plugin state dir nothing is sent"; else fail "no state dir" "got [$(sent)]"; fi
+rc=$?
+if [[ -z "$(sent)" && "$rc" == 1 ]]; then pass "without a plugin state dir nothing is sent and it exits 1"; else fail "no state dir" "rc $rc got [$(sent)]"; fi
 
 exit "$fail"

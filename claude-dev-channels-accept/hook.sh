@@ -35,19 +35,21 @@ bottom="${tail4[n-3]}|${tail4[n-2]}|${tail4[n-1]}"
 # comes next. Enter is sent once per pane and foreground process group: the group is
 # the claude that showed this dialog, so a claude started again in the same pane gets
 # a new group and is answered too. mkdir is the atomic claim. A failed send gives the
-# claim back so the next event can try again, and claims older than a day (panes long
-# closed) are swept so the directory does not grow with every pane ever used.
+# claim back so a later event for the same dialog can try again (the screen check above
+# still has to pass, so an Enter that did land is not repeated once claude redraws).
+# Two sweeps keep the directory small: the loop drops this pane's older claims at once,
+# and the age sweep drops claims of panes that never show the dialog again (closed).
 info="$("$herdr" pane process-info --pane "$pane" 2>/dev/null)" || exit 0
 re_pg='"foreground_process_group_id":([0-9]+)'
 [[ "$info" =~ $re_pg ]] || exit 0
 pg="${BASH_REMATCH[1]}"
 state="${HERDR_PLUGIN_STATE_DIR:-}"
-[[ -n "$state" && -d "$state" ]] || exit 0
+[[ -n "$state" && -d "$state" ]] || { echo "HERDR_PLUGIN_STATE_DIR is not a directory" >&2; exit 1; }
 key="sent-${pane//[^A-Za-z0-9]/_}"
 mkdir "$state/$key-$pg" 2>/dev/null || exit 0
 for old in "$state/$key"-*; do
   [[ "$old" == "$state/$key-$pg" ]] || rm -rf "$old"
 done
-find "$state" -maxdepth 1 -name 'sent-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+find "$state" -maxdepth 1 -name 'sent-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null
 
 "$herdr" pane send-keys "$pane" Enter || { rmdir "$state/$key-$pg"; exit 1; }
