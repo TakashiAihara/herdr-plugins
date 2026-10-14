@@ -85,6 +85,10 @@ if [[ ! -e "$tmp/state/sent-w9_p1-100" && -d "$tmp/state/sent-w9_p1-200" ]]; the
 FAKE_PG=200 run "$(ev w9:p10 blocked claude)" "$dialog"
 if [[ "$(sent)" == "w9:p10 Enter" && -d "$tmp/state/sent-w9_p1-200" ]]; then pass "another pane's claim neither blocks nor is removed"; else fail "other pane" "got [$(sent)] $(ls "$tmp/state")"; fi
 
+mkdir -p "$tmp/state/sent-w9_p10-300"; : > "$tmp/sent"
+FAKE_PG=400 run "$(ev w9:p1 blocked claude)" "$dialog"
+if [[ -d "$tmp/state/sent-w9_p10-300" ]]; then pass "a pane whose id extends this one keeps its claim"; else fail "prefix pane" "$(ls "$tmp/state")"; fi
+
 rm -rf "$tmp/state"; : > "$tmp/sent"
 printf '%s\n' "$dialog" > "$tmp/screen"
 HERDR_PLUGIN_EVENT_JSON="$(ev w9:p1 blocked claude)" HERDR_BIN_PATH="$tmp/herdr" FAKE_SCREEN="$tmp/screen" FAKE_SENT="$tmp/sent" FAKE_PG=100 "$BASH" "$hook"

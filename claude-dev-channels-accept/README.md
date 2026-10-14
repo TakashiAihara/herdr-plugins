@@ -29,11 +29,13 @@ Herdr marks the pane `blocked` while the dialog is up. On every `pane.agent_stat
 
 Only then does it send `Enter`, which picks the highlighted first option. A tool-permission prompt or question puts its own options on the bottom lines, so it is left for you even when the dialog's words are still visible higher up (for example after Claude printed this README).
 
-`Enter` is sent once per `claude` process in a pane (keyed by the pane's foreground process group), so a repeated status event for the same dialog does not answer the next prompt too. Starting `claude` again in the same pane is a new process and is answered again.
+`Enter` is sent once per pane and foreground process group, so a repeated status event for the same dialog does not answer the next prompt too. When `claude` is the pane's foreground job (started from the shell, or `exec`'d by a launcher), each start is a new group and is answered again.
 
 ## Limits
 
 - It only works inside Herdr. A `claude` started in a plain terminal still shows the dialog.
+- A launcher that keeps running and starts `claude` as its child more than once in the same job keeps one process group, so only the first dialog is answered.
+- Every failure (a missing state directory, a failed `send-keys`, an unexpected screen) leaves the dialog for you; nothing retries.
 - It matches the dialog's English text and the event layout of Herdr 0.9.3. If either changes, the plugin stops answering and the dialog waits for you, as it would without the plugin.
 
 ## Test
