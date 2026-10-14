@@ -35,7 +35,7 @@ Only then does it send `Enter`, which picks the highlighted first option. A tool
 
 - It only works inside Herdr. A `claude` started in a plain terminal still shows the dialog.
 - A launcher that keeps running and starts `claude` as its child more than once in the same job keeps one process group, so only the first dialog is answered.
-- Every failure (a missing state directory, a failed `send-keys`, an unexpected screen) leaves the dialog for you; nothing retries.
+- Every failure (a missing state directory, an unexpected screen, a pane too narrow for the dialog's lines to fit unwrapped) leaves the dialog for you. A failed `send-keys` is retried on the next status event, if one comes.
 - It matches the dialog's English text and the event layout of Herdr 0.9.3. If either changes, the plugin stops answering and the dialog waits for you, as it would without the plugin.
 
 ## Test

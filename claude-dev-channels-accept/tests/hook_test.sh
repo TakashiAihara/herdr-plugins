@@ -10,8 +10,8 @@ trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/herdr" <<'FAKE'
 #!/usr/bin/env bash
 case "$1 $2" in
-  "pane read") cat "$FAKE_SCREEN" ;;
-  "pane send-keys") echo "$3 $4" >> "$FAKE_SENT" ;;
+  "pane read") [ "$4 $5 $6 $7" = "--source visible --lines 40" ] && cat "$FAKE_SCREEN" ;;
+  "pane send-keys") [ -n "${FAKE_SEND_FAIL:-}" ] && exit 1; echo "$3 $4" >> "$FAKE_SENT" ;;
   "pane process-info") printf '{"result":{"process_info":{"foreground_process_group_id":%s,"pane_id":"%s"}}}' "$FAKE_PG" "$4" ;;
 esac
 FAKE
@@ -64,7 +64,8 @@ check "permission prompt below stale dialog text is left alone" "$(ev w9:p1 bloc
 check "idle pane is left alone" "$(ev w9:p1 idle claude)" "$dialog" ""
 check "non-claude agent is left alone" "$(ev w9:p1 blocked codex)" "$dialog" ""
 check "dialog body without its title is left alone" "$(ev w9:p1 blocked claude)" "${dialog#*only.}" ""
-check "dialog with Exit selected is left alone" "$(ev w9:p1 blocked claude)" "${dialog/❯ 1./  1.}" ""
+exit_selected="${dialog/❯ 1./  1.}"
+check "dialog with Exit selected is left alone" "$(ev w9:p1 blocked claude)" "${exit_selected/  2. Exit/❯ 2. Exit}" ""
 check "dialog cut before its footer is left alone" "$(ev w9:p1 blocked claude)" "${dialog%Enter to confirm*}" ""
 check "trailing spaces and CR on the lines are ignored" "$(ev w9:p1 blocked claude)" "$(printf '%s\n' "$dialog" | sed "s/\$/   $(printf '\r')/")" "w9:p1 Enter"
 check "footer with more text after it still counts" "$(ev w9:p1 blocked claude)" "${dialog/Esc to cancel/Esc to cancel · ctrl+c to quit}" "w9:p1 Enter"
@@ -83,7 +84,16 @@ if [[ ! -e "$tmp/state/sent-w9_p1-100" && -d "$tmp/state/sent-w9_p1-200" ]]; the
 
 : > "$tmp/sent"
 FAKE_PG=200 run "$(ev w9:p10 blocked claude)" "$dialog"
-if [[ "$(sent)" == "w9:p10 Enter" && -d "$tmp/state/sent-w9_p1-200" ]]; then pass "another pane's claim neither blocks nor is removed"; else fail "other pane" "got [$(sent)] $(ls "$tmp/state")"; fi
+if [[ "$(sent)" == "w9:p10 Enter" && -d "$tmp/state/sent-w9_p1-200" && -d "$tmp/state/sent-w9_p10-200" ]]; then pass "another pane's claim neither blocks nor is removed"; else fail "other pane" "got [$(sent)] $(ls "$tmp/state")"; fi
+
+rm -rf "$tmp/state"; mkdir -p "$tmp/state"; : > "$tmp/sent"
+FAKE_SEND_FAIL=1 run "$(ev w9:p1 blocked claude)" "$dialog"
+run "$(ev w9:p1 blocked claude)" "$dialog"
+if [[ "$(sent)" == "w9:p1 Enter" ]]; then pass "a failed send leaves the dialog open to the next event"; else fail "failed send" "got [$(sent)] $(ls "$tmp/state")"; fi
+
+rm -rf "$tmp/state"; mkdir -p "$tmp/state/sent-w8_p3-50" "$tmp/state/sent-w8_p4-60"; touch -t 202001010000 "$tmp/state/sent-w8_p3-50"; : > "$tmp/sent"
+run "$(ev w9:p1 blocked claude)" "$dialog"
+if [[ ! -e "$tmp/state/sent-w8_p3-50" && -d "$tmp/state/sent-w8_p4-60" ]]; then pass "claims older than a day are swept, recent ones kept"; else fail "sweep" "$(ls "$tmp/state")"; fi
 
 mkdir -p "$tmp/state/sent-w9_p10-300"; : > "$tmp/sent"
 FAKE_PG=400 run "$(ev w9:p1 blocked claude)" "$dialog"
