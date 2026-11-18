@@ -531,11 +531,13 @@ fn preview_text(list: &Option<Value>, id: &str) -> String {
         // Keys are padded to one column so the values line up (a tab lands on different stops).
         let w = entries
             .iter()
-            .map(|(k, _)| k.chars().count())
+            .map(|(k, _)| rows::width(k))
             .max()
             .unwrap_or(0);
         for (k, v) in entries {
-            text.push_str(&format!("{k:<w$}  {v}\n"));
+            // Padded by display width: a wide character takes two cells.
+            let pad = " ".repeat(w - rows::width(&k) + 2);
+            text.push_str(&format!("{k}{pad}{v}\n"));
         }
     }
     text

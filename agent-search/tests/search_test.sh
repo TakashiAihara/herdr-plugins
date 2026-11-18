@@ -466,6 +466,8 @@ fresh
 check "preview lists fields and tokens" "$(run preview w2:p1 | grep -E '^(title|tokens.task)' | sed -E 's/^([^ ]+) +/\1=/' | tr '\n' ';')" \
   "title=write docs;tokens.task=urgent kaneo;"
 check "preview values start in one column" "$(run preview w2:p1 | awk '{match($0, /^[^ ]+ +/); print RLENGTH}' | LC_ALL=C sort -u | wc -l | tr -d ' ')" "1"
+check "preview lines up wide token names by display width" "$(printf '%s' '{"result":{"panes":[{"pane_id":"w1:p1","agent":"claude","title":"t","tokens":{"界界":"wide","ab":"narrow"}}]}}' > "$tmp/wide.json"; AGENT_SEARCH_LIST="$tmp/wide.json" pk preview w1:p1 | grep -E '^tokens' | python3 -c 'import sys,unicodedata as u
+print(len({sum(2 if u.east_asian_width(c) in "WF" else 1 for c in l[:l.index(l.split()[-1])]) for l in sys.stdin}))')" "1"
 check "preview has more than one line" "$([ "$(run preview w2:p1 | wc -l)" -gt 3 ] && echo yes)" "yes"
 check "preview of a group header is empty" "$(run preview -:alpha)" ""
 
