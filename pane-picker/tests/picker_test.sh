@@ -280,8 +280,16 @@ run act sort-next
 run act move down w1:p2
 check "panes sharing a session id are ordered and prioritized apart" \
   "$(ids)$(run act prio 3 w2:p2; jq -c '[.prio, (.order | keys)]' "$HERDR_PLUGIN_STATE_DIR/state.json")" \
-  'w1:p1 w2:p1 w1:p2 w2:p2 [{"w2:p2":3},["s3","w1:p1","w1:p2","w2:p2"]]'
+  'w1:p1 w2:p1 w1:p2 w2:p2 [{"w2:p2":3},["s1","s3","w1:p2","w2:p2"]]'
 export PANE_PICKER_LIST="$tmp/list.json"
+
+fresh
+run act prio 4 w1:p1
+jq '.result.panes += [.result.panes[0] | .pane_id = "w5:p5" | .agent_session.value = "s1"]' "$tmp/list.json" > "$tmp/laterdup.json"
+check "a later pane with the same session id leaves the first pane's priority alone" \
+  "$(PANE_PICKER_LIST="$tmp/laterdup.json" bash "$picker" act prio 2 w5:p5; jq -c .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s1":4,"w5:p5":2}'
+check "when the duplicate goes away the first pane still has its priority" \
+  "$(bash "$picker" lines | sed -n 1p | grep -c '^w1:p1	★4 ')" "1"
 
 fresh
 jq '.result.panes[1].tokens = {"k\u001bx": "v"}' "$tmp/list.json" > "$tmp/esckey.json"
@@ -330,6 +338,7 @@ cat > "$tmp/bin/fzf" <<'FAKE'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then echo "${FAKE_FZF_VERSION:-0.72.0} (fake)"; exit 0; fi
 printf '%s\n' "$@" > "$FAKE_FZF_ARGS"
+printf '%s|%s' "${FZF_DEFAULT_OPTS:-}" "${FZF_DEFAULT_OPTS_FILE:-}" > "$FAKE_FZF_ARGS.env"
 cat > "$FAKE_FZF_ARGS.stdin"
 [ -n "${FAKE_FZF_OUT:-}" ] && echo "$FAKE_FZF_OUT"
 exit "${FAKE_FZF_RC:-0}"
@@ -371,6 +380,10 @@ check "ui shows a broken pane list in the popup" "$(PANE_PICKER_LIST="$tmp/garba
   "pane-picker: cannot read the pane list
 Press Enter.
 rc=1"
+
+fresh
+FZF_DEFAULT_OPTS=--multi FZF_DEFAULT_OPTS_FILE=/x FAKE_FZF_RC=1 ui
+check "ui keeps the user's FZF_DEFAULT_OPTS away from fzf" "$(cat "$tmp/fzf-args$n.env")" "|"
 
 fresh
 check "ui shows a focus failure in the popup" "$(FAKE_FZF_OUT=w7:p7 ui 2>&1; echo "rc=$?")" "pane-picker: pane w7:p7 is gone

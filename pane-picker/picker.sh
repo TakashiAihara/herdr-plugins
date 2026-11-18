@@ -107,12 +107,14 @@ def spec: if endswith(":desc") then {f: .[:-5], desc: true} else {f: ., desc: fa
 ($cfg[0]) as $c | ($st[0]) as $s
 | if (.result.panes | type) != "array" then error("herdr pane list has no .result.panes list") else . end
 | def sid: (.agent_session | objects | .value | strings) // "";
-# Panes that share a session id would share one position and one priority, so they use the pane id.
-([.result.panes[] | sid | select(. != "")] | group_by(.) | map(select(length > 1) | .[0])) as $dup
+# Panes that share a session id would share one position and one priority, so only the first pane in
+# the list keeps the session id as its key and the later ones use their pane id. The first pane keeps
+# its saved state when a duplicate appears after it or goes away.
+([.result.panes[] | sid]) as $sids
 | .result.panes | to_entries
 | map(.key as $i | .value as $p
     | ($p | sid) as $sid
-    | (if $sid != "" and ($dup | index([$sid]) | not) then $sid else $p.pane_id end) as $k
+    | (if $sid != "" and ($sids[:$i] | index([$sid]) | not) then $sid else $p.pane_id end) as $k
     | (($s.prio // {})[$k]
         // (if $c.priority.source != "manual" then ([field($c.priority.source; $p) | tonumber?] | first) else null end)) as $prio
     | {pane: $p, id: $p.pane_id, key: $k, prio: $prio, idx: $i,
@@ -323,9 +325,10 @@ cmd_ui() {
   done
 
   # --nth=2 searches the hidden search text (field 2 after --with-nth), so a query never lands on
-  # a group header, whose search text is empty.
+  # a group header, whose search text is empty. The user's FZF_DEFAULT_OPTS is left out: --multi or
+  # --print-query there would put more than one line in the pick.
   local picked rc
-  picked=$(if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi | fzf --ansi --delimiter='\t' --with-nth=2.. --nth=2 --accept-nth=1 \
+  picked=$(if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi | env -u FZF_DEFAULT_OPTS -u FZF_DEFAULT_OPTS_FILE fzf --ansi --delimiter='\t' --with-nth=2.. --nth=2 --accept-nth=1 \
     --id-nth=1 --track --no-sort --layout=reverse --header-first \
     --header "$(cmd_header)" \
     --preview "bash '$SELF' preview {1}" --preview-window=right,40%,wrap \

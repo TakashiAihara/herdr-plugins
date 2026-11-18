@@ -94,6 +94,8 @@ A config that is not a JSON object, or has a key of the wrong shape (an empty li
 - Jumping to an agent pane goes through `herdr agent focus`, which marks a done agent as seen, as looking at it in Herdr does.
 - The `alt-*` keys need the terminal to send Option/Alt as Meta (macOS Terminal.app: Settings → Profiles → Keyboard → "Use Option as Meta key"), or move `up` / `down` / `clear` to other keys in `keys` (`alt-1` … `alt-9` are fixed).
 - Group headers are list rows; `Enter` on one moves to the next row.
+- `FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE` are not applied to the picker, since options such as `--multi` or `--print-query` there would break the pick.
+- Panes that report the same agent session id: the first in the list keeps the session-keyed order and priority; the others are keyed by pane id.
 - The popup works on one snapshot of the pane list taken when it opens. Panes opened while it is up appear the next time.
 
 ## Tests
