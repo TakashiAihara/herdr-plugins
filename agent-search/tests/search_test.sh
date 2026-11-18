@@ -35,6 +35,9 @@ if [ "$1 $2" = "pane report-metadata" ]; then
       *) shift ;;
     esac
   done
+  # FAKE_WRITE_STATE_PANE=<pane id> + FAKE_WRITE_STATE_JSON=<json>: overwrite the plugin's
+  # state.json while this call runs, like a writer that finished between restore's plan and now.
+  [ "$id" = "${FAKE_WRITE_STATE_PANE:-}" ] && printf %s "$FAKE_WRITE_STATE_JSON" > "$HERDR_PLUGIN_STATE_DIR/state.json"
 fi
 exit 0
 FAKE
@@ -60,6 +63,8 @@ n=0
 fresh() {
   n=$((n + 1))
   export HERDR_PLUGIN_STATE_DIR="$tmp/state$n" HERDR_PLUGIN_CONFIG_DIR="$tmp/config$n"
+  # Set per command where a test wants one; without it the state file is state.json.
+  unset HERDR_SOCKET_PATH
   cp "$tmp/list.orig" "$tmp/list.json"
   export AGENT_SEARCH_LIST="$tmp/list.json" FAKE_LIST="$tmp/list.json" HERDR_BIN_PATH="$tmp/herdr" FAKE_CALLS="$tmp/calls$n"
   mkdir -p "$HERDR_PLUGIN_CONFIG_DIR"
@@ -72,6 +77,8 @@ ids() { pk lines | cut -f1 | tr '\n' ' '; }
 run() { pk "$@"; }
 # BSD sed has no \x escapes, so drop ESC with tr and the rest of the color code with sed.
 plain() { tr -d '\033' | sed 's/\[[0-9;]*m//g'; }
+# The first 12 hex characters of a string's SHA-256, the tag a session's state file is named for.
+tag() { printf %s "$1" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12; }
 
 
 fresh
@@ -563,6 +570,35 @@ jq '.result.panes[0].agent = 5' "$tmp/list.json" > "$tmp/agent5.json"
 check "an agent that is not a string makes no agent pane" "$(AGENT_SEARCH_LIST="$tmp/agent5.json" pk lines | cut -f1 | tr '\n' ' ')" "w1:p2 w2:p1 w2:p2 "
 AGENT_SEARCH_LIST="$tmp/agent5.json" pk focus w1:p1
 check "and focus treats it as a plain pane" "$(cat "$FAKE_CALLS" | tr '\n' ';')" "workspace focus w1;tab focus w1:t1;"
+
+fresh
+sa="state-$(tag /run/herdr/a.sock).json"
+sb="state-$(tag /run/herdr/b.sock).json"
+HERDR_SOCKET_PATH=/run/herdr/a.sock pk act prio 3 w1:p2
+jq 'del(.result.panes[] | select(.pane_id == "w1:p2"))' "$tmp/list.json" > "$tmp/blist.json"
+AGENT_SEARCH_LIST="$tmp/blist.json" HERDR_SOCKET_PATH=/run/herdr/b.sock pk act prio 5 w2:p2
+check "each session's state file is named after its own socket" \
+  "$(ls "$HERDR_PLUGIN_STATE_DIR" | sort | tr '\n' ' ')" \
+  "$(printf '%s\n' "$sa" "$sa.lock" "$sb" "$sb.lock" | sort | tr '\n' ' ')"
+check "a prune in one session keeps the other's priorities" \
+  "$(jq -c .prio "$HERDR_PLUGIN_STATE_DIR/$sa"; jq -c .prio "$HERDR_PLUGIN_STATE_DIR/$sb")" \
+  '{"w1:p2":3}
+{"w2:p2":5}'
+
+fresh
+check "without HERDR_SOCKET_PATH the state file is still state.json" \
+  "$(pk act sort-next; ls "$HERDR_PLUGIN_STATE_DIR" | sort | tr '\n' ' ')" \
+  "state.json state.json.lock "
+
+fresh
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+echo '{"prio":{"s1":4,"w1:p2":3,"w2:p2":2}}' > "$HERDR_PLUGIN_STATE_DIR/state.json"
+jq 'del(.result.panes[].tokens.prio)' "$tmp/list.json" > "$tmp/lost3.json"
+: > "$FAKE_CALLS"
+check "restore skips a saved priority that changed or went away after it read the state" \
+  "$(FAKE_WRITE_STATE_PANE=w1:p1 FAKE_WRITE_STATE_JSON='{"prio":{"s1":4,"w1:p2":9}}' AGENT_SEARCH_LIST="$tmp/lost3.json" pk restore 2>&1; echo "rc=$?"; cat "$FAKE_CALLS")" \
+  "rc=0
+pane report-metadata w1:p1 --source takashiaihara.agent-search --token prio=4"
 
 if [ "$fails" -gt 0 ]; then echo "$fails failed"; exit 1; fi
 echo "all passed"

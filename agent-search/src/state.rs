@@ -1,4 +1,5 @@
 use serde_json::{Map, Value};
+use sha2::Digest;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -6,6 +7,23 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub struct State(pub Map<String, Value>);
+
+// Every session of this plugin shares HERDR_PLUGIN_STATE_DIR, but each has its own
+// HERDR_SOCKET_PATH, so the state file is named after the session's socket: one session's write,
+// prune or lock never touches another's. The name holds the first 12 hex characters of the
+// socket path's SHA-256; without a socket (a run outside Herdr) it stays `state.json`.
+pub fn file_name(socket_path: Option<&str>) -> String {
+    match socket_path {
+        Some(p) => {
+            let tag: String = sha2::Sha256::digest(p.as_bytes())[..6]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            format!("state-{tag}.json")
+        }
+        None => "state.json".to_string(),
+    }
+}
 
 // jq `//` treats null and false as absent.
 pub fn present(v: Option<&Value>) -> Option<&Value> {
@@ -157,6 +175,17 @@ mod tests {
         crate::testutil::unique_dir(name)
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn the_state_file_is_named_after_the_session_socket() {
+        assert_eq!(file_name(None), "state.json");
+        // sha256("abc") starts with ba7816bf8f01.
+        assert_eq!(file_name(Some("abc")), "state-ba7816bf8f01.json");
+        assert_ne!(
+            file_name(Some("/run/a.sock")),
+            file_name(Some("/run/b.sock"))
+        );
     }
 
     #[test]

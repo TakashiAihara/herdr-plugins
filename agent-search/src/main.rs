@@ -61,10 +61,11 @@ impl Env {
             let base = var("XDG_STATE_HOME").unwrap_or_else(|| format!("{home}/.local/state"));
             format!("{base}/herdr-agent-search")
         });
+        let file = state::file_name(var("HERDR_SOCKET_PATH").as_deref());
         Env {
             herdr: var("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into()),
             config_path: format!("{config_dir}/config.json"),
-            state_path: format!("{state_dir}/state.json"),
+            state_path: format!("{state_dir}/{file}"),
             state_dir,
             list: var("AGENT_SEARCH_LIST"),
             plugin_id: var("HERDR_PLUGIN_ID")
@@ -398,20 +399,27 @@ fn with_detail(msg: String, detail: &str) -> String {
 // Herdr drops tokens when its server restarts: set again the saved priority of every pane that lost it.
 fn restore(env: &Env) -> Res<()> {
     let cfg = env.config_for_restore()?;
-    // The pane list is fetched before the lock is taken, so a slow `herdr pane list` never holds
-    // it (other acts wait at most 2 s for the lock). The lock then covers only reading the saved
-    // priorities, so a concurrent write is never half seen; the herdr calls below do not need it.
+    // The pane list is fetched before any lock is taken, so a slow `herdr pane list` never holds
+    // one up (other acts wait at most 2 s for the lock).
     let list = env.pane_list()?;
-    let st = {
-        let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
-        State::load(&env.state_path)
-    };
-    let todo: Vec<(String, Value)> = rows::build(list.as_ref(), &cfg, &st)?
+    let planned = State::load(&env.state_path);
+    let todo: Vec<(String, String, Value)> = rows::build(list.as_ref(), &cfg, &planned)?
         .into_iter()
         .filter(|r| !r.has_token)
-        .filter_map(|r| st.lookup("prio", &r.key).map(|saved| (r.id, saved)))
+        .filter_map(|r| {
+            planned
+                .lookup("prio", &r.key)
+                .map(|saved| (r.id, r.key, saved))
+        })
         .collect();
-    for (id, saved) in todo {
+    // `act` holds the state lock across its write and its herdr call, so holding the same lock for
+    // each pane's check and call serializes the two: a priority set or cleared after the state
+    // above was read is seen on the re-read, and the pane is skipped instead of overwritten.
+    for (id, key, saved) in todo {
+        let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
+        if State::load(&env.state_path).lookup("prio", &key).as_ref() != Some(&saved) {
+            continue;
+        }
         if let Err(detail) = env.report_priority(&cfg.priority_token, &id, Some(&tostring(&saved)))
         {
             eprintln!(
@@ -670,6 +678,40 @@ mod tests {
         std::fs::write(&env.config_path, r#"{"keys":[]}"#).unwrap_or_else(|e| panic!("{e}"));
         // herdr is not installed here, so the one saved priority fails and is reported, not raised.
         assert!(restore(&env).is_ok());
+    }
+
+    #[test]
+    fn restore_skips_a_saved_priority_that_changed_after_it_read_the_state() {
+        use std::os::unix::fs::PermissionsExt;
+        let panes = json!([
+            {"pane_id": "p1", "agent": "claude"},
+            {"pane_id": "p2", "agent": "claude"}
+        ]);
+        let mut env = env_with("restorerecheck", panes, json!({"prio": {"p1": 4, "p2": 3}}));
+        let dir = std::path::PathBuf::from(&env.state_dir);
+        let calls = dir.join("calls");
+        // The fake herdr stands in for a concurrent `act prio 9 p2`: while restore is in p1's
+        // report-metadata call, the saved priority of p2 becomes 9, so restore must not send p2's
+        // old value 3.
+        let herdr = dir.join("herdr");
+        std::fs::write(
+            &herdr,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> \"{}\"\n[ \"$3\" = \"p1\" ] && printf %s '{}' > \"{}\"\nexit 0\n",
+                calls.display(),
+                r#"{"prio":{"p1":4,"p2":9}}"#,
+                env.state_path,
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("{e}"));
+        env.herdr = herdr.to_string_lossy().into_owned();
+        assert!(restore(&env).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(&calls).unwrap_or_default(),
+            "pane report-metadata p1 --source t --token prio=4\n"
+        );
     }
 
     #[test]
