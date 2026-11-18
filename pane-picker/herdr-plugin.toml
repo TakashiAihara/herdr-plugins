@@ -1,14 +1,17 @@
 id = "takashiaihara.pane-picker"
 name = "Pane picker"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.5"
 description = "Jump to a pane from a popup that searches every pane field and sorts, groups and reorders the list"
 platforms = ["linux", "macos"]
 
+[[build]]
+command = ["sh", "scripts/fetch-or-build.sh"]
+
 [[actions]]
 id = "open"
 title = "Pick a pane"
-command = ["bash", "picker.sh", "open"]
+command = ["target/release/pane-picker", "open"]
 
 [[panes]]
 id = "picker"
@@ -16,4 +19,4 @@ title = "Pane picker"
 placement = "popup"
 width = "80%"
 height = "70%"
-command = ["bash", "picker.sh", "ui"]
+command = ["target/release/pane-picker", "ui"]
