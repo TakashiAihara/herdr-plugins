@@ -46,7 +46,7 @@ Optional. Write `config.json` in the directory printed by:
 herdr plugin config-dir takashiaihara.pane-picker
 ```
 
-Each top-level key replaces the default of the same name. Fields are paths into one entry of `herdr pane list` (`title`, `agent_status`, `tokens.repo`). `tokens.*` means every token value. Suffix a field with `:basename` to keep the last path segment, and a sort field with `:desc` to reverse it. Two virtual fields exist: `prio` (the pane's priority) and `manual` (the order you set with `alt-up` / `alt-down`).
+Lists (`columns`, `search`, `sorts`, `groups`) replace the default list whole; objects (`keys`, `priority`) are merged key by key, so `{"keys": {"sort": "ctrl-x"}}` changes only that key. Fields are paths into one entry of `herdr pane list` (`title`, `agent_status`, `tokens.repo`). `tokens.*` means every token value. Suffix a field with `:basename` to keep the last path segment, and a sort field with `:desc` to reverse it (`cwd:basename:desc`). Typing filters on the `search` fields only. Two virtual fields exist: `prio` (the pane's priority) and `manual` (the order you set with `alt-up` / `alt-down`).
 
 The defaults:
 
@@ -80,18 +80,21 @@ The defaults:
 }
 ```
 
-A config that is not a JSON object stops the picker with a message instead of falling back to the defaults.
+A config that is not a JSON object, or has a key of the wrong shape (an empty `sorts`, an empty key name), stops the picker with a message instead of falling back to the defaults.
 
 ## State
 
-`state.json` in the plugin state directory holds the current sort and grouping, the manual order, and priorities. A pane is keyed by its agent session id when it has one, so its order and priority survive a Herdr restart that renumbers panes; other panes are keyed by pane id. Priorities of panes that are gone are dropped on the next change.
+`state.json` in the plugin state directory holds the current sort and grouping, the manual order, and priorities. A pane is keyed by its agent session id when it has one, so its order and priority survive a Herdr restart that renumbers panes; other panes are keyed by pane id. Priorities and positions of panes that are gone are dropped on every change.
 
 ## Limits
 
 - Only panes of the Herdr server the popup runs on are listed. `herdr pane list` covers one server; panes on other machines are not merged in.
 - Herdr can focus a pane by id only when an agent runs in it (`herdr agent focus`). Any other pane is reached by focusing its workspace and tab, which lands on the pane only when it is alone in its tab.
-- `alt-up` / `alt-down` reorder within the current view. Under a priority sort, moving a pane past one with a different priority has no visible effect until you switch to the manual sort.
+- `alt-up` / `alt-down` trade the manual positions of the selected pane and its neighbor in the same group; the rest of the manual order stays. Under a sort where `manual` is only a tie-breaker, the swap shows only between panes that tie on the earlier keys.
+- Jumping to an agent pane goes through `herdr agent focus`, which marks a done agent as seen, as looking at it in Herdr does.
+- The `alt-*` keys need the terminal to send Option/Alt as Meta (macOS Terminal.app: Settings → Profiles → Keyboard → "Use Option as Meta key"), or move `up` / `down` / `clear` to other keys in `keys` (`alt-1` … `alt-9` are fixed).
 - Group headers are list rows; `Enter` on one moves to the next row.
+- The popup works on one snapshot of the pane list taken when it opens. Panes opened while it is up appear the next time.
 
 ## Tests
 
@@ -99,4 +102,4 @@ A config that is not a JSON object stops the picker with a message instead of fa
 bash tests/picker_test.sh
 ```
 
-Runs the list building, state changes and focus against a canned pane list and a fake `herdr`. The fzf UI itself is not driven.
+Runs the list building, state changes, focus and the popup wiring against a canned pane list, a fake `herdr` and a fake `fzf` that records its arguments. A real fzf session is not driven.
