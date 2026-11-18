@@ -7,9 +7,14 @@ mod testutil {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         for n in 0..1000u32 {
-            // Under the crate's target/ (ignored, removed by `cargo clean`), not the system temp
-            // directory: a failed assertion skips any cleanup, and /tmp is often a small tmpfs.
-            let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp");
+            // Under the target directory (CARGO_TARGET_DIR when set; removed by `cargo clean`), not
+            // the system temp directory: a failed assertion skips any cleanup, and /tmp is often a
+            // small tmpfs.
+            let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+                || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target"),
+                std::path::PathBuf::from,
+            );
+            let base = target.join("test-tmp");
             std::fs::create_dir_all(&base)
                 .unwrap_or_else(|e| panic!("cannot create {base:?}: {e}"));
             let dir = base.join(format!(
