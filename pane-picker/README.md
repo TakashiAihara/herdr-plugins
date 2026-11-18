@@ -95,7 +95,7 @@ A config that is not a JSON object, or has a key of the wrong shape (an empty li
 - The `alt-*` keys need the terminal to send Option/Alt as Meta (macOS Terminal.app: Settings → Profiles → Keyboard → "Use Option as Meta key"), or move `up` / `down` / `clear` to other keys in `keys` (`alt-1` … `alt-9` are fixed).
 - Group headers are list rows; `Enter` on one moves to the next row.
 - `FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE` are not applied to the picker, since options such as `--multi` or `--print-query` there would break the pick.
-- Panes that report the same agent session id: the first in the list keeps the session-keyed order and priority; the others are keyed by pane id.
+- Panes that report the same agent session id: the first in the list keeps the session-keyed order and priority; the others are keyed by pane id while the duplicate lasts. When it ends, the remaining pane takes the session's order and priority, and what was set on it by pane id is dropped.
 - The popup works on one snapshot of the pane list taken when it opens. Panes opened while it is up appear the next time.
 
 ## Tests
