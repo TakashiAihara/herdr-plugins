@@ -46,7 +46,7 @@ Optional. Write `config.json` in the directory printed by:
 herdr plugin config-dir takashiaihara.pane-picker
 ```
 
-Lists (`columns`, `search`, `sorts`, `groups`) replace the default list whole; objects (`keys`, `priority`) are merged key by key, so `{"keys": {"sort": "ctrl-x"}}` changes only that key. Fields are paths into one entry of `herdr pane list` (`title`, `agent_status`, `tokens.repo`). `tokens.*` means every token value. Suffix a field with `:basename` to keep the last path segment, and a sort field with `:desc` to reverse it (`cwd:basename:desc`). Typing filters on the `search` fields only. Two virtual fields exist: `prio` (the pane's priority) and `manual` (the order you set with `alt-up` / `alt-down`).
+Lists (`columns`, `search`, `sorts`, `groups`) replace the default list whole; objects (`keys`, `priority`) are merged key by key, so `{"keys": {"sort": "ctrl-x"}}` changes only that key. Fields are paths into one entry of `herdr pane list` (`title`, `agent_status`, `tokens.repo`). `tokens.*` means every token value. Suffix a field with `:basename` to keep the last path segment, and a sort field with `:desc` to reverse it (`cwd:basename:desc`). Typing filters on the `search` fields only. Two virtual fields exist: `prio` (the pane's priority; usable in `sorts` and `columns`) and `manual` (the order you set with `alt-up` / `alt-down`; usable in `sorts`).
 
 The defaults:
 
@@ -80,7 +80,7 @@ The defaults:
 }
 ```
 
-A config that is not a JSON object, or has a key of the wrong shape (an empty `sorts`, an empty key name), stops the picker with a message instead of falling back to the defaults.
+A config that is not a JSON object, or has a key of the wrong shape (an empty list, duplicate sort or group names, an empty key name), stops the picker with a message instead of falling back to the defaults.
 
 ## State
 

@@ -50,11 +50,13 @@ config() {
   fi
   jq -e '
     def strs: type == "array" and all(.[]; type == "string" and . != "");
-    def named: type == "array" and length > 0 and all(.[]; type == "object" and (.name | type) == "string" and (.by | strs));
-    (.columns | strs) and (.search | strs) and (.sorts | named) and (.groups | named)
+    def named: type == "array" and length > 0
+      and all(.[]; type == "object" and (.name | type) == "string" and .name != "" and (.by | strs))
+      and (map(.name) | length == (unique | length));
+    (.columns | strs and length > 0) and (.search | strs and length > 0) and (.sorts | named) and (.groups | named)
     and (.priority.source | type) == "string"
-    and ([.keys.sort, .keys.group, .keys.up, .keys.down, .keys.clear] | strs)' <<<"$merged" >/dev/null ||
-    die "$CONFIG: columns and search must be lists of fields, sorts and groups non-empty lists of {name, by}, priority.source a string, and keys sort/group/up/down/clear non-empty strings"
+    and ([.keys.sort, .keys.group, .keys.up, .keys.down, .keys.clear] | strs)' <<<"$merged" >/dev/null 2>&1 ||
+    die "$CONFIG: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} with unique names, priority.source a string, and keys sort/group/up/down/clear non-empty strings"
   printf '%s' "$merged"
 }
 
@@ -91,7 +93,7 @@ def field($p; $pane):
   | ($parts[0] | split(".")) as $path
   | (if $path[-1] == "*" then ($pane | getpath($path[:-1]) // {} | [.[]?] | map(tostring) | join(" "))
      else ($pane | getpath($path)) end) as $v
-  | if $parts[1] == "basename" and $v != null then ($v | tostring | split("/") | map(select(. != "")) | last)
+  | if $parts[1] == "basename" and $v != null then (($v | tostring | split("/") | map(select(. != "")) | last) // $v)
     else $v end;
 
 def blank: . == null or . == "";
@@ -103,12 +105,14 @@ def clean: tostring | gsub("[\u0000-\u001f\u007f]"; " ");
 def spec: if endswith(":desc") then {f: .[:-5], desc: true} else {f: ., desc: false} end;
 
 ($cfg[0]) as $c | ($st[0]) as $s
-| (.result.panes // []) | to_entries
+| if (.result.panes | type) != "array" then error("herdr pane list has no .result.panes list") else . end
+| .result.panes | to_entries
 | map(.key as $i | .value as $p
-    | (if ($p.agent_session.value // "") != "" then $p.agent_session.value else $p.pane_id end) as $k
+    | (($p.agent_session | objects | .value | strings) // "") as $sid
+    | (if $sid != "" then $sid else $p.pane_id end) as $k
     | (($s.prio // {})[$k]
         // (if $c.priority.source != "manual" then ([field($c.priority.source; $p) | tonumber?] | first) else null end)) as $prio
-    | {pane: $p, id: $p.pane_id, key: $k, prio: $prio,
+    | {pane: $p, id: $p.pane_id, key: $k, prio: $prio, idx: $i,
        manual: (($s.order // {})[$k] // (1000000 + $i))})
 | ($c.sorts | map(.name) | index($s.sort // "") // 0) as $si
 | ($c.groups | map(.name) | index($s.group // "") // 0) as $gi
@@ -158,9 +162,10 @@ cmd_lines() {
   jq -rs "$JQ_WIDTH"'
     (map(.cols) | transpose | map(map(width) | max)) as $w
     | . as $all
+    | (map(.group) | reduce .[] as $g ([]; if index([$g]) then . else . + [$g] end)) as $gs
     | foreach .[] as $r ({prev: null};
         .out = (if $r.group != null and $r.group != .prev
-                then ["-:\($r.group)\t\u001b[1m── \($r.group) (\($all | map(select(.group == $r.group)) | length)) ──\u001b[0m\t"]
+                then ["-:\($gs | index([$r.group]))\t\u001b[1m── \($r.group) (\($all | map(select(.group == $r.group)) | length)) ──\u001b[0m\t"]
                 else [] end)
                + ["\($r.id)\t\([$r.cols, $w] | transpose | to_entries | map(if .key == ($w | length) - 1 then .value[0] else .value[0] + (" " * ((.value[1] - (.value[0] | width)) | if . < 0 then 0 else . end)) end) | join("  "))\t\u001b[2m\($r.search)\u001b[0m"]
         | .prev = $r.group;
@@ -202,18 +207,18 @@ cmd_act() {
       local dir=${2:-} id=${3:-}
       [ "$dir" = up ] || [ "$dir" = down ] || die "move needs up or down"
       [ -n "$id" ] || die "move needs a pane id"
-      # Only the two panes trade their manual positions, so the rest of the manual order is kept
-      # whatever sort is on screen. The neighbor must be in the same group: groups are rebuilt on
-      # every reload, so a swap across a header would snap back.
-      # shortcut: after panes close, a default position can equal a saved one; the tie is broken by
-      # list order and one press may look like a no-op.
+      # The manual order is renumbered 0..n-1 (keeping its sequence, ties broken by list order) and
+      # then only the two panes trade numbers, so the rest of it is kept whatever sort is on screen and
+      # a saved position can never tie with a default one. The neighbor must be in the same group:
+      # groups are rebuilt on every reload, so a swap across a header would snap back.
       r=$(rows) || exit 1
       new=$(jq -n --argjson s "$st" --arg dir "$dir" --arg id "$id" '
         [inputs] as $r
         | ($r | map(.id) | index($id)) as $i
         | (if $i == null then null elif $dir == "up" then $i - 1 else $i + 1 end) as $j
         | if $j == null or $j < 0 or $j >= ($r | length) or $r[$j].group != $r[$i].group then $s
-          else $s | .order = ((.order // {}) + {($r[$i].key): $r[$j].manual, ($r[$j].key): $r[$i].manual})
+          else ($r | sort_by([.manual, .idx]) | map(.key) | to_entries | map({key: .value, value: .key}) | from_entries) as $n
+               | $s | .order = ($n + {($r[$i].key): $n[$r[$j].key], ($r[$j].key): $n[$r[$i].key]})
           end' <<<"$r") || die "cannot update the state"
       ;;
     prio|clear)
@@ -247,7 +252,7 @@ cmd_act() {
 cmd_focus() {
   local id=${1:-} pane
   case "$id" in ""|-:*) exit 0 ;; esac
-  pane=$(pane_list | jq -c --arg id "$id" '.result.panes[]? | select(.pane_id == $id)') || die "cannot read the pane list"
+  pane=$(pane_list | jq -c --arg id "$id" 'first(.result.panes[]? | select(.pane_id == $id))') || die "cannot read the pane list"
   [ -n "$pane" ] || die "pane $id is gone"
   if [ "$(jq -r '.agent // empty' <<<"$pane")" != "" ] && "$HERDR" agent focus "$id" >/dev/null 2>&1; then
     return 0
@@ -261,7 +266,7 @@ cmd_preview() {
   pane_list | jq -r --arg id "$id" '
     .result.panes[]? | select(.pane_id == $id)
     | (del(.tokens, .scroll, .revision) | to_entries) + (.tokens // {} | to_entries | map(.key |= "tokens.\(.)"))
-    | .[] | select(.value != null) | "\(.key)\t\(.value | if type == "object" then tojson else tostring end)"'
+    | .[] | select(.value != null) | "\(.key)\t\(.value | tostring | gsub("[\u0000-\u001f\u007f]"; " "))"'
 }
 
 # True when version $1 (x.y[.z]) is at least $2 (x.y).
@@ -287,11 +292,11 @@ cmd_ui() {
   cfg=$(config 2>&1) || fail_in_popup "${cfg#pane-picker: }"
 
   if [ -z "${PANE_PICKER_LIST:-}" ]; then
-    local snap
-    snap=$(mktemp) || fail_in_popup "cannot create a temporary file"
-    trap 'rm -f "$snap"' EXIT
-    "$HERDR" pane list > "$snap" || fail_in_popup "herdr pane list failed"
-    export PANE_PICKER_LIST=$snap
+    # Global, not local: the EXIT trap runs after cmd_ui has returned.
+    SNAP=$(mktemp) || fail_in_popup "cannot create a temporary file"
+    trap 'rm -f "$SNAP"' EXIT
+    "$HERDR" pane list > "$SNAP" || fail_in_popup "herdr pane list failed"
+    export PANE_PICKER_LIST=$SNAP
   fi
 
   local lines
@@ -317,14 +322,16 @@ cmd_ui() {
   # --nth=2 searches the hidden search text (field 2 after --with-nth), so a query never lands on
   # a group header, whose search text is empty.
   local picked rc
-  picked=$(printf '%s\n' "$lines" | fzf --ansi --delimiter='\t' --with-nth=2.. --nth=2 --accept-nth=1 \
+  picked=$(if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi | fzf --ansi --delimiter='\t' --with-nth=2.. --nth=2 --accept-nth=1 \
     --id-nth=1 --track --no-sort --layout=reverse --header-first \
     --header "$(cmd_header)" \
     --preview "bash '$SELF' preview {1}" --preview-window=right,40%,wrap \
     "${binds[@]}")
   rc=$?
+  local msg
   case $rc in
-    0) cmd_focus "$picked" || fail_in_popup "cannot focus $picked" ;;
+    # Inside $( ), die in cmd_focus ends only the subshell, so the message reaches the popup.
+    0) msg=$(cmd_focus "$picked" 2>&1) || { msg=${msg##*$'\n'}; fail_in_popup "${msg#pane-picker: }"; } ;;
     1|130) exit 0 ;;
     *) fail_in_popup "fzf exited with $rc" ;;
   esac

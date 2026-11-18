@@ -12,6 +12,7 @@ cat > "$tmp/herdr" <<'FAKE'
 #!/usr/bin/env bash
 echo "$*" >> "$FAKE_CALLS"
 [ "$1 $2" = "agent focus" ] && [ -n "${FAKE_AGENT_FOCUS_FAIL:-}" ] && exit 1
+if [ "$1 $2" = "workspace focus" ] && [ -n "${FAKE_WS_FAIL:-}" ]; then echo "herdr: no such workspace" >&2; exit 1; fi
 if [ "$1 $2" = "pane list" ]; then [ -n "${FAKE_PANE_LIST_FAIL:-}" ] && exit 1; cat "$FAKE_LIST"; fi
 exit 0
 FAKE
@@ -62,7 +63,7 @@ fresh
 run act group-next
 check "group-next moves to repo" "$(run header | head -1)" "sort: priority  group: repo"
 check "groups by repo, falls back to the cwd basename, in first-seen order" "$(ids)" \
-  "-:alpha w1:p1 w2:p1 -:beta w1:p2 -:gamma w2:p2 "
+  "-:0 w1:p1 w2:p1 -:1 w1:p2 -:2 w2:p2 "
 check "group headers show the name and count" \
   "$(bash "$picker" lines | grep '^-:' | cut -f2 | plain | tr '\n' ';')" "── alpha (2) ──;── beta (1) ──;── gamma (1) ──;"
 check "group headers have no search text" "$(bash "$picker" lines | grep '^-:' | cut -f3 | tr -d '\n')" ""
@@ -76,7 +77,7 @@ export PANE_PICKER_LIST="$tmp/delta.json"
 run act group-next
 run act prio 2 w2:p2
 check "the repo token wins over the cwd, and the group of the top pane comes first" "$(ids)" \
-  "-:delta w2:p2 -:alpha w1:p1 w2:p1 -:beta w1:p2 "
+  "-:0 w2:p2 -:1 w1:p1 w2:p1 -:2 w1:p2 "
 export PANE_PICKER_LIST="$tmp/list.json"
 
 fresh
@@ -102,7 +103,7 @@ run act prio 6 w1:p2
 jq '.result.panes |= map(select(.pane_id != "w1:p2"))' "$tmp/list.json" > "$tmp/closed.json"
 check "closed panes are dropped from priorities and positions on the next write" \
   "$(PANE_PICKER_LIST="$tmp/closed.json" bash "$picker" act prio 1 w2:p2; jq -c '[.prio, (.order | keys)]' "$HERDR_PLUGIN_STATE_DIR/state.json")" \
-  '[{"s3":4,"w2:p2":1},["s1"]]'
+  '[{"s3":4,"w2:p2":1},["s1","s3","w2:p2"]]'
 echo garbage > "$tmp/garbage.json"
 check "a failed pane list fails the move and leaves the state untouched" \
   "$(PANE_PICKER_LIST="$tmp/garbage.json" bash "$picker" act move down w1:p1 2>/dev/null; echo "rc=$?"; jq -c '.prio' "$HERDR_PLUGIN_STATE_DIR/state.json")" \
@@ -138,9 +139,9 @@ fresh
 run act group-next
 run act move down w2:p1
 check "move does not cross a group header" "$(ids)$(jq -c '.order' "$HERDR_PLUGIN_STATE_DIR/state.json")" \
-  "-:alpha w1:p1 w2:p1 -:beta w1:p2 -:gamma w2:p2 {}"
+  "-:0 w1:p1 w2:p1 -:1 w1:p2 -:2 w2:p2 {}"
 run act move up w2:p1
-check "move inside a group works while grouped" "$(ids)" "-:alpha w2:p1 w1:p1 -:beta w1:p2 -:gamma w2:p2 "
+check "move inside a group works while grouped" "$(ids)" "-:0 w2:p1 w1:p1 -:1 w1:p2 -:2 w2:p2 "
 
 fresh
 jq '.result.panes[3].tokens.prio = "7"' "$tmp/list.json" > "$tmp/fieldprio.json"
@@ -156,7 +157,7 @@ fresh
 echo '{"groups":[{"name":"ws","by":["workspace_id"]}],"sorts":[{"name":"title","by":["title:desc"]}]}' \
   > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "configured sorts and groups replace the defaults" "$(run header | head -1)" "sort: title  group: ws"
-check "descending text sort inside configured groups" "$(ids)" "-:w2 w2:p1 w2:p2 -:w1 w1:p2 w1:p1 "
+check "descending text sort inside configured groups" "$(ids)" "-:0 w2:p1 w2:p2 -:1 w1:p2 w1:p1 "
 
 fresh
 echo '{"sorts":[{"name":"dir","by":["cwd:basename:desc"]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
@@ -201,7 +202,7 @@ check "a partial keys object keeps the other default keys" "$(run header | sed -
   "ctrl-x sort  ctrl-g group  alt-up/alt-down move  alt-1..9 prio  alt-0 clear"
 
 shape_error() {
-  printf '%s\n%s' "pane-picker: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be lists of fields, sorts and groups non-empty lists of {name, by}, priority.source a string, and keys sort/group/up/down/clear non-empty strings" "rc=1"
+  printf '%s\n%s' "pane-picker: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} with unique names, priority.source a string, and keys sort/group/up/down/clear non-empty strings" "rc=1"
 }
 fresh
 echo '{"sorts":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
@@ -218,6 +219,64 @@ echo 'not json' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a broken config fails loudly" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
   "pane-picker: $HERDR_PLUGIN_CONFIG_DIR/config.json is not a JSON object
 rc=1"
+
+fresh
+echo '{"sorts":[{"name":"a","by":["title"]},{"name":"a","by":["cwd"]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "duplicate sort names are a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+fresh
+echo '{"priority":"manual"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a priority that is not an object is a config error, without raw jq errors" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+fresh
+echo '{"search":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an empty search list is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+fresh
+echo '{"columns":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an empty column list is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+fresh
+echo '{"keys":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "keys that are not an object are a config error, without raw jq errors" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+
+fresh
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+echo '{"sort":"status","order":{"w2:p2":1000001}}' > "$HERDR_PLUGIN_STATE_DIR/state.json"
+run act move down w1:p1
+run act sort-next
+run act sort-next
+check "renumbering breaks manual ties by list order, not by the sort on screen" "$(run header | head -1)$(ids)" \
+  "sort: manual  group: nonew2:p2 w1:p2 w1:p1 w2:p1 "
+
+fresh
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+echo '{"sort":"manual","order":{"s1":1000001}}' > "$HERDR_PLUGIN_STATE_DIR/state.json"
+run act move down w1:p1
+check "move works when a saved position ties with a default one" "$(ids)" "w1:p2 w1:p1 w2:p1 w2:p2 "
+
+fresh
+jq '.result.panes[1].cwd = "/"' "$tmp/list.json" > "$tmp/root.json"
+run act group-next
+check "the basename of / is /" \
+  "$(PANE_PICKER_LIST="$tmp/root.json" bash "$picker" lines | grep '^-:1' | cut -f2 | plain)" "── / (1) ──"
+
+fresh
+jq '.result.panes[0].agent_session = "s1"' "$tmp/list.json" > "$tmp/strsession.json"
+PANE_PICKER_LIST="$tmp/strsession.json" bash "$picker" act prio 2 w1:p1
+check "a session that is not an object falls back to the pane id" "$(jq -c .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"w1:p1":2}'
+
+fresh
+echo '{"result":{}}' > "$tmp/noresult.json"
+check "a pane list without .result.panes fails" "$(PANE_PICKER_LIST="$tmp/noresult.json" bash "$picker" lines 2>&1 >/dev/null | tail -1; echo "rc=${PIPESTATUS[0]}")" \
+  "pane-picker: cannot read the pane list
+rc=1"
+
+fresh
+jq '.result.panes[1].title = "x\u001b]0;evil\u0007y"' "$tmp/list.json" > "$tmp/esc.json"
+check "preview strips control characters" \
+  "$(PANE_PICKER_LIST="$tmp/esc.json" bash "$picker" preview w1:p2 | grep '^title' | tr -d '\033\007' | cut -f2)" "x ]0;evil y"
+
+fresh
+jq '.result.panes += [.result.panes[1]]' "$tmp/list.json" > "$tmp/dup.json"
+PANE_PICKER_LIST="$tmp/dup.json" bash "$picker" focus w1:p2
+check "a duplicated pane id is focused once" "$(cat "$FAKE_CALLS" | tr '\n' ';')" "workspace focus w1;tab focus w1:t2;"
 
 fresh
 check "enter on a pane accepts" "$(run enter w1:p1)" "accept"
@@ -299,7 +358,28 @@ Press Enter.
 rc=1"
 
 fresh
+check "ui shows a focus failure in the popup" "$(FAKE_FZF_OUT=w7:p7 ui 2>&1; echo "rc=$?")" "pane-picker: pane w7:p7 is gone
+Press Enter.
+rc=1"
+fresh
+check "ui shows the last line of a focus failure" "$(FAKE_WS_FAIL=1 FAKE_FZF_OUT=w1:p2 ui 2>&1; echo "rc=$?")" "pane-picker: cannot focus w1:p2
+Press Enter.
+rc=1"
+fresh
+echo '{"sorts":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "ui shows a config error in one line" "$(ui 2>&1 | wc -l | tr -d ' ')" "2"
+fresh
+echo '{"result":{"panes":[]}}' > "$tmp/nopanes.json"
+PANE_PICKER_LIST="$tmp/nopanes.json" FAKE_FZF_RC=1 ui
+check "ui gives fzf no rows for an empty pane list" "$(wc -c < "$tmp/fzf-args$n.stdin" | tr -d ' ')" "0"
+
+fresh
 export FAKE_LIST="$tmp/list.json"
+mkdir -p "$tmp/uitmp"
+check "a jump exits 0 and removes the snapshot" \
+  "$(unset PANE_PICKER_LIST; TMPDIR="$tmp/uitmp" FAKE_FZF_OUT=w1:p2 ui 2>&1; echo "rc=$?"; ls "$tmp/uitmp" | wc -l | tr -d ' ')" "rc=0
+0"
+: > "$FAKE_CALLS"
 check "ui takes one pane list snapshot for the list and the jump" \
   "$(unset PANE_PICKER_LIST; FAKE_FZF_OUT=w1:p1 ui; cat "$FAKE_CALLS" | tr '\n' ';')" "pane list;agent focus w1:p1;"
 check "ui shows a failed herdr pane list in the popup" \
