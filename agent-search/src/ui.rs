@@ -2,7 +2,7 @@ use crate::config::{Config, Keys};
 use crate::keys::{self, Bind};
 use crate::rows::{self, Row};
 use crate::state::State;
-use crate::{act, focus_in, header_text, preview_text, Env, Res, Snapshot};
+use crate::{act, focus_in, header_text, preview_text, sync_priorities, Env, Res, Snapshot};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -35,13 +35,15 @@ pub enum Action {
 pub struct Binds(Vec<(Bind, Op)>);
 
 impl Binds {
-    pub fn new(k: &Keys) -> Res<Binds> {
+    // Only alt-1..alt-<max> set a priority; the rest of the digits do nothing (they stay reserved
+    // in key validation either way).
+    pub fn new(k: &Keys, max: u8) -> Res<Binds> {
         let mut list = Vec::new();
         let ops = [Op::SortNext, Op::GroupNext, Op::Up, Op::Down, Op::Clear];
         for ((_, bind), op) in keys::validate(k)?.into_iter().zip(ops) {
             list.push((bind, op));
         }
-        for n in 1..=9u8 {
+        for n in 1..=max {
             let code = KeyCode::Char(char::from(b'0' + n));
             list.push((
                 Bind {
@@ -111,22 +113,33 @@ impl App {
     }
 
     // Rebuilds the visible items; the cursor stays on pane `keep` when it is still shown, else goes to
-    // the first pane.
+    // the first pane. A header opens wherever the group path diverges from the previous row's, never
+    // selectable and never matching the search, so a header with no matching agents is not shown.
     fn refresh(&mut self, keep: Option<String>) {
         let hits = matching(&self.rows, &self.query);
-        let count = |g: &str| {
+        let count = |prefix: &[String]| {
             hits.iter()
-                .filter(|&&i| self.rows[i].group.as_deref() == Some(g))
+                .filter(|&&i| self.rows[i].groups.starts_with(prefix))
                 .count()
         };
         let mut items = Vec::new();
-        let mut prev: Option<&str> = None;
+        let mut prev: &[String] = &[];
         for &i in &hits {
-            let group = self.rows[i].group.as_deref();
-            if let Some(g) = group.filter(|g| prev != Some(*g)) {
-                items.push(Item::Header(format!("── {g} ({}) ──", count(g))));
+            let groups = &self.rows[i].groups;
+            let common = groups
+                .iter()
+                .zip(prev.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            for d in common..groups.len() {
+                items.push(Item::Header(format!(
+                    "{}▾ {} ({})",
+                    "  ".repeat(d),
+                    groups[d],
+                    count(&groups[..=d])
+                )));
             }
-            prev = group;
+            prev = groups.as_slice();
             items.push(Item::Pane(i));
         }
         self.cur = keep
@@ -267,7 +280,11 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
                 h.clone(),
                 Style::new().add_modifier(Modifier::BOLD),
             ))),
-            Item::Pane(i) => ListItem::new(rows::display(&app.rows[*i], &widths)),
+            Item::Pane(i) => ListItem::new(format!(
+                "{}{}",
+                "  ".repeat(app.rows[*i].groups.len()),
+                rows::display(&app.rows[*i], &widths)
+            )),
         })
         .collect();
     let selected = app.selected_id().map(|_| app.cur);
@@ -317,11 +334,21 @@ fn show_error(term: &mut DefaultTerminal, msg: &str) {
     }
 }
 
+// Opening the popup first copies the priority tokens agents set themselves into the state.
+pub(crate) fn open(env: &Env, cfg: &Config, snap: &mut Snapshot) -> Res<App> {
+    sync_priorities(env, cfg, snap)?;
+    Ok(App::new(snap.rows(
+        env,
+        cfg,
+        &State::load(&env.state_path),
+    )?))
+}
+
 // The popup uses this one config for the list, the keys and every act.
 fn session(env: &Env, cfg: &Config, term: &mut DefaultTerminal) -> Res<()> {
-    let binds = Binds::new(&cfg.keys)?;
+    let binds = Binds::new(&cfg.keys, cfg.priority_max)?;
     let mut snap = Snapshot::empty();
-    let mut app = App::new(snap.rows(env, cfg, &State::load(&env.state_path))?);
+    let mut app = open(env, cfg, &mut snap)?;
     loop {
         let st = State::load(&env.state_path);
         let list = snap.get(env)?;
@@ -372,10 +399,18 @@ mod tests {
             key: id.into(),
             manual: Value::Null,
             idx: 0,
+            prio: None,
             has_token: false,
-            group: group.map(String::from),
+            groups: group.map(|g| vec![g.to_string()]).unwrap_or_default(),
             cols: vec![format!("title {id}")],
             search: search.into(),
+        }
+    }
+
+    fn row_path(id: &str, groups: &[&str], search: &str) -> Row {
+        Row {
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            ..row(id, None, search)
         }
     }
 
@@ -385,6 +420,16 @@ mod tests {
             row("a2", Some("alpha"), "write docs alpha"),
             row("b1", Some("beta"), "review beta"),
             row("c1", Some("gamma"), "deploy gamma"),
+        ])
+    }
+
+    fn nested() -> App {
+        App::new(vec![
+            row_path("a1", &["alpha"], "fix login alpha"),
+            row_path("a2", &["alpha"], "write docs alpha"),
+            row_path("b1", &["beta", "w1"], "review beta"),
+            row_path("b2", &["beta", "w2"], "deploy beta"),
+            row_path("c1", &["beta", "w2"], "build beta"),
         ])
     }
 
@@ -411,7 +456,7 @@ mod tests {
             down: "alt-down".into(),
             clear: "alt-0".into(),
         };
-        let binds = Binds::new(&keys("ctrl-s")).unwrap_or_else(|e| panic!("{e}"));
+        let binds = Binds::new(&keys("ctrl-s"), 9).unwrap_or_else(|e| panic!("{e}"));
         let mut app = grouped();
         let press = |app: &mut App, c, m| handle_key(app, &binds, key(c, m));
         assert_eq!(
@@ -430,7 +475,29 @@ mod tests {
             press(&mut app, KeyCode::Char('7'), KeyModifiers::ALT),
             Action::Op(Op::Prio(7))
         );
-        assert!(Binds::new(&keys("ctrl-nonsense")).is_err());
+        assert!(Binds::new(&keys("ctrl-nonsense"), 9).is_err());
+    }
+
+    #[test]
+    fn alt_digits_above_the_priority_max_do_nothing() {
+        let binds = Binds::new(&default_keys("ctrl-s"), 5).unwrap_or_else(|e| panic!("{e}"));
+        let mut app = grouped();
+        assert_eq!(
+            handle_key(&mut app, &binds, key(KeyCode::Char('5'), KeyModifiers::ALT)),
+            Action::Op(Op::Prio(5))
+        );
+        for digit in '6'..='9' {
+            assert_eq!(
+                handle_key(
+                    &mut app,
+                    &binds,
+                    key(KeyCode::Char(digit), KeyModifiers::ALT)
+                ),
+                Action::None,
+                "alt-{digit}"
+            );
+            assert!(app.query.is_empty(), "alt-{digit} must not type");
+        }
     }
 
     #[test]
@@ -438,15 +505,42 @@ mod tests {
         assert_eq!(
             shown(&grouped()),
             [
-                "── alpha (2) ──",
+                "▾ alpha (2)",
                 "a1",
                 "a2",
-                "── beta (1) ──",
+                "▾ beta (1)",
                 "b1",
-                "── gamma (1) ──",
+                "▾ gamma (1)",
                 "c1"
             ]
         );
+    }
+
+    #[test]
+    fn nested_groups_show_a_header_per_level_counting_the_matches_under_it() {
+        assert_eq!(
+            shown(&nested()),
+            [
+                "▾ alpha (2)",
+                "a1",
+                "a2",
+                "▾ beta (3)",
+                "  ▾ w1 (1)",
+                "b1",
+                "  ▾ w2 (2)",
+                "b2",
+                "c1"
+            ]
+        );
+        let mut app = nested();
+        for c in "deploy".chars() {
+            app.type_char(c);
+        }
+        // Only the headers over matching agents are shown, with their count of matches.
+        assert_eq!(shown(&app), ["▾ beta (1)", "  ▾ w2 (1)", "b2"]);
+        app.query.clear();
+        app.refresh(None);
+        assert_eq!(shown(&app).len(), 9);
     }
 
     #[test]
@@ -455,16 +549,13 @@ mod tests {
         for c in "alpha".chars() {
             app.type_char(c);
         }
-        assert_eq!(shown(&app), ["── alpha (2) ──", "a1", "a2"]);
+        assert_eq!(shown(&app), ["▾ alpha (2)", "a1", "a2"]);
         app.query.clear();
         for c in "w".chars() {
             app.type_char(c);
         }
         // "w" is in "write docs alpha", "review beta" and "fix login..." has none; order stays a2, b1.
-        assert_eq!(
-            shown(&app),
-            ["── alpha (1) ──", "a2", "── beta (1) ──", "b1"]
-        );
+        assert_eq!(shown(&app), ["▾ alpha (1)", "a2", "▾ beta (1)", "b1"]);
         app.backspace();
         assert_eq!(shown(&app).len(), 7);
     }
@@ -477,13 +568,16 @@ mod tests {
         }
         assert!(app.items.is_empty());
         assert_eq!(app.selected_id(), None);
-        let binds = Binds::new(&Keys {
-            sort: "ctrl-s".into(),
-            group: "ctrl-g".into(),
-            up: "alt-up".into(),
-            down: "alt-down".into(),
-            clear: "alt-0".into(),
-        })
+        let binds = Binds::new(
+            &Keys {
+                sort: "ctrl-s".into(),
+                group: "ctrl-g".into(),
+                up: "alt-up".into(),
+                down: "alt-down".into(),
+                clear: "alt-0".into(),
+            },
+            5,
+        )
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             handle_key(&mut app, &binds, key(KeyCode::Enter, KeyModifiers::NONE)),
@@ -537,13 +631,16 @@ mod tests {
 
     #[test]
     fn plain_keys_edit_the_query_and_enter_focuses() {
-        let binds = Binds::new(&Keys {
-            sort: "ctrl-s".into(),
-            group: "ctrl-g".into(),
-            up: "alt-up".into(),
-            down: "alt-down".into(),
-            clear: "alt-0".into(),
-        })
+        let binds = Binds::new(
+            &Keys {
+                sort: "ctrl-s".into(),
+                group: "ctrl-g".into(),
+                up: "alt-up".into(),
+                down: "alt-down".into(),
+                clear: "alt-0".into(),
+            },
+            5,
+        )
         .unwrap_or_else(|e| panic!("{e}"));
         let mut app = grouped();
         handle_key(
@@ -603,8 +700,11 @@ mod tests {
         assert!(screen[1].starts_with("ctrl-s sort"));
         assert!(screen[2].starts_with("> "));
         let all = screen.join("\n");
-        assert!(all.contains("── alpha (2) ──"));
-        assert!(all.contains("> title a2"));
+        assert!(all.contains("▾ alpha (2)"));
+        assert!(
+            all.contains(">   title a2"),
+            "agent rows indent under their header"
+        );
         assert!(all.contains("title  fix login"));
     }
 
@@ -630,7 +730,7 @@ mod tests {
         assert_eq!(app.selected_id().as_deref(), Some("a2"));
         assert_eq!(shown(&app).len(), 7);
 
-        let binds = Binds::new(&default_keys("ctrl-s")).unwrap_or_else(|e| panic!("{e}"));
+        let binds = Binds::new(&default_keys("ctrl-s"), 5).unwrap_or_else(|e| panic!("{e}"));
         handle_key(&mut app, &binds, key(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.status, "", "the next key clears the status");
 
@@ -674,7 +774,7 @@ mod tests {
     fn a_capital_letter_bind_is_distinct_from_the_lowercase_letter() {
         let mut keys = default_keys("ctrl-s");
         keys.group = "alt-A".into();
-        let binds = Binds::new(&keys).unwrap_or_else(|e| panic!("{e}"));
+        let binds = Binds::new(&keys, 5).unwrap_or_else(|e| panic!("{e}"));
         let mut app = grouped();
         assert_eq!(
             handle_key(

@@ -7,6 +7,27 @@ pub struct Named {
     pub by: Vec<String>,
 }
 
+pub struct Group {
+    pub name: String,
+    pub levels: Vec<Vec<String>>,
+}
+
+pub trait HasName {
+    fn name(&self) -> &str;
+}
+
+impl HasName for Named {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl HasName for Group {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 pub struct Keys {
     pub sort: String,
     pub group: String,
@@ -19,8 +40,9 @@ pub struct Config {
     pub columns: Vec<String>,
     pub search: Vec<String>,
     pub sorts: Vec<Named>,
-    pub groups: Vec<Named>,
+    pub groups: Vec<Group>,
     pub priority_token: String,
+    pub priority_max: u8,
     pub keys: Keys,
 }
 
@@ -36,9 +58,11 @@ fn defaults() -> Value {
         "groups": [
             {"name": "none", "by": []},
             {"name": "repo", "by": ["tokens.repo", "cwd:basename"]},
-            {"name": "workspace", "by": ["workspace_id"]}
+            {"name": "workspace", "by": ["workspace_id"]},
+            {"name": "repo/workspace", "levels": [["tokens.repo", "cwd:basename"], ["workspace_id"]]}
         ],
         "priority_token": "prio",
+        "priority_max": 5,
         "keys": {"sort": "ctrl-s", "group": "ctrl-g", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
     })
 }
@@ -96,6 +120,48 @@ fn named(v: &Value) -> Option<Vec<Named>> {
     Some(out)
 }
 
+// A group names one fallback chain in `by`, or several in `levels` (one per header level); `by: []`
+// is the one empty case and means no grouping. Having both keys, or neither, is a config error.
+fn groups(v: &Value) -> Option<Vec<Group>> {
+    let items = v.as_array()?;
+    if items.is_empty() {
+        return None;
+    }
+    let mut out: Vec<Group> = Vec::new();
+    for item in items {
+        let o = item.as_object()?;
+        let name = o.get("name")?.as_str().filter(|s| !s.is_empty())?;
+        if out.iter().any(|g| g.name == name) {
+            return None;
+        }
+        let levels = match (o.get("by"), o.get("levels")) {
+            (Some(by), None) => {
+                let chain = strs(by)?;
+                if chain.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![chain]
+                }
+            }
+            (None, Some(levels)) => {
+                let chains = levels
+                    .as_array()
+                    .filter(|c| !c.is_empty())?
+                    .iter()
+                    .map(strs)
+                    .collect::<Option<Vec<_>>>()?;
+                chains
+            }
+            _ => return None,
+        };
+        out.push(Group {
+            name: name.to_string(),
+            levels,
+        });
+    }
+    Some(out)
+}
+
 fn key(keys: &serde_json::Map<String, Value>, name: &str) -> Option<String> {
     keys.get(name)?
         .as_str()
@@ -121,8 +187,13 @@ fn extract(v: &Value) -> Option<Config> {
         columns: non_empty_strs(o.get("columns")?)?,
         search: non_empty_strs(o.get("search")?)?,
         sorts: named(o.get("sorts")?)?,
-        groups: named(o.get("groups")?)?,
+        groups: groups(o.get("groups")?)?,
         priority_token: token_name(o.get("priority_token")?)?,
+        priority_max: o
+            .get("priority_max")?
+            .as_u64()
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|n| (1..=9).contains(n))?,
         keys: Keys {
             sort: key(keys, "sort")?,
             group: key(keys, "group")?,
@@ -159,8 +230,15 @@ fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
             m.insert("keys".into(), defaults()["keys"].clone());
         }
     }
+    if let Some(v) = merged.get("priority_max") {
+        if !matches!(v.as_u64(), Some(n) if (1..=9).contains(&n)) {
+            return Err(format!(
+                "{path}: priority_max must be an integer from 1 to 9"
+            ));
+        }
+    }
     let cfg = extract(&merged).ok_or_else(|| {
-        let fields = "columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)";
+        let fields = "columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)";
         if need_keys {
             format!("{path}: {fields}, and keys sort/group/up/down/clear non-empty strings")
         } else {
@@ -188,7 +266,7 @@ fn validate(cfg: &Config) -> Result<(), String> {
     for spec in cfg.columns.iter().chain(&cfg.search) {
         check_field(spec)?;
     }
-    for spec in cfg.groups.iter().flat_map(|g| &g.by) {
+    for spec in cfg.groups.iter().flat_map(|g| g.levels.iter().flatten()) {
         check_field(spec)?;
     }
     for spec in cfg.sorts.iter().flat_map(|s| &s.by) {
@@ -242,6 +320,60 @@ mod tests {
     }
 
     #[test]
+    fn a_priority_max_outside_1_to_9_is_a_config_error_naming_the_key() {
+        for bad in ["0", "10", "5.5", "\"5\"", "-1", "null"] {
+            let err = load_json(&format!("{{\"priority_max\":{bad}}}"))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                err.contains("priority_max must be an integer from 1 to 9"),
+                "{bad}: {err}"
+            );
+        }
+        for good in ["1", "9"] {
+            let cfg = load_json(&format!("{{\"priority_max\":{good}}}"))
+                .unwrap_or_else(|e| panic!("{good}: {e}"));
+            assert_eq!(cfg.priority_max, good.parse::<u8>().unwrap_or_default());
+        }
+        assert_eq!(
+            load_json("{}").map(|c| c.priority_max).unwrap_or_default(),
+            5
+        );
+    }
+
+    #[test]
+    fn a_group_needs_exactly_one_of_by_or_levels() {
+        for bad in [
+            r#"{"groups":[{"name":"g"}]}"#,
+            r#"{"groups":[{"name":"g","by":["a"],"levels":[["b"]]}]}"#,
+            r#"{"groups":[{"name":"g","by":[],"levels":[["b"]]}]}"#,
+            r#"{"groups":[{"name":"g","levels":[]}]}"#,
+            r#"{"groups":[{"name":"g","levels":[["a"],5]}]}"#,
+            r#"{"groups":[{"name":"g","levels":"a"}]}"#,
+        ] {
+            assert!(load_json(bad).is_err(), "{bad}");
+        }
+        let flat = load_json(r#"{"groups":[{"name":"g","by":["a","b"]}]}"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            flat.groups[0].levels,
+            [vec!["a".to_string(), "b".to_string()]]
+        );
+        let none =
+            load_json(r#"{"groups":[{"name":"g","by":[]}]}"#).unwrap_or_else(|e| panic!("{e}"));
+        assert!(none.groups[0].levels.is_empty());
+        let tree = load_json(r#"{"groups":[{"name":"g","levels":[["a","b"],["c"]]}]}"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            tree.groups[0].levels,
+            [
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string()]
+            ]
+        );
+    }
+
+    #[test]
     fn restore_needs_no_valid_keys_but_the_rest_of_the_config_still_applies() {
         for keys in [
             r#"{"keys":{"sort":"x"}}"#,
@@ -265,9 +397,9 @@ mod tests {
 }
 
 // Index of the state's chosen name in the list, 0 when it is missing or unknown.
-pub fn pick(names: &[Named], chosen: Option<&Value>) -> usize {
+pub fn pick<T: HasName>(names: &[T], chosen: Option<&Value>) -> usize {
     chosen
         .and_then(Value::as_str)
-        .and_then(|s| names.iter().position(|n| n.name == s))
+        .and_then(|s| names.iter().position(|n| n.name() == s))
         .unwrap_or(0)
 }

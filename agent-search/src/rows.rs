@@ -10,8 +10,9 @@ pub struct Row {
     pub key: String,
     pub manual: Value,
     pub idx: usize,
+    pub prio: Option<Value>,
     pub has_token: bool,
-    pub group: Option<String>,
+    pub groups: Vec<String>,
     pub cols: Vec<String>,
     pub search: String,
 }
@@ -241,7 +242,7 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
     let si = pick(&cfg.sorts, st.get("sort"));
     let gi = pick(&cfg.groups, st.get("group"));
     let by = &cfg.sorts[si].by;
-    let gby = &cfg.groups[gi].by;
+    let chains = &cfg.groups[gi].levels;
 
     let mut keyed = Vec::new();
     for p in pending {
@@ -284,17 +285,20 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
 
     let mut rows = Vec::new();
     for (_, p) in keyed {
+        // Each level is a fallback chain: the first field with a value names the group at that
+        // level, and a pane with none lands on "(none)".
         let mut groups = Vec::new();
-        for g in gby {
-            let v = field(g, p.pane).map_err(|_| err())?;
-            if !blank(&v) {
-                groups.push(clean(&tostring(&v)));
+        for chain in chains {
+            let mut name = "(none)".to_string();
+            for spec in chain {
+                let v = field(spec, p.pane).map_err(|_| err())?;
+                if !blank(&v) {
+                    name = clean(&tostring(&v));
+                    break;
+                }
             }
+            groups.push(name);
         }
-        let group = groups
-            .into_iter()
-            .next()
-            .or_else(|| (!gby.is_empty()).then(|| "(none)".to_string()));
         let mut cols = Vec::new();
         for c in &cfg.columns {
             cols.push(if c == "prio" {
@@ -321,25 +325,36 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
             key: p.key,
             manual: p.manual,
             idx: p.idx,
+            prio: p.prio,
             has_token: p.has_token,
-            group,
+            groups,
             cols,
             search: search.join(" "),
         });
     }
 
-    if gby.is_empty() {
-        return Ok(rows);
+    Ok(nest(rows, 0))
+}
+
+// Groups at one level are ordered by their highest-ranked agent (first appearance in the sorted
+// list), and each group holds its next level ordered the same way: the result is a depth-first
+// walk of the tree.
+fn nest(rows: Vec<Row>, depth: usize) -> Vec<Row> {
+    if rows.iter().all(|r| r.groups.len() <= depth) {
+        return rows;
     }
-    // Groups in order of first appearance after sorting.
     let mut buckets: Vec<(Option<String>, Vec<Row>)> = Vec::new();
     for r in rows {
-        match buckets.iter_mut().find(|(g, _)| *g == r.group) {
+        let g = r.groups.get(depth).cloned();
+        match buckets.iter_mut().find(|(k, _)| *k == g) {
             Some((_, v)) => v.push(r),
-            None => buckets.push((r.group.clone(), vec![r])),
+            None => buckets.push((g, vec![r])),
         }
     }
-    Ok(buckets.into_iter().flat_map(|(_, v)| v).collect())
+    buckets
+        .into_iter()
+        .flat_map(|(_, v)| nest(v, depth + 1))
+        .collect()
 }
 
 // The fzf input: id<TAB>display<TAB>search text, with a header row "-:<n>" before each group.
@@ -371,26 +386,35 @@ pub fn display(r: &Row, w: &[usize]) -> String {
 pub fn lines(rows: &[Row]) -> String {
     let w = col_widths(rows);
     let mut out = String::new();
-    let mut seen: Vec<&str> = Vec::new();
-    let mut prev: Option<&str> = None;
+    let mut prev: &[String] = &[];
+    let mut n = 0;
     for r in rows {
-        if let Some(g) = r.group.as_deref() {
-            if prev != Some(g) {
-                if !seen.contains(&g) {
-                    seen.push(g);
-                }
-                let n = seen.iter().position(|s| *s == g).unwrap_or(0);
-                let count = rows
-                    .iter()
-                    .filter(|x| x.group.as_deref() == Some(g))
-                    .count();
-                out.push_str(&format!("-:{n}\t\x1b[1m── {g} ({count}) ──\x1b[0m\t\n"));
-            }
+        // A header opens wherever the group path first diverges from the previous row's, one line
+        // per new level, indented two spaces per level.
+        let common = r
+            .groups
+            .iter()
+            .zip(prev.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        for d in common..r.groups.len() {
+            let count = rows
+                .iter()
+                .filter(|x| x.groups.starts_with(&r.groups[..=d]))
+                .count();
+            out.push_str(&format!(
+                "-:{n}\t{}\x1b[1m── {} ({}) ──\x1b[0m\t\n",
+                "  ".repeat(d),
+                r.groups[d],
+                count
+            ));
+            n += 1;
         }
-        prev = r.group.as_deref();
+        prev = r.groups.as_slice();
         out.push_str(&format!(
-            "{}\t{}\t\x1b[2m{}\x1b[0m\n",
+            "{}\t{}{}\t\x1b[2m{}\x1b[0m\n",
             r.id,
+            "  ".repeat(r.groups.len()),
             display(r, &w),
             r.search
         ));
@@ -401,6 +425,76 @@ pub fn lines(rows: &[Row]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Group, Keys, Named};
+
+    fn cfg(group: Group) -> Config {
+        Config {
+            columns: vec!["title".into()],
+            search: vec!["title".into()],
+            sorts: vec![Named {
+                name: "t".into(),
+                by: vec!["title".into()],
+            }],
+            groups: vec![group],
+            priority_token: "prio".into(),
+            priority_max: 5,
+            keys: Keys {
+                sort: "ctrl-s".into(),
+                group: "ctrl-g".into(),
+                up: "alt-up".into(),
+                down: "alt-down".into(),
+                clear: "alt-0".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn levels_group_rows_into_a_tree_ordered_by_each_levels_best_agent() {
+        let list = json!({"result": {"panes": [
+            {"pane_id": "p1", "agent": "a", "title": "a1", "workspace_id": "w1", "tokens": {"repo": "x"}},
+            {"pane_id": "p2", "agent": "a", "title": "a2", "workspace_id": "w2", "tokens": {"repo": "x"}},
+            {"pane_id": "p3", "agent": "a", "title": "b1", "workspace_id": "w1", "tokens": {"repo": "y"}},
+            {"pane_id": "p4", "agent": "a", "title": "b2", "workspace_id": "w2"},
+            {"pane_id": "p5", "agent": "a", "title": "c1", "workspace_id": "w1", "tokens": {"repo": "x"}}
+        ]}});
+        let cfg = cfg(Group {
+            name: "r/w".into(),
+            levels: vec![vec!["tokens.repo".into()], vec!["workspace_id".into()]],
+        });
+        let rows =
+            build(Some(&list), &cfg, &State(Default::default())).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["p1", "p5", "p2", "p3", "p4"]
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.groups.clone()).collect::<Vec<_>>(),
+            [
+                vec!["x".to_string(), "w1".to_string()],
+                vec!["x".to_string(), "w1".to_string()],
+                vec!["x".to_string(), "w2".to_string()],
+                vec!["y".to_string(), "w1".to_string()],
+                vec!["(none)".to_string(), "w2".to_string()]
+            ]
+        );
+        assert_eq!(
+            lines(&rows),
+            concat!(
+                "-:0\t\x1b[1m── x (3) ──\x1b[0m\t\n",
+                "-:1\t  \x1b[1m── w1 (2) ──\x1b[0m\t\n",
+                "p1\t    a1\t\x1b[2ma1\x1b[0m\n",
+                "p5\t    c1\t\x1b[2mc1\x1b[0m\n",
+                "-:2\t  \x1b[1m── w2 (1) ──\x1b[0m\t\n",
+                "p2\t    a2\t\x1b[2ma2\x1b[0m\n",
+                "-:3\t\x1b[1m── y (1) ──\x1b[0m\t\n",
+                "-:4\t  \x1b[1m── w1 (1) ──\x1b[0m\t\n",
+                "p3\t    b1\t\x1b[2mb1\x1b[0m\n",
+                "-:5\t\x1b[1m── (none) (1) ──\x1b[0m\t\n",
+                "-:6\t  \x1b[1m── w2 (1) ──\x1b[0m\t\n",
+                "p4\t    b2\t\x1b[2mb2\x1b[0m\n"
+            )
+        );
+    }
 
     #[test]
     fn width_counts_cells_the_way_the_terminal_draws_them() {

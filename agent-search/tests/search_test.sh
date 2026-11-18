@@ -87,7 +87,7 @@ check "search text holds every token value" \
   "$(pk lines | grep '^w2:p1' | cut -f3 | plain)" "write docs /src/alpha devin working alpha urgent kaneo"
 check "search text holds the cwd" "$(pk lines | grep '^w1:p2' | cut -f3 | grep -c '/src/beta/')" "1"
 check "header names the first sort and group, then the keys" "$(run header)" "sort: priority  group: none
-ctrl-s sort  ctrl-g group  alt-up/alt-down move  alt-1..9 prio  alt-0 clear"
+ctrl-s sort  ctrl-g group  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
 
 fresh
 run act group-next
@@ -98,6 +98,14 @@ check "group headers show the name and count" \
   "$(pk lines | grep '^-:' | cut -f2 | plain | tr '\n' ';')" "── alpha (2) ──;── beta (1) ──;── gamma (1) ──;"
 check "group headers have no search text" "$(pk lines | grep '^-:' | cut -f3 | tr -d '\n')" ""
 run act group-next
+check "group-next moves to workspace" "$(run header | head -1)" "sort: priority  group: workspace"
+run act group-next
+check "repo/workspace shows a two-level tree" \
+  "$(run header | head -1; pk lines | grep '^-:' | cut -f2 | plain | tr '\n' ';')" \
+  "sort: priority  group: repo/workspace
+── alpha (2) ──;  ── w1 (1) ──;  ── w2 (1) ──;── beta (1) ──;  ── w1 (1) ──;── gamma (1) ──;  ── w2 (1) ──;"
+check "nested agents indent under their deepest header" \
+  "$(pk lines | grep '^w1:p1' | cut -f2 | sed 's/[^ ].*$//' | tr -d '\n' | wc -c | tr -d ' ')" "8"
 run act group-next
 check "group-next wraps back to none" "$(run header | head -1)" "sort: priority  group: none"
 
@@ -207,6 +215,36 @@ check "HERDR_PLUGIN_ID is the metadata source" \
   "pane report-metadata w1:p1 --source someone.else --token prio=1"
 
 fresh
+jq '.result.panes[0].tokens.prio = "2" | .result.panes[2].tokens.prio = "4"' "$tmp/list.json" > "$tmp/agentprio.json"
+export AGENT_SEARCH_LIST="$tmp/agentprio.json"
+check "a token an agent set itself is saved on the next act, under its key" \
+  "$(pk act sort-next; jq -cS .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s1":2,"s3":4}'
+check "a token that is no priority on the pane does not get saved" \
+  "$(jq '.result.panes[1].tokens.prio = "x"' "$tmp/agentprio.json" > "$tmp/agentprio2.json"; AGENT_SEARCH_LIST="$tmp/agentprio2.json" pk act sort-next; jq -cS .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s1":2,"s3":4}'
+export AGENT_SEARCH_LIST="$tmp/list.json"
+
+fresh
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+echo '{"prio":{"s1":1,"w2:p2":9}}' > "$HERDR_PLUGIN_STATE_DIR/state.json"
+jq '.result.panes[0].tokens.prio = "3" | .result.panes[2].tokens.prio = "8"' "$tmp/list.json" > "$tmp/override.json"
+check "the pane token wins over the saved priority, and out-of-range values are kept" \
+  "$(AGENT_SEARCH_LIST="$tmp/override.json" pk act sort-next; jq -cS .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s1":3,"s3":8,"w2:p2":9}'
+
+fresh
+run act prio 4 w2:p1
+jq 'del(.result.panes[].tokens.prio)' "$tmp/list.json" > "$tmp/cleared.json"
+check "a token cleared from outside is not removed from the state" \
+  "$(AGENT_SEARCH_LIST="$tmp/cleared.json" pk act sort-next; jq -c .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s3":4}'
+
+fresh
+jq '.result.panes[0].tokens.prio = "5"' "$tmp/list.json" > "$tmp/tok.json"
+check "lines alone does not save a pane's token" \
+  "$(AGENT_SEARCH_LIST="$tmp/tok.json" pk lines >/dev/null; ls "$HERDR_PLUGIN_STATE_DIR" 2>/dev/null | wc -l | tr -d ' ')" "0"
+check "restore leaves a pane-set token out of the state" \
+  "$(AGENT_SEARCH_LIST="$tmp/tok.json" pk restore 2>&1; echo "rc=$?"; [ -e "$HERDR_PLUGIN_STATE_DIR/state.json" ] && echo state || echo no-state)" "rc=0
+no-state"
+
+fresh
 run act prio 4 w2:p1
 before=$(cat "$HERDR_PLUGIN_STATE_DIR/state.json")
 check "a failed herdr call fails act prio and leaves the state untouched" \
@@ -258,7 +296,7 @@ rc=1"
 echo '{"columns":"title"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a shape error in restore no longer names keys" \
   "$(AGENT_SEARCH_LIST="$tmp/lostkeys.json" pk restore 2>&1 >/dev/null; echo "rc=$?")" \
-  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)
 rc=1"
 
 fresh
@@ -307,10 +345,10 @@ check "panes without the sort value go last" "$(ids)" "w1:p1 w2:p1 w2:p2 w1:p2 "
 fresh
 echo '{"keys":{"sort":"ctrl-x"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a partial keys object keeps the other default keys" "$(run header | sed -n 2p)" \
-  "ctrl-x sort  ctrl-g group  alt-up/alt-down move  alt-1..9 prio  alt-0 clear"
+  "ctrl-x sort  ctrl-g group  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
 
 shape_error() {
-  printf '%s\n%s' "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -), and keys sort/group/up/down/clear non-empty strings" "rc=1"
+  printf '%s\n%s' "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -), and keys sort/group/up/down/clear non-empty strings" "rc=1"
 }
 fresh
 echo '{"sorts":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
@@ -340,6 +378,34 @@ done
 fresh
 echo '{"priority_token":"xxxxxxxxxxxxxxxxxxxxxxxxxxxx-_X9"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a 32-character priority_token of letters, digits, _ and - is accepted" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
+for bad in '0' '10' '5.5' '"5"' '-1'; do
+  fresh
+  echo "{\"priority_max\":$bad}" > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+  check "priority_max $bad is a config error naming the key" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+    "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: priority_max must be an integer from 1 to 9
+rc=1"
+done
+fresh
+echo '{"priority_max":9}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "priority_max 9 is accepted and the header shows the full range" "$(run header | sed -n 2p)" \
+  "ctrl-s sort  ctrl-g group  alt-up/alt-down move  alt-1..9 prio  alt-0 clear"
+fresh
+echo '{"priority_max":1}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "priority_max 1 is accepted" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
+fresh
+echo '{"groups":[{"name":"g"}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a group without by or levels is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+fresh
+echo '{"groups":[{"name":"g","by":["title"],"levels":[["cwd"]]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a group with both by and levels is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+fresh
+echo '{"groups":[{"name":"g","levels":[]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an empty levels list is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+fresh
+echo '{"groups":[{"name":"g","levels":[["tokens.repo","cwd:basename"],["workspace_id"]]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a configured levels group nests headers two spaces per level" \
+  "$(pk lines | grep '^-:' | cut -f2 | plain | tr '\n' ';')" \
+  "── alpha (2) ──;  ── w1 (1) ──;  ── w2 (1) ──;── beta (1) ──;  ── w1 (1) ──;── gamma (1) ──;  ── w2 (1) ──;"
 fresh
 echo '{"priority":"manual"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "the old priority setting is ignored" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
@@ -463,10 +529,15 @@ check "open launches the search pane entrypoint" "$(cat "$FAKE_CALLS")" \
   "plugin pane open --plugin takashiaihara.agent-search --entrypoint search"
 
 fresh
-check "preview lists fields and tokens" "$(run preview w2:p1 | grep -E '^(title|tokens.task)' | sed -E 's/^([^ ]+) +/\1=/' | tr '\n' ';')" \
-  "title=write docs;tokens.task=urgent kaneo;"
-check "preview values start in one column" "$(run preview w2:p1 | awk '{match($0, /^[^ ]+ +/); print RLENGTH}' | LC_ALL=C sort -u | wc -l | tr -d ' ')" "1"
-check "preview lines up wide token names by display width" "$(printf '%s' '{"result":{"panes":[{"pane_id":"w1:p1","agent":"claude","title":"t","tokens":{"界界":"wide","ab":"narrow"}}]}}' > "$tmp/wide.json"; AGENT_SEARCH_LIST="$tmp/wide.json" pk preview w1:p1 | grep -E '^tokens' | python3 -c 'import sys,unicodedata as u
+check "preview splits into pane, tokens and ids sections" "$(run preview w2:p1 | grep -xcE 'pane|tokens|ids' | tr '\n' ' '; run preview w2:p1 | grep -nE '^(pane|tokens|ids)$' | cut -d: -f1,2 | sed 's/:/=/' | tr '\n' ';')" \
+  "3 1=pane;7=tokens;10=ids;"
+check "preview token names lose the tokens. prefix" "$(run preview w2:p1 | grep -E '^(title|task)' | sed -E 's/^([^ ]+) +/\1=/' | tr '\n' ';')" \
+  "title=write docs;task=urgent kaneo;"
+check "identifier fields are under ids" "$(run preview w2:p1 | awk 'f{print;exit} /^ids$/{f=1}')" "pane_id       w2:p1"
+check "a pane without tokens has no tokens section" "$(run preview w1:p2 | grep -c '^tokens$')" "0"
+check "preview values inside a section start in one column" \
+  "$(run preview w2:p1 | awk 'NF==1{s=$0;next}{match($0,/^[^ ]+ +/); if (seen[s]&&seen[s]!=RLENGTH) bad=1; seen[s]=RLENGTH}END{print bad+0}')" "0"
+check "preview lines up wide token names by display width" "$(printf '%s' '{"result":{"panes":[{"pane_id":"w1:p1","agent":"claude","title":"t","tokens":{"界界":"wide","ab":"narrow"}}]}}' > "$tmp/wide.json"; AGENT_SEARCH_LIST="$tmp/wide.json" pk preview w1:p1 | grep -E '^(界界|ab)' | python3 -c 'import sys,unicodedata as u
 print(len({sum(2 if u.east_asian_width(c) in "WF" else 1 for c in l[:l.index(l.split()[-1])]) for l in sys.stdin}))')" "1"
 check "preview has more than one line" "$([ "$(run preview w2:p1 | wc -l)" -gt 3 ] && echo yes)" "yes"
 check "preview of a group header is empty" "$(run preview -:alpha)" ""

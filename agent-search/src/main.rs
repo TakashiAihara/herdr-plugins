@@ -234,8 +234,8 @@ fn header_text(cfg: &Config, st: &State) -> String {
     let group = &cfg.groups[pick(&cfg.groups, st.get("group"))].name;
     let k = &cfg.keys;
     format!(
-        "sort: {sort}  group: {group}\n{} sort  {} group  {}/{} move  alt-1..9 prio  {} clear\n",
-        k.sort, k.group, k.up, k.down, k.clear
+        "sort: {sort}  group: {group}\n{} sort  {} group  {}/{} move  alt-1..{} prio  {} clear\n",
+        k.sort, k.group, k.up, k.down, cfg.priority_max, k.clear
     )
 }
 
@@ -261,6 +261,41 @@ fn object(v: Option<&Value>) -> Map<String, Value> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default()
+}
+
+// A pane's own priority token is the source of truth: whenever a live pane list is read (the
+// popup or an act), every agent pane's present token is copied into the saved state, so a
+// priority an agent set itself is still restored after a Herdr restart. A pane without the token
+// keeps its saved value: it cannot be told apart from a pane whose token Herdr dropped at restart.
+fn merged_priorities(rows: &[Row], st: &State) -> Option<Map<String, Value>> {
+    let mut prio = object(st.get("prio"));
+    let mut changed = false;
+    for r in rows {
+        let Some(cur) = &r.prio else {
+            continue;
+        };
+        if st.lookup("prio", &r.key).as_ref() == Some(cur) {
+            continue;
+        }
+        prio.insert(r.key.clone(), cur.clone());
+        changed = true;
+    }
+    changed.then_some(prio)
+}
+
+// The popup's copy of the sync `act` does inside its own lock. Reading the list comes before the
+// lock so a slow `herdr pane list` never holds other writers up.
+fn sync_priorities(env: &Env, cfg: &Config, snap: &mut Snapshot) -> Res<()> {
+    snap.get(env)?;
+    let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
+    let st = State::load(&env.state_path);
+    let rows = snap.rows(env, cfg, &st)?;
+    let Some(prio) = merged_priorities(&rows, &st) else {
+        return Ok(());
+    };
+    let mut new = st.0.clone();
+    new.insert("prio".into(), Value::Object(prio));
+    state::write(&env.state_dir, &env.state_path, &Value::Object(new))
 }
 
 // `prune` drops the saved priorities and positions of panes that are no longer in Herdr's pane list. It
@@ -296,19 +331,25 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
     let st = State::parse(before.as_deref());
     let mut new = st.0.clone();
     let rows = snap.rows(env, cfg, &st)?;
+    if let Some(prio) = merged_priorities(&rows, &st) {
+        new.insert("prio".into(), Value::Object(prio));
+    }
     // Set after the state is written, so a failed write never leaves Herdr ahead of the state.
     let mut report: Option<Option<&str>> = None;
 
     match op {
         "sort-next" | "group-next" => {
-            let (names, k) = if op == "sort-next" {
-                (&cfg.sorts, "sort")
+            let k = if op == "sort-next" { "sort" } else { "group" };
+            let next = if op == "sort-next" {
+                cfg.sorts
+                    .get(pick(&cfg.sorts, st.get(k)) + 1)
+                    .map(|n| &n.name)
             } else {
-                (&cfg.groups, "group")
+                cfg.groups
+                    .get(pick(&cfg.groups, st.get(k)) + 1)
+                    .map(|n| &n.name)
             };
-            let next = names
-                .get(pick(names, st.get(k)) + 1)
-                .map_or(Value::Null, |n| Value::String(n.name.clone()));
+            let next = next.map_or(Value::Null, |n| Value::String(n.clone()));
             new.insert(k.into(), next);
             // Rows must build under the new selection before it is saved: a sort or group whose
             // fields fail on this list would otherwise be saved and break every later command.
@@ -326,7 +367,7 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
             if let (Some(i), Some(j)) = (i, j) {
                 // The neighbor must be in the same group: groups are rebuilt on every reload, so a
                 // swap across a header would snap back.
-                if j < rows.len() && rows[j].group == rows[i].group {
+                if j < rows.len() && rows[j].groups == rows[i].groups {
                     // Renumber the listed panes together with the keys already in `order` that this
                     // view does not list (a pane hidden right now keeps its place among the others);
                     // listed panes without a saved position count as last, in list order.
@@ -356,7 +397,7 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
             if let Some(r) = rows.iter().find(|r| r.id == id) {
                 let value = (op == "prio").then_some(n);
                 // The state remembers it so `restore` can set the token again after a Herdr restart.
-                let mut prio = object(st.get("prio"));
+                let mut prio = object(new.get("prio"));
                 match value {
                     Some(n) => {
                         prio.insert(r.key.clone(), Value::from(n.parse::<u64>().unwrap_or(0)))
@@ -500,45 +541,65 @@ fn focus(env: &Env, id: &str) -> Res<()> {
     focus_in(env, &env.pane_list()?, id)
 }
 
-// Every field of the pane except tokens, scroll and revision, then its tokens, as `key<TAB>value`.
+// One preview section: its name on its own line, then `key<pad>value` rows with the values
+// starting in one column (padded by display width: a wide character takes two cells). A section
+// with nothing in it is left out.
+fn section(name: &str, entries: &[(String, String)]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let w = entries
+        .iter()
+        .map(|(k, _)| rows::width(k))
+        .max()
+        .unwrap_or(0);
+    let mut text = format!("{name}\n");
+    for (k, v) in entries {
+        let pad = " ".repeat(w - rows::width(k) + 2);
+        text.push_str(&format!("{k}{pad}{v}\n"));
+    }
+    text
+}
+
+// Three sections: the pane's fields, its tokens, then the internal identifiers (every field
+// whose name ends in `_id`).
 fn preview_text(list: &Option<Value>, id: &str) -> String {
     let mut text = String::new();
     for pane in pane_with_id(&lenient_panes(list), id) {
         let Some(fields) = pane.as_object() else {
             continue;
         };
-        let mut entries: Vec<(String, &Value)> = fields
-            .iter()
-            .filter(|(k, _)| !matches!(k.as_str(), "tokens" | "scroll" | "revision"))
-            .map(|(k, v)| (k.clone(), v))
-            .collect();
-        match present(fields.get("tokens")) {
-            Some(Value::Object(m)) => {
-                entries.extend(m.iter().map(|(k, v)| (format!("tokens.{k}"), v)))
+        let mut panes: Vec<(String, String)> = Vec::new();
+        let mut ids: Vec<(String, String)> = Vec::new();
+        for (k, v) in fields {
+            if matches!(k.as_str(), "tokens" | "scroll" | "revision") || v.is_null() {
+                continue;
             }
-            Some(Value::Array(a)) => entries.extend(
+            let entry = (clean(k), clean(&tostring(v)));
+            if k.ends_with("_id") {
+                ids.push(entry);
+            } else {
+                panes.push(entry);
+            }
+        }
+        let mut tokens: Vec<(String, String)> = Vec::new();
+        match present(fields.get("tokens")) {
+            Some(Value::Object(m)) => tokens.extend(
+                m.iter()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(k, v)| (clean(k), clean(&tostring(v)))),
+            ),
+            Some(Value::Array(a)) => tokens.extend(
                 a.iter()
                     .enumerate()
-                    .map(|(i, v)| (format!("tokens.{i}"), v)),
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(i, v)| (i.to_string(), clean(&tostring(v)))),
             ),
             _ => {}
         }
-        let entries: Vec<(String, String)> = entries
-            .into_iter()
-            .filter(|(_, v)| !v.is_null())
-            .map(|(k, v)| (clean(&k), clean(&tostring(v))))
-            .collect();
-        // Keys are padded to one column so the values line up (a tab lands on different stops).
-        let w = entries
-            .iter()
-            .map(|(k, _)| rows::width(k))
-            .max()
-            .unwrap_or(0);
-        for (k, v) in entries {
-            // Padded by display width: a wide character takes two cells.
-            let pad = " ".repeat(w - rows::width(&k) + 2);
-            text.push_str(&format!("{k}{pad}{v}\n"));
-        }
+        text.push_str(&section("pane", &panes));
+        text.push_str(&section("tokens", &tokens));
+        text.push_str(&section("ids", &ids));
     }
     text
 }
@@ -661,6 +722,109 @@ mod tests {
             let after = State::load(&env.state_path);
             assert_eq!(after.get("prio"), Some(&kept), "prune={prune}");
         }
+    }
+
+    #[test]
+    fn an_act_copies_a_panes_own_priority_token_into_the_state() {
+        let panes = json!([
+            {"pane_id": "p1", "agent": "claude", "tokens": {"prio": "3"}},
+            {"pane_id": "p2", "agent": "claude"},
+            {"pane_id": "p3", "agent": "claude", "tokens": {"prio": "x"}},
+            {"pane_id": "p4", "agent": "claude", "tokens": {"prio": "9"}}
+        ]);
+        // p1's agent-set priority wins over the saved one; p2 without the token keeps its saved
+        // value; p3's non-number token is not a priority and leaves the saved value alone; p4's
+        // out-of-range value is kept as written.
+        let env = env_with(
+            "copytoken",
+            panes,
+            json!({"prio": {"p1": 1, "p2": 7, "p3": 2}}),
+        );
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let args = vec!["sort-next".to_string()];
+        act(&env, &cfg, &mut Snapshot::empty(), &args, true).unwrap_or_else(|e| panic!("{e}"));
+        let after = State::load(&env.state_path);
+        assert_eq!(
+            after.get("prio"),
+            Some(&json!({"p1": 3, "p2": 7, "p3": 2, "p4": 9}))
+        );
+    }
+
+    #[test]
+    fn sync_priorities_writes_only_the_priority_map_and_only_when_a_token_differs() {
+        let panes = json!([
+            {"pane_id": "p1", "agent": "claude", "tokens": {"prio": "4"}},
+            {"pane_id": "p2", "agent": "claude"}
+        ]);
+        let env = env_with("sync", panes, json!({"sort": "manual", "prio": {"p2": 2}}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let mut snap = Snapshot::empty();
+        sync_priorities(&env, &cfg, &mut snap).unwrap_or_else(|e| panic!("{e}"));
+        let after = State::load(&env.state_path);
+        assert_eq!(
+            after.get("prio"),
+            Some(&json!({"p1": 4, "p2": 2})),
+            "p1's token is saved; p2 keeps its saved value without a token"
+        );
+        assert_eq!(after.get("sort"), Some(&json!("manual")));
+        let written = std::fs::read(&env.state_path).unwrap_or_default();
+        let mut snap = Snapshot::empty();
+        sync_priorities(&env, &cfg, &mut snap).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(std::fs::read(&env.state_path).unwrap_or_default(), written);
+    }
+
+    #[test]
+    fn opening_the_popup_saves_a_priority_an_agent_set_on_its_own_pane() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude", "tokens": {"prio": "3"}}]);
+        let env = env_with("opensync", panes, json!({}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let mut snap = Snapshot::empty();
+        assert!(ui::open(&env, &cfg, &mut snap).is_ok());
+        assert_eq!(
+            State::load(&env.state_path).get("prio"),
+            Some(&json!({"p1": 3}))
+        );
+    }
+
+    #[test]
+    fn restore_does_not_copy_a_panes_token_into_the_state() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude", "tokens": {"prio": "4"}}]);
+        let env = env_with("restorenocopy", panes, json!({}));
+        assert!(restore(&env).is_ok());
+        assert_eq!(State::load(&env.state_path).get("prio"), None);
+    }
+
+    #[test]
+    fn the_preview_splits_into_pane_tokens_and_ids_sections() {
+        let list = Some(json!({"result": {"panes": [{
+            "pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1",
+            "agent": "claude", "title": "fix", "session_id": "sx",
+            "tokens": {"repo": "a", "note": "n"}, "scroll": 1
+        }]}}));
+        assert_eq!(
+            preview_text(&list, "w1:p1"),
+            concat!(
+                "pane\n",
+                "agent  claude\n",
+                "title  fix\n",
+                "tokens\n",
+                "repo  a\n",
+                "note  n\n",
+                "ids\n",
+                "pane_id       w1:p1\n",
+                "workspace_id  w1\n",
+                "tab_id        w1:t1\n",
+                "session_id    sx\n"
+            )
+        );
+        // A pane with no tokens and no extra identifiers leaves those sections out.
+        let bare = Some(json!({"result": {"panes": [
+            {"pane_id": "w1:p1", "title": "fix"}
+        ]}}));
+        assert_eq!(
+            preview_text(&bare, "w1:p1"),
+            "pane\ntitle  fix\nids\npane_id  w1:p1\n"
+        );
     }
 
     #[test]
