@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# One run at a time: publishing compares the release's assets with what it built, and parallel runs
+# would decide on each other's half-uploaded state.
+concurrency:
+  group: agent-search-binaries
+  cancel-in-progress: false
+
 jobs:
   key:
     runs-on: ubuntu-latest
