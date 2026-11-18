@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 serde_json = { version = "1", features = ["preserve_order"] }
+nucleo-matcher = "0.3"
+ratatui = "0.30"

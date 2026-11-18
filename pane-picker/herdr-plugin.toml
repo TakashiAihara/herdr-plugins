@@ -20,3 +20,6 @@ placement = "popup"
 width = "80%"
 height = "70%"
 command = ["target/release/pane-picker", "ui"]
+
+[[startup]]
+command = ["target/release/pane-picker", "restore"]

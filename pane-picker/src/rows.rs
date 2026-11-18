@@ -10,6 +10,7 @@ pub struct Row {
     pub key: String,
     pub manual: Value,
     pub idx: usize,
+    pub has_token: bool,
     pub group: Option<String>,
     pub cols: Vec<String>,
     pub search: String,
@@ -169,6 +170,21 @@ fn to_number(v: &Value) -> Option<Value> {
     }
 }
 
+// Only agent panes are listed, the same set as Herdr's Agents view. None when the list has no
+// .result.panes array.
+fn agent_panes(list: &Value) -> Option<Vec<&Value>> {
+    let all = list.get("result")?.get("panes")?.as_array()?;
+    Some(
+        all.iter()
+            .filter(|p| {
+                p.get("agent")
+                    .and_then(Value::as_str)
+                    .is_some_and(|a| !a.is_empty())
+            })
+            .collect(),
+    )
+}
+
 fn session_id(p: &Value) -> String {
     p.get("agent_session")
         .and_then(|s| s.get("value"))
@@ -183,6 +199,7 @@ struct Pending<'a> {
     key: String,
     idx: usize,
     prio: Option<Value>,
+    has_token: bool,
     manual: Value,
 }
 
@@ -195,15 +212,11 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
     let Some(list) = list else {
         return Ok(vec![]);
     };
-    let panes = list
-        .get("result")
-        .and_then(|r| r.get("panes"))
-        .and_then(Value::as_array)
-        .ok_or_else(err)?;
-    let sids: Vec<String> = panes.iter().map(session_id).collect();
+    let panes = agent_panes(list).ok_or_else(err)?;
+    let sids: Vec<String> = panes.iter().map(|p| session_id(p)).collect();
 
     let mut pending = Vec::new();
-    for (i, pane) in panes.iter().enumerate() {
+    for (i, &pane) in panes.iter().enumerate() {
         let id = pane
             .get("pane_id")
             .and_then(Value::as_str)
@@ -215,13 +228,11 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
         } else {
             id.clone()
         };
-        let prio = match st.lookup("prio", &key) {
-            Some(v) => Some(v),
-            None if cfg.priority_source != "manual" => {
-                to_number(&field(&cfg.priority_source, pane).map_err(|_| err())?)
-            }
-            None => None,
-        };
+        let token = pane
+            .get("tokens")
+            .and_then(|t| t.get(&cfg.priority_token))
+            .filter(|v| !v.is_null());
+        let prio = token.and_then(to_number);
         let manual = st
             .lookup("order", &key)
             .unwrap_or_else(|| Value::from(1_000_000 + i));
@@ -231,6 +242,7 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
             key,
             idx: i,
             prio,
+            has_token: token.is_some(),
             manual,
         });
     }
@@ -318,6 +330,7 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
             key: p.key,
             manual: p.manual,
             idx: p.idx,
+            has_token: p.has_token,
             group,
             cols,
             search: search.join(" "),
@@ -339,11 +352,33 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
 }
 
 // The fzf input: id<TAB>display<TAB>search text, with a header row "-:<n>" before each group.
-pub fn lines(rows: &[Row]) -> String {
+pub fn col_widths(rows: &[Row]) -> Vec<usize> {
     let ncols = rows.first().map_or(0, |r| r.cols.len());
-    let w: Vec<usize> = (0..ncols)
+    (0..ncols)
         .map(|c| rows.iter().map(|r| width(&r.cols[c])).max().unwrap_or(0))
+        .collect()
+}
+
+// The columns of one row, padded to the widths except the last one.
+pub fn display(r: &Row, w: &[usize]) -> String {
+    let last = r.cols.len().saturating_sub(1);
+    let cols: Vec<String> = r
+        .cols
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if i == last {
+                c.clone()
+            } else {
+                format!("{c}{}", " ".repeat(w[i].saturating_sub(width(c))))
+            }
+        })
         .collect();
+    cols.join("  ")
+}
+
+pub fn lines(rows: &[Row]) -> String {
+    let w = col_widths(rows);
     let mut out = String::new();
     let mut seen: Vec<&str> = Vec::new();
     let mut prev: Option<&str> = None;
@@ -362,22 +397,10 @@ pub fn lines(rows: &[Row]) -> String {
             }
         }
         prev = r.group.as_deref();
-        let display: Vec<String> = r
-            .cols
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                if i == ncols - 1 {
-                    c.clone()
-                } else {
-                    format!("{c}{}", " ".repeat(w[i].saturating_sub(width(c))))
-                }
-            })
-            .collect();
         out.push_str(&format!(
             "{}\t{}\t\x1b[2m{}\x1b[0m\n",
             r.id,
-            display.join("  "),
+            display(r, &w),
             r.search
         ));
     }

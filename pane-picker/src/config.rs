@@ -20,7 +20,7 @@ pub struct Config {
     pub search: Vec<String>,
     pub sorts: Vec<Named>,
     pub groups: Vec<Named>,
-    pub priority_source: String,
+    pub priority_token: String,
     pub keys: Keys,
 }
 
@@ -38,7 +38,7 @@ fn defaults() -> Value {
             {"name": "repo", "by": ["tokens.repo", "cwd:basename"]},
             {"name": "workspace", "by": ["workspace_id"]}
         ],
-        "priority": {"source": "manual"},
+        "priority_token": "prio",
         "keys": {"sort": "ctrl-s", "group": "ctrl-g", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
     })
 }
@@ -103,6 +103,17 @@ fn key(keys: &serde_json::Map<String, Value>, name: &str) -> Option<String> {
         .map(String::from)
 }
 
+// A Herdr token name: 1-32 ASCII letters, digits, `_` or `-`.
+fn token_name(v: &Value) -> Option<String> {
+    v.as_str()
+        .filter(|s| (1..=32).contains(&s.len()))
+        .filter(|s| {
+            s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+        .map(String::from)
+}
+
 fn extract(v: &Value) -> Option<Config> {
     let o = v.as_object()?;
     let keys = o.get("keys")?.as_object()?;
@@ -111,12 +122,7 @@ fn extract(v: &Value) -> Option<Config> {
         search: non_empty_strs(o.get("search")?)?,
         sorts: named(o.get("sorts")?)?,
         groups: named(o.get("groups")?)?,
-        priority_source: o
-            .get("priority")?
-            .as_object()?
-            .get("source")?
-            .as_str()?
-            .to_string(),
+        priority_token: token_name(o.get("priority_token")?)?,
         keys: Keys {
             sort: key(keys, "sort")?,
             group: key(keys, "group")?,
@@ -138,7 +144,7 @@ pub fn load(path: &str) -> Result<Config, String> {
         merged = merge(merged, user);
     }
     extract(&merged).ok_or_else(|| {
-        format!("{path}: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {{name, by}} with unique names, priority.source a string, and keys sort/group/up/down/clear non-empty strings")
+        format!("{path}: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {{name, by}} with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -), and keys sort/group/up/down/clear non-empty strings")
     })
 }
 

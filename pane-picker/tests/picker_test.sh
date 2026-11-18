@@ -17,16 +17,36 @@ echo "$*" >> "$FAKE_CALLS"
 [ "$1 $2" = "agent focus" ] && [ -n "${FAKE_AGENT_FOCUS_FAIL:-}" ] && exit 1
 if [ "$1 $2" = "workspace focus" ] && [ -n "${FAKE_WS_FAIL:-}" ]; then echo "herdr: no such workspace" >&2; exit 1; fi
 if [ "$1 $2" = "pane list" ]; then [ -n "${FAKE_PANE_LIST_FAIL:-}" ] && exit 1; cat "$FAKE_LIST"; fi
+# report-metadata edits the list file the picker reads, as Herdr would change its own pane list.
+# FAKE_META_FAIL=1 fails every call, FAKE_META_FAIL=<pane id> only the calls for that pane.
+if [ "$1 $2" = "pane report-metadata" ]; then
+  case "${FAKE_META_FAIL:-}" in 1|"$3") exit 1 ;; esac
+  f=${PANE_PICKER_LIST:-$FAKE_LIST}
+  id=$3
+  shift 3
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --token)
+        jq --arg id "$id" --arg k "${2%%=*}" --arg v "${2#*=}" \
+          '(.result.panes[] | select(.pane_id == $id) | .tokens) |= ((. // {}) + {($k): $v})' "$f" > "$f.new" && command mv -f "$f.new" "$f"
+        shift 2 ;;
+      --clear-token)
+        jq --arg id "$id" --arg k "$2" '(.result.panes[] | select(.pane_id == $id)) |= del(.tokens[$k])' "$f" > "$f.new" && command mv -f "$f.new" "$f"
+        shift 2 ;;
+      *) shift ;;
+    esac
+  done
+fi
 exit 0
 FAKE
 chmod +x "$tmp/herdr"
 
-cat > "$tmp/list.json" <<'JSON'
+cat > "$tmp/list.orig" <<'JSON'
 {"result":{"panes":[
  {"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","agent":"claude","agent_status":"done",
   "agent_session":{"value":"s1"},"title":"fix login","cwd":"/src/alpha",
-  "tokens":{"repo":"alpha","prio":"2"}},
- {"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t2","agent_status":"unknown",
+  "tokens":{"repo":"alpha","rank":"2"}},
+ {"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t2","agent":"claude","agent_status":"unknown",
   "title":"shell","cwd":"/src/beta/"},
  {"pane_id":"w2:p1","workspace_id":"w2","tab_id":"w2:t1","agent":"devin","agent_status":"working",
   "agent_session":{"value":"s3"},"title":"write docs","cwd":"/src/alpha",
@@ -41,7 +61,8 @@ n=0
 fresh() {
   n=$((n + 1))
   export HERDR_PLUGIN_STATE_DIR="$tmp/state$n" HERDR_PLUGIN_CONFIG_DIR="$tmp/config$n"
-  export PANE_PICKER_LIST="$tmp/list.json" HERDR_BIN_PATH="$tmp/herdr" FAKE_CALLS="$tmp/calls$n"
+  cp "$tmp/list.orig" "$tmp/list.json"
+  export PANE_PICKER_LIST="$tmp/list.json" FAKE_LIST="$tmp/list.json" HERDR_BIN_PATH="$tmp/herdr" FAKE_CALLS="$tmp/calls$n"
   mkdir -p "$HERDR_PLUGIN_CONFIG_DIR"
   : > "$FAKE_CALLS"
 }
@@ -85,20 +106,25 @@ export PANE_PICKER_LIST="$tmp/list.json"
 
 fresh
 run act prio 5 w2:p2
+check "act prio asks herdr to set the priority token" "$(cat "$FAKE_CALLS")" \
+  "pane report-metadata w2:p2 --source takashiaihara.pane-picker --token prio=5"
+check "act prio records the priority in the state under the pane key" "$(jq -c .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"w2:p2":5}'
 run act prio 3 w1:p2
 check "priority sort puts higher priority first" "$(ids)" "w2:p2 w1:p2 w1:p1 w2:p1 "
 check "priority shows as a star column" "$(pk lines | sed -n 1p | cut -f2 | grep -c '^★5 ')" "1"
+: > "$FAKE_CALLS"
 run act clear w2:p2
+check "act clear asks herdr to clear the priority token" "$(cat "$FAKE_CALLS")" \
+  "pane report-metadata w2:p2 --source takashiaihara.pane-picker --clear-token prio"
 check "clear removes the priority" "$(ids)" "w1:p2 w1:p1 w2:p1 w2:p2 "
+check "clear removes the saved priority" "$(jq -c .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"w1:p2":3}'
 check "prio rejects 0" "$(run act prio 0 w1:p1 2>&1; echo "rc=$?")" "pane-picker: prio needs 1-9
 rc=1"
 
 fresh
 run act prio 4 w2:p1
 sed 's/"w2:p1"/"w8:p8"/' "$tmp/list.json" > "$tmp/moved.json"
-check "priority follows the agent session when the pane id changes" \
-  "$(PANE_PICKER_LIST="$tmp/moved.json" pk lines | sed -n 1p | cut -f1)" "w8:p8"
-check "the moved pane keeps its priority on the next write" \
+check "the moved pane keeps its saved priority on the next write" \
   "$(PANE_PICKER_LIST="$tmp/moved.json" pk act prio 2 w2:p2; jq -c '.prio' "$HERDR_PLUGIN_STATE_DIR/state.json")" \
   '{"s3":4,"w2:p2":2}'
 run act move down w1:p1
@@ -147,14 +173,64 @@ run act move up w2:p1
 check "move inside a group works while grouped" "$(ids)" "-:0 w2:p1 w1:p1 -:1 w1:p2 -:2 w2:p2 "
 
 fresh
-jq '.result.panes[3].tokens.prio = "7"' "$tmp/list.json" > "$tmp/fieldprio.json"
+jq '.result.panes[3].tokens.prio = "7" | .result.panes[0].tokens.prio = "2"' "$tmp/list.json" > "$tmp/fieldprio.json"
 export PANE_PICKER_LIST="$tmp/fieldprio.json"
-echo '{"priority":{"source":"tokens.prio"},"columns":["prio","title"]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
-check "priority can come from a pane field" "$(ids)" "w2:p2 w1:p1 w1:p2 w2:p1 "
+echo '{"columns":["prio","title"]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "priority comes from the pane token" "$(ids)" "w2:p2 w1:p1 w1:p2 w2:p1 "
 check "configured columns are shown" "$(pk lines | sed -n 2p | cut -f2)" "★2  fix login"
 run act prio 1 w2:p2
-check "a manual priority overrides the field, even when lower" "$(ids)" "w1:p1 w2:p2 w1:p2 w2:p1 "
+check "setting a priority writes the token, which replaces the old value" "$(ids)" "w1:p1 w2:p2 w1:p2 w2:p1 "
+jq '.result.panes[3].tokens.prio = "x"' "$tmp/list.json" > "$tmp/badprio.json"
+check "a token that is not a number is no priority" \
+  "$(PANE_PICKER_LIST="$tmp/badprio.json" pk lines | grep -c '★')" "0"
 export PANE_PICKER_LIST="$tmp/list.json"
+
+fresh
+jq '.result.panes[3].tokens.rank = "9"' "$tmp/list.json" > "$tmp/rank.json"
+export PANE_PICKER_LIST="$tmp/rank.json"
+echo '{"priority_token":"rank"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "priority_token names the token that holds the priority" "$(ids)" "w2:p2 w1:p1 w1:p2 w2:p1 "
+run act prio 3 w1:p2
+check "act prio sets the configured token" "$(cat "$FAKE_CALLS")" \
+  "pane report-metadata w1:p2 --source takashiaihara.pane-picker --token rank=3"
+export PANE_PICKER_LIST="$tmp/list.json"
+
+fresh
+check "HERDR_PLUGIN_ID is the metadata source" \
+  "$(HERDR_PLUGIN_ID=someone.else pk act prio 1 w1:p1; cat "$FAKE_CALLS")" \
+  "pane report-metadata w1:p1 --source someone.else --token prio=1"
+
+fresh
+run act prio 4 w2:p1
+before=$(cat "$HERDR_PLUGIN_STATE_DIR/state.json")
+check "a failed herdr call fails act prio and leaves the state untouched" \
+  "$(FAKE_META_FAIL=1 pk act prio 2 w2:p2 2>&1; echo "rc=$?"; [ "$(cat "$HERDR_PLUGIN_STATE_DIR/state.json")" = "$before" ] && echo same)" \
+  "pane-picker: cannot set the priority of w2:p2
+rc=1
+same"
+check "a failed herdr call fails act clear too" "$(FAKE_META_FAIL=1 pk act clear w2:p1 2>&1; echo "rc=$?")" "pane-picker: cannot set the priority of w2:p1
+rc=1"
+check "the failed call changed no token" "$(ids)" "w2:p1 w1:p1 w1:p2 w2:p2 "
+
+fresh
+run act prio 4 w2:p1
+run act prio 2 w2:p2
+jq 'del(.result.panes[] | select(.pane_id == "w2:p1") | .tokens.prio) | (.result.panes[] | select(.pane_id == "w2:p1")).pane_id = "w8:p8"' \
+  "$tmp/list.json" > "$tmp/restart.json"
+: > "$FAKE_CALLS"
+check "restore sets the saved priority again, only on panes that lost the token, under their new id" \
+  "$(PANE_PICKER_LIST="$tmp/restart.json" pk restore 2>&1; echo "rc=$?"; cat "$FAKE_CALLS")" \
+  "rc=0
+pane report-metadata w8:p8 --source takashiaihara.pane-picker --token prio=4"
+: > "$FAKE_CALLS"
+check "restore sends nothing when no token is missing" "$(pk restore 2>&1; echo "rc=$?"; cat "$FAKE_CALLS")" "rc=0"
+jq 'del(.result.panes[].tokens.prio)' "$tmp/list.json" > "$tmp/lost.json"
+: > "$FAKE_CALLS"
+check "restore reports each failure and still exits 0" \
+  "$(FAKE_META_FAIL=w2:p1 PANE_PICKER_LIST="$tmp/lost.json" pk restore 2>&1; echo "rc=$?"; cat "$FAKE_CALLS" | tr '\n' ';')" \
+  "pane-picker: cannot restore the priority of w2:p1
+rc=0
+pane report-metadata w2:p1 --source takashiaihara.pane-picker --token prio=4;pane report-metadata w2:p2 --source takashiaihara.pane-picker --token prio=2;"
 
 fresh
 echo '{"groups":[{"name":"ws","by":["workspace_id"]}],"sorts":[{"name":"title","by":["title:desc"]}]}' \
@@ -205,7 +281,7 @@ check "a partial keys object keeps the other default keys" "$(run header | sed -
   "ctrl-x sort  ctrl-g group  alt-up/alt-down move  alt-1..9 prio  alt-0 clear"
 
 shape_error() {
-  printf '%s\n%s' "pane-picker: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} with unique names, priority.source a string, and keys sort/group/up/down/clear non-empty strings" "rc=1"
+  printf '%s\n%s' "pane-picker: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -), and keys sort/group/up/down/clear non-empty strings" "rc=1"
 }
 fresh
 echo '{"sorts":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
@@ -227,8 +303,17 @@ fresh
 echo '{"sorts":[{"name":"a","by":["title"]},{"name":"a","by":["cwd"]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "duplicate sort names are a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
 fresh
+for bad in '"a b"' '""' '"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"' '5' '{"a":1}'; do
+  fresh
+  echo "{\"priority_token\":$bad}" > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+  check "priority_token $bad is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+done
+fresh
+echo '{"priority_token":"xxxxxxxxxxxxxxxxxxxxxxxxxxxx-_X9"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a 32-character priority_token of letters, digits, _ and - is accepted" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
+fresh
 echo '{"priority":"manual"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
-check "a priority that is not an object is a config error, without raw jq errors" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+check "the old priority setting is ignored" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
 fresh
 echo '{"search":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "an empty search list is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
@@ -300,9 +385,26 @@ check "preview strips control characters from token names" \
   "$(PANE_PICKER_LIST="$tmp/esckey.json" pk preview w1:p2 | grep -c $'\033')" "0"
 
 fresh
-jq '.result.panes += [.result.panes[1]]' "$tmp/list.json" > "$tmp/dup.json"
+jq 'del(.result.panes[1].agent) | .result.panes += [.result.panes[1]]' "$tmp/list.json" > "$tmp/dup.json"
 PANE_PICKER_LIST="$tmp/dup.json" pk focus w1:p2
 check "a duplicated pane id is focused once" "$(cat "$FAKE_CALLS" | tr '\n' ';')" "workspace focus w1;tab focus w1:t2;"
+
+fresh
+jq '.result.panes += [{"pane_id":"w3:p1","workspace_id":"w3","tab_id":"w3:t1","title":"zsh","cwd":"/tmp"}, {"pane_id":"w3:p2","agent":"","title":"empty agent"}]' \
+  "$tmp/list.json" > "$tmp/withplain.json"
+check "only agent panes are listed" "$(PANE_PICKER_LIST="$tmp/withplain.json" pk lines | cut -f1 | tr '\n' ' ')" "w1:p1 w1:p2 w2:p1 w2:p2 "
+echo '{"groups":[{"name":"ws","by":["workspace_id"]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "plain panes make no group of their own" \
+  "$(PANE_PICKER_LIST="$tmp/withplain.json" pk lines | grep '^-:' | cut -f2 | plain | tr '\n' ';')" "── w1 (2) ──;── w2 (2) ──;"
+rm "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+fresh
+PANE_PICKER_LIST="$tmp/withplain.json" pk act move down w2:p2
+check "a plain pane is not a move neighbor" "$(jq -c .order "$HERDR_PLUGIN_STATE_DIR/state.json")" "{}"
+check "a plain pane can still be previewed" "$(PANE_PICKER_LIST="$tmp/withplain.json" pk preview w3:p1 | grep '^title' | cut -f2)" "zsh"
+fresh
+: > "$FAKE_CALLS"
+PANE_PICKER_LIST="$tmp/withplain.json" pk focus w3:p1
+check "a plain pane is still focused through its workspace and tab" "$(cat "$FAKE_CALLS" | tr '\n' ';')" "workspace focus w3;tab focus w3:t1;"
 
 fresh
 check "enter on a pane accepts" "$(run enter w1:p1)" "accept"
@@ -313,7 +415,8 @@ fresh
 run focus w1:p1
 check "an agent pane is focused through agent focus" "$(cat "$FAKE_CALLS")" "agent focus w1:p1"
 : > "$FAKE_CALLS"
-run focus w1:p2
+jq 'del(.result.panes[1].agent)' "$tmp/list.json" > "$tmp/plain1.json"
+PANE_PICKER_LIST="$tmp/plain1.json" pk focus w1:p2
 check "a plain pane focuses its workspace then its tab" "$(cat "$FAKE_CALLS" | tr '\n' ';')" \
   "workspace focus w1;tab focus w1:t2;"
 : > "$FAKE_CALLS"
