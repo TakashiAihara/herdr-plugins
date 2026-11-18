@@ -2,7 +2,7 @@
 # Pane picker for Herdr. Subcommands:
 #   open                 action entry: open the popup pane
 #   ui                   popup entry: run fzf over the pane list
-#   lines                print the fzf input (id<TAB>display<TAB>search text); group headers have ids "-:<group>"
+#   lines                print the fzf input (id<TAB>display<TAB>search text); group headers have ids "-:<index>"
 #   header               print the fzf header (current sort / group, keys)
 #   enter <id>           print the fzf action for Enter on a row
 #   act <op> [args]      change state: sort-next | group-next | move up|down <id> | prio <n> <id> | clear <id>
@@ -106,10 +106,13 @@ def spec: if endswith(":desc") then {f: .[:-5], desc: true} else {f: ., desc: fa
 
 ($cfg[0]) as $c | ($st[0]) as $s
 | if (.result.panes | type) != "array" then error("herdr pane list has no .result.panes list") else . end
+| def sid: (.agent_session | objects | .value | strings) // "";
+# Panes that share a session id would share one position and one priority, so they use the pane id.
+([.result.panes[] | sid | select(. != "")] | group_by(.) | map(select(length > 1) | .[0])) as $dup
 | .result.panes | to_entries
 | map(.key as $i | .value as $p
-    | (($p.agent_session | objects | .value | strings) // "") as $sid
-    | (if $sid != "" then $sid else $p.pane_id end) as $k
+    | ($p | sid) as $sid
+    | (if $sid != "" and ($dup | index([$sid]) | not) then $sid else $p.pane_id end) as $k
     | (($s.prio // {})[$k]
         // (if $c.priority.source != "manual" then ([field($c.priority.source; $p) | tonumber?] | first) else null end)) as $prio
     | {pane: $p, id: $p.pane_id, key: $k, prio: $prio, idx: $i,
@@ -266,7 +269,7 @@ cmd_preview() {
   pane_list | jq -r --arg id "$id" '
     .result.panes[]? | select(.pane_id == $id)
     | (del(.tokens, .scroll, .revision) | to_entries) + (.tokens // {} | to_entries | map(.key |= "tokens.\(.)"))
-    | .[] | select(.value != null) | "\(.key)\t\(.value | tostring | gsub("[\u0000-\u001f\u007f]"; " "))"'
+    | .[] | select(.value != null) | [.key, .value] | map(tostring | gsub("[\u0000-\u001f\u007f]"; " ")) | join("\t")'
 }
 
 # True when version $1 (x.y[.z]) is at least $2 (x.y).

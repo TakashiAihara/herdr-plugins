@@ -274,6 +274,21 @@ check "preview strips control characters" \
   "$(PANE_PICKER_LIST="$tmp/esc.json" bash "$picker" preview w1:p2 | grep '^title' | tr -d '\033\007' | cut -f2)" "x ]0;evil y"
 
 fresh
+jq '.result.panes[3].agent_session = {"value": "s1"}' "$tmp/list.json" > "$tmp/samesession.json"
+export PANE_PICKER_LIST="$tmp/samesession.json"
+run act sort-next
+run act move down w1:p2
+check "panes sharing a session id are ordered and prioritized apart" \
+  "$(ids)$(run act prio 3 w2:p2; jq -c '[.prio, (.order | keys)]' "$HERDR_PLUGIN_STATE_DIR/state.json")" \
+  'w1:p1 w2:p1 w1:p2 w2:p2 [{"w2:p2":3},["s3","w1:p1","w1:p2","w2:p2"]]'
+export PANE_PICKER_LIST="$tmp/list.json"
+
+fresh
+jq '.result.panes[1].tokens = {"k\u001bx": "v"}' "$tmp/list.json" > "$tmp/esckey.json"
+check "preview strips control characters from token names" \
+  "$(PANE_PICKER_LIST="$tmp/esckey.json" bash "$picker" preview w1:p2 | grep -c $'\033')" "0"
+
+fresh
 jq '.result.panes += [.result.panes[1]]' "$tmp/list.json" > "$tmp/dup.json"
 PANE_PICKER_LIST="$tmp/dup.json" bash "$picker" focus w1:p2
 check "a duplicated pane id is focused once" "$(cat "$FAKE_CALLS" | tr '\n' ';')" "workspace focus w1;tab focus w1:t2;"
