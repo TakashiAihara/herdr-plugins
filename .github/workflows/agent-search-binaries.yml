@@ -1,0 +1,130 @@
+name: agent-search binaries
+
+# Builds agent-search for each platform and publishes it as an asset of the rolling
+# `agent-search-binaries` release, named by the git tree hash of agent-search/. The plugin's
+# scripts/fetch-or-build.sh downloads the asset for the tree it was installed from, so every
+# tree that reaches main has a binary without cutting a tag.
+on:
+  push:
+    branches: [main]
+    paths: ["agent-search/**", ".github/workflows/agent-search-binaries.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time: publishing compares the release's assets with what it built, and parallel runs
+# would decide on each other's half-uploaded state.
+concurrency:
+  group: agent-search-binaries
+  cancel-in-progress: false
+
+jobs:
+  key:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+      exists: ${{ steps.key.outputs.exists }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - id: key
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          key=$(git rev-parse HEAD:agent-search | cut -c1-12)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          assets=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"' 2>/dev/null || true)
+          # Skip the build only when every asset of the key exists, fully uploaded: 4 targets,
+          # each its binary and its .sha256. Keep this list in step with the build matrix below.
+          exists=true
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin; do
+            for suffix in "" ".sha256"; do
+              printf '%s\n' "$assets" | grep -qxF "agent-search-$key-$target$suffix uploaded" || exists=false
+            done
+          done
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: key
+    if: needs.key.outputs.exists != 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install musl tools
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        working-directory: agent-search
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Package
+        run: |
+          name="agent-search-${{ needs.key.outputs.key }}-${{ matrix.target }}"
+          mkdir -p dist
+          cp "agent-search/target/${{ matrix.target }}/release/agent-search" "dist/$name"
+          (cd dist && { sha256sum "$name" 2>/dev/null || shasum -a 256 "$name"; } > "$name.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          retention-days: 1
+
+  publish:
+    needs: [key, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      # shortcut: assets are never pruned; a release holds up to 1000, about 125 trees at 8 files each.
+      # Prune the oldest when that comes close.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create agent-search-binaries --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "agent-search binaries" --notes "Prebuilt agent-search binaries, named by the git tree hash of agent-search/. Installed by agent-search/scripts/fetch-or-build.sh."
+          assets=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"')
+          # A binary and its .sha256 are one pair. Only a pair whose two assets finished uploading
+          # is complete, and a complete pair is never replaced: a binary a user has already
+          # downloaded and checked must not change under its checksum. Half a pair or an asset
+          # still uploading is deleted and the pair is uploaded again.
+          for f in dist/*; do
+            case "$f" in *.sha256) continue ;; esac
+            name=$(basename "$f")
+            if printf '%s\n' "$assets" | grep -qxF "$name uploaded" &&
+              printf '%s\n' "$assets" | grep -qxF "$name.sha256 uploaded"; then
+              echo "keeping the existing $name pair"
+              continue
+            fi
+            for a in "$name" "$name.sha256"; do
+              if printf '%s\n' "$assets" | cut -d' ' -f1 | grep -qxF "$a"; then
+                gh release delete-asset agent-search-binaries --repo "$GITHUB_REPOSITORY" -y "$a" || exit 1
+              fi
+            done
+            if ! gh release upload agent-search-binaries --repo "$GITHUB_REPOSITORY" "$f" "$f.sha256"; then
+              # A parallel run may have completed the pair first; that is fine, any other failure is not.
+              assets=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"')
+              printf '%s\n' "$assets" | grep -qxF "$name uploaded" &&
+                printf '%s\n' "$assets" | grep -qxF "$name.sha256 uploaded" || exit 1
+            fi
+          done
