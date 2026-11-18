@@ -388,7 +388,7 @@ rc=1"
 fresh
 jq '.result.panes[1].title = "x\u001b]0;evil\u0007y"' "$tmp/list.json" > "$tmp/esc.json"
 check "preview strips control characters" \
-  "$(AGENT_SEARCH_LIST="$tmp/esc.json" pk preview w1:p2 | grep '^title' | tr -d '\033\007' | cut -f2)" "x ]0;evil y"
+  "$(AGENT_SEARCH_LIST="$tmp/esc.json" pk preview w1:p2 | grep '^title' | tr -d '\033\007' | sed -E 's/^[^ ]+ +//')" "x ]0;evil y"
 
 fresh
 jq '.result.panes[3].agent_session = {"value": "s1"}' "$tmp/list.json" > "$tmp/samesession.json"
@@ -429,7 +429,7 @@ rm "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 fresh
 AGENT_SEARCH_LIST="$tmp/withplain.json" pk act move down w2:p2
 check "a plain pane is not a move neighbor" "$(jq -c .order "$HERDR_PLUGIN_STATE_DIR/state.json")" "{}"
-check "a plain pane can still be previewed" "$(AGENT_SEARCH_LIST="$tmp/withplain.json" pk preview w3:p1 | grep '^title' | cut -f2)" "zsh"
+check "a plain pane can still be previewed" "$(AGENT_SEARCH_LIST="$tmp/withplain.json" pk preview w3:p1 | grep '^title' | sed -E 's/^[^ ]+ +//')" "zsh"
 fresh
 : > "$FAKE_CALLS"
 AGENT_SEARCH_LIST="$tmp/withplain.json" pk focus w3:p1
@@ -463,8 +463,10 @@ check "open launches the search pane entrypoint" "$(cat "$FAKE_CALLS")" \
   "plugin pane open --plugin takashiaihara.agent-search --entrypoint search"
 
 fresh
-check "preview lists fields and tokens" "$(run preview w2:p1 | grep -E '^(title|tokens.task)' | tr '\t' '=' | tr '\n' ';')" \
+check "preview lists fields and tokens" "$(run preview w2:p1 | grep -E '^(title|tokens.task)' | sed -E 's/^([^ ]+) +/\1=/' | tr '\n' ';')" \
   "title=write docs;tokens.task=urgent kaneo;"
+check "preview values start in one column" "$(run preview w2:p1 | awk '{match($0, /^[^ ]+ +/); print RLENGTH}' | LC_ALL=C sort -u | wc -l | tr -d ' ')" "1"
+check "preview has more than one line" "$([ "$(run preview w2:p1 | wc -l)" -gt 3 ] && echo yes)" "yes"
 check "preview of a group header is empty" "$(run preview -:alpha)" ""
 
 fresh

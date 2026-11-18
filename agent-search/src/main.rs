@@ -523,8 +523,19 @@ fn preview_text(list: &Option<Value>, id: &str) -> String {
             ),
             _ => {}
         }
-        for (k, v) in entries.into_iter().filter(|(_, v)| !v.is_null()) {
-            text.push_str(&format!("{}\t{}\n", clean(&k), clean(&tostring(v))));
+        let entries: Vec<(String, String)> = entries
+            .into_iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| (clean(&k), clean(&tostring(v))))
+            .collect();
+        // Keys are padded to one column so the values line up (a tab lands on different stops).
+        let w = entries
+            .iter()
+            .map(|(k, _)| k.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (k, v) in entries {
+            text.push_str(&format!("{k:<w$}  {v}\n"));
         }
     }
     text
