@@ -1,24 +1,24 @@
 #!/bin/sh
 # The [[build]] step Herdr runs after installing or updating the plugin.
 #
-# Fast path: download the prebuilt binary built from exactly this pane-picker/ tree for this
-# platform, check its SHA-256, and put it at target/release/pane-picker, where the manifest points.
-# The key is the git tree hash of pane-picker/ in this checkout, so the binary always matches the
+# Fast path: download the prebuilt binary built from exactly this agent-search/ tree for this
+# platform, check its SHA-256, and put it at target/release/agent-search, where the manifest points.
+# The key is the git tree hash of agent-search/ in this checkout, so the binary always matches the
 # source that was installed; CI publishes one per tree that reaches main
-# (.github/workflows/pane-picker-binaries.yml).
+# (.github/workflows/agent-search-binaries.yml).
 #
 # Fallback, on any miss (no git, no binary for this tree or platform, a failed download or
 # checksum, a binary that does not run here): build from source with cargo.
 #
-# PANE_PICKER_ROOT / PANE_PICKER_OUT / PANE_PICKER_BASE_URL / PANE_PICKER_KEY override the inputs
+# AGENT_SEARCH_ROOT / AGENT_SEARCH_OUT / AGENT_SEARCH_BASE_URL / AGENT_SEARCH_KEY override the inputs
 # so tests can run every path without the network.
 set -u
 
 repo="TakashiAihara/herdr-plugins"
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-root="${PANE_PICKER_ROOT:-$script_dir/..}"
-out="${PANE_PICKER_OUT:-$root/target/release/pane-picker}"
-base_url="${PANE_PICKER_BASE_URL:-https://github.com/$repo/releases/download/pane-picker-binaries}"
+root="${AGENT_SEARCH_ROOT:-$script_dir/..}"
+out="${AGENT_SEARCH_OUT:-$root/target/release/agent-search}"
+base_url="${AGENT_SEARCH_BASE_URL:-https://github.com/$repo/releases/download/agent-search-binaries}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -26,14 +26,14 @@ build_from_source() {
   # Herdr started from a desktop launcher may not have the login shell's PATH.
   [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
   if ! have cargo; then
-    echo "pane-picker: no prebuilt binary and no cargo to build one. Install Rust from https://rustup.rs, then run: herdr plugin update" >&2
+    echo "agent-search: no prebuilt binary and no cargo to build one. Install Rust from https://rustup.rs, then run: herdr plugin update" >&2
     exit 1
   fi
   cd "$root" && exec cargo build --release --locked
 }
 
 fallback() {
-  echo "pane-picker: $1; building from source." >&2
+  echo "agent-search: $1; building from source." >&2
   [ -n "${tmp:-}" ] && rm -rf "$tmp"
   build_from_source
 }
@@ -58,13 +58,13 @@ case "$(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)" in
   *) fallback "no prebuilt binary for $(uname -s)/$(uname -m)" ;;
 esac
 
-key="${PANE_PICKER_KEY:-}"
+key="${AGENT_SEARCH_KEY:-}"
 if [ -z "$key" ]; then
   have git || fallback "git is not available to identify this checkout"
-  key=$(git -C "$root" rev-parse HEAD:pane-picker 2>/dev/null) || fallback "not a git checkout"
+  key=$(git -C "$root" rev-parse HEAD:agent-search 2>/dev/null) || fallback "not a git checkout"
 fi
 key=$(printf '%s' "$key" | cut -c1-12)
-asset="pane-picker-$key-$triple"
+asset="agent-search-$key-$triple"
 
 tmp=$(mktemp -d 2>/dev/null) || fallback "cannot create a temporary directory"
 download "$base_url/$asset" "$tmp/$asset" || fallback "no prebuilt binary $asset"
@@ -77,4 +77,4 @@ chmod +x "$tmp/$asset"
 
 mkdir -p "$(dirname "$out")" && mv -f "$tmp/$asset" "$out" || fallback "cannot install to $out"
 rm -rf "$tmp"
-echo "pane-picker: installed prebuilt $asset"
+echo "agent-search: installed prebuilt $asset"

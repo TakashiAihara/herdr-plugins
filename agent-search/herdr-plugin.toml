@@ -1,0 +1,31 @@
+id = "takashiaihara.agent-search"
+name = "Agent search"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Jump to an agent from a popup that searches every pane field and token, and sorts, groups, prioritizes and reorders the list"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "scripts/fetch-or-build.sh"]
+
+[[actions]]
+id = "open"
+title = "Search agents"
+command = ["target/release/agent-search", "open"]
+
+[[panes]]
+id = "search"
+title = "Agent search"
+placement = "popup"
+width = "80%"
+height = "70%"
+command = ["target/release/agent-search", "ui"]
+
+[[startup]]
+command = ["target/release/agent-search", "restore"]
+
+# After a Herdr restart an agent may be detected only after the startup hook ran; restore its
+# priority token when it appears.
+[[events]]
+on = "pane.agent_detected"
+command = ["target/release/agent-search", "restore"]

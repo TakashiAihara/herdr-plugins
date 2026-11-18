@@ -1,13 +1,13 @@
-name: pane-picker binaries
+name: agent-search binaries
 
-# Builds pane-picker for each platform and publishes it as an asset of the rolling
-# `pane-picker-binaries` release, named by the git tree hash of pane-picker/. The plugin's
+# Builds agent-search for each platform and publishes it as an asset of the rolling
+# `agent-search-binaries` release, named by the git tree hash of agent-search/. The plugin's
 # scripts/fetch-or-build.sh downloads the asset for the tree it was installed from, so every
 # tree that reaches main has a binary without cutting a tag.
 on:
   push:
     branches: [main]
-    paths: ["pane-picker/**", ".github/workflows/pane-picker-binaries.yml"]
+    paths: ["agent-search/**", ".github/workflows/agent-search-binaries.yml"]
   workflow_dispatch:
 
 permissions:
@@ -28,10 +28,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          key=$(git rev-parse HEAD:pane-picker | cut -c1-12)
+          key=$(git rev-parse HEAD:agent-search | cut -c1-12)
           echo "key=$key" >> "$GITHUB_OUTPUT"
-          assets=$(gh release view pane-picker-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)
-          if printf '%s\n' "$assets" | grep -qx "pane-picker-$key-x86_64-unknown-linux-musl.sha256"; then
+          assets=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          if printf '%s\n' "$assets" | grep -qx "agent-search-$key-x86_64-unknown-linux-musl.sha256"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -58,15 +58,15 @@ jobs:
         if: contains(matrix.target, 'linux-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
-        working-directory: pane-picker
+        working-directory: agent-search
         run: |
           rustup target add "${{ matrix.target }}"
           cargo build --release --locked --target "${{ matrix.target }}"
       - name: Package
         run: |
-          name="pane-picker-${{ needs.key.outputs.key }}-${{ matrix.target }}"
+          name="agent-search-${{ needs.key.outputs.key }}-${{ matrix.target }}"
           mkdir -p dist
-          cp "pane-picker/target/${{ matrix.target }}/release/pane-picker" "dist/$name"
+          cp "agent-search/target/${{ matrix.target }}/release/agent-search" "dist/$name"
           (cd dist && { sha256sum "$name" 2>/dev/null || shasum -a 256 "$name"; } > "$name.sha256")
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -90,7 +90,7 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view pane-picker-binaries --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
-            gh release create pane-picker-binaries --repo "$GITHUB_REPOSITORY" --prerelease \
-              --title "pane-picker binaries" --notes "Prebuilt pane-picker binaries, named by the git tree hash of pane-picker/. Installed by pane-picker/scripts/fetch-or-build.sh."
-          gh release upload pane-picker-binaries --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create agent-search-binaries --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "agent-search binaries" --notes "Prebuilt agent-search binaries, named by the git tree hash of agent-search/. Installed by agent-search/scripts/fetch-or-build.sh."
+          gh release upload agent-search-binaries --repo "$GITHUB_REPOSITORY" --clobber dist/*

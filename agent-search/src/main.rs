@@ -31,19 +31,20 @@ impl Env {
         let home = std::env::var("HOME").unwrap_or_default();
         let config_dir = var("HERDR_PLUGIN_CONFIG_DIR").unwrap_or_else(|| {
             let base = var("XDG_CONFIG_HOME").unwrap_or_else(|| format!("{home}/.config"));
-            format!("{base}/herdr-pane-picker")
+            format!("{base}/herdr-agent-search")
         });
         let state_dir = var("HERDR_PLUGIN_STATE_DIR").unwrap_or_else(|| {
             let base = var("XDG_STATE_HOME").unwrap_or_else(|| format!("{home}/.local/state"));
-            format!("{base}/herdr-pane-picker")
+            format!("{base}/herdr-agent-search")
         });
         Env {
             herdr: var("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into()),
             config_path: format!("{config_dir}/config.json"),
             state_path: format!("{state_dir}/state.json"),
             state_dir,
-            list: var("PANE_PICKER_LIST"),
-            plugin_id: var("HERDR_PLUGIN_ID").unwrap_or_else(|| "takashiaihara.pane-picker".into()),
+            list: var("AGENT_SEARCH_LIST"),
+            plugin_id: var("HERDR_PLUGIN_ID")
+                .unwrap_or_else(|| "takashiaihara.agent-search".into()),
         }
     }
 
@@ -319,7 +320,7 @@ fn restore(env: &Env) -> Res<()> {
             continue;
         };
         if !env.report_priority(&cfg.priority_token, &r.id, Some(&tostring(&saved))) {
-            eprintln!("pane-picker: cannot restore the priority of {}", r.id);
+            eprintln!("agent-search: cannot restore the priority of {}", r.id);
         }
     }
     Ok(())
@@ -425,7 +426,7 @@ fn open(env: &Env) -> i32 {
             "--plugin",
             &env.plugin_id,
             "--entrypoint",
-            "picker",
+            "search",
         ])
         .stdout(Stdio::null())
         .status()
@@ -451,11 +452,11 @@ fn main() {
         "focus" => focus(&env, first(0)),
         "preview" => preview(&env, first(0)),
         _ => Err(
-            "usage: pane-picker open|ui|lines|header|enter|act|focus|preview|restore".to_string(),
+            "usage: agent-search open|ui|lines|header|enter|act|focus|preview|restore".to_string(),
         ),
     };
     if let Err(msg) = result {
-        eprintln!("pane-picker: {msg}");
+        eprintln!("agent-search: {msg}");
         std::process::exit(1);
     }
 }

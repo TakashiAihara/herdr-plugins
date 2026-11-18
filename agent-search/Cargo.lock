@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "agent-search"
+version = "0.1.0"
+dependencies = [
+ "nucleo-matcher",
+ "ratatui",
+ "serde_json",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -788,15 +797,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e6eb142958d64335fb0e345c5b9ead2ecd6fc438c307e9d7d3c4fd428dbaf12"
 dependencies = [
  "libm",
-]
-
-[[package]]
-name = "pane-picker"
-version = "0.2.0"
-dependencies = [
- "nucleo-matcher",
- "ratatui",
- "serde_json",
 ]
 
 [[package]]

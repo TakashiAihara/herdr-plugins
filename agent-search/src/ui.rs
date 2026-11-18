@@ -308,7 +308,7 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
 
 fn show_error(term: &mut DefaultTerminal, msg: &str) {
     loop {
-        let text = format!("pane-picker: {msg}\n\nPress Enter.");
+        let text = format!("agent-search: {msg}\n\nPress Enter.");
         if term
             .draw(|f| f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), f.area()))
             .is_err()
