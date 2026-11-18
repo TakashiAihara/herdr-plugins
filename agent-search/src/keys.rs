@@ -124,6 +124,27 @@ fn is_builtin(b: Bind) -> bool {
     }
 }
 
+// Ctrl with one of these chars is the same byte a terminal sends for another key: ^M is Enter's
+// byte, ^I is Tab's, ^H is Backspace's, ^J is the byte Enter sends when the line discipline maps
+// it, ^[ is Esc's and ^@ is Ctrl-Space's. A bind named for the char either never fires, because
+// the terminal reports the other key, or it steals that key's presses.
+fn ctrl_byte(b: Bind) -> Option<&'static str> {
+    if b.mods != KeyModifiers::CONTROL {
+        return None;
+    }
+    let KeyCode::Char(c) = b.code else {
+        return None;
+    };
+    Some(match c.to_ascii_lowercase() {
+        'm' | 'j' => "enter",
+        'i' => "tab",
+        'h' => "backspace",
+        '[' => "esc",
+        '@' => "ctrl-space",
+        _ => return None,
+    })
+}
+
 // Every configured key must be a key the popup can see, unique, and not one it already uses. The
 // error names the field.
 pub fn validate(keys: &Keys) -> Result<Vec<(&'static str, Bind)>, String> {
@@ -136,6 +157,11 @@ pub fn validate(keys: &Keys) -> Result<Vec<(&'static str, Bind)>, String> {
         ("clear", &keys.clear),
     ] {
         let bind = parse_key_err(name).map_err(|e| format!("{e} in keys.{field}"))?;
+        if let Some(other) = ctrl_byte(bind) {
+            return Err(format!(
+                "keys.{field} {name:?} is the same key as {other} to a terminal"
+            ));
+        }
         if is_builtin(bind) {
             return Err(format!(
                 "keys.{field} {name:?} is already used by the popup (alt-1..alt-9, esc, enter, backspace, up, down, ctrl-p, ctrl-n, ctrl-c, or a character typed into the search)"
@@ -295,5 +321,30 @@ mod tests {
             bad.contains("unknown key name \"ctrl-nonsense\" in keys.sort"),
             "{bad}"
         );
+    }
+
+    #[test]
+    fn ctrl_names_that_are_other_keys_on_a_terminal_are_rejected() {
+        for (name, other) in [
+            ("ctrl-m", "enter"),
+            ("ctrl-j", "enter"),
+            ("ctrl-i", "tab"),
+            ("ctrl-h", "backspace"),
+            ("ctrl-[", "esc"),
+            ("ctrl-@", "ctrl-space"),
+        ] {
+            let err = validate(&keys(name, "ctrl-g")).err().unwrap_or_default();
+            assert!(
+                err.contains(&format!(
+                    "keys.sort {name:?} is the same key as {other} to a terminal"
+                )),
+                "{name}: {err}"
+            );
+        }
+        // Ctrl with more modifiers is not the name of a control byte, and neither are the ctrl
+        // letters a terminal does report as Char+CONTROL.
+        for fine in ["ctrl-k", "ctrl-4", "ctrl-shift-m", "alt-ctrl-m"] {
+            assert!(validate(&keys(fine, "ctrl-g")).is_ok(), "{fine}");
+        }
     }
 }

@@ -134,6 +134,17 @@ fn extract(v: &Value) -> Option<Config> {
 }
 
 pub fn load(path: &str) -> Result<Config, String> {
+    load_with(path, true)
+}
+
+// `restore` never binds keys: it only needs `priority_token` and the settings that build rows, so
+// a config whose `keys` are unusable or invalid still restores priorities. Its keys are replaced
+// by the defaults before extraction; every other error still fails.
+pub fn load_for_restore(path: &str) -> Result<Config, String> {
+    load_with(path, false)
+}
+
+fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
     let mut merged = defaults();
     if Path::new(path).is_file() {
         let user = fs::read_to_string(path)
@@ -143,8 +154,18 @@ pub fn load(path: &str) -> Result<Config, String> {
             .ok_or_else(|| format!("{path} is not a JSON object"))?;
         merged = merge(merged, user);
     }
+    if !need_keys {
+        if let Value::Object(m) = &mut merged {
+            m.insert("keys".into(), defaults()["keys"].clone());
+        }
+    }
     let cfg = extract(&merged).ok_or_else(|| {
-        format!("{path}: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {{name, by}} with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -), and keys sort/group/up/down/clear non-empty strings")
+        let fields = "columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)";
+        if need_keys {
+            format!("{path}: {fields}, and keys sort/group/up/down/clear non-empty strings")
+        } else {
+            format!("{path}: {fields}")
+        }
     })?;
     validate(&cfg).map_err(|e| format!("{path}: {e}"))?;
     Ok(cfg)
@@ -182,10 +203,14 @@ mod tests {
     use super::*;
 
     fn load_json(json: &str) -> Result<Config, String> {
+        load_json_with(json, load)
+    }
+
+    fn load_json_with(json: &str, f: fn(&str) -> Result<Config, String>) -> Result<Config, String> {
         let dir = crate::testutil::unique_dir("cfg");
         let file = dir.join("config.json");
         fs::write(&file, json).unwrap_or_else(|e| panic!("{e}"));
-        let loaded = load(&file.to_string_lossy());
+        let loaded = f(&file.to_string_lossy());
         let _ = fs::remove_dir_all(&dir);
         loaded
     }
@@ -214,6 +239,28 @@ mod tests {
             "{err}"
         );
         assert!(load_json(r#"{"keys":{"sort":"alt-A"}}"#).is_ok());
+    }
+
+    #[test]
+    fn restore_needs_no_valid_keys_but_the_rest_of_the_config_still_applies() {
+        for keys in [
+            r#"{"keys":{"sort":"x"}}"#,
+            r#"{"keys":{"up":"ctrl-nonsense"}}"#,
+            r#"{"keys":{"sort":"shift-1"}}"#,
+            r#"{"keys":{"up":5}}"#,
+            r#"{"keys":[]}"#,
+        ] {
+            assert!(load_json_with(keys, load_for_restore).is_ok(), "{keys}");
+            assert!(load_json(keys).is_err(), "{keys}");
+        }
+        for bad in [
+            r#"{"columns":"title"}"#,
+            r#"{"sorts":[]}"#,
+            r#"{"priority_token":"a b"}"#,
+            r#"{"columns":["title."]}"#,
+        ] {
+            assert!(load_json_with(bad, load_for_restore).is_err(), "{bad}");
+        }
     }
 }
 

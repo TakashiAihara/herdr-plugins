@@ -99,6 +99,11 @@ impl Env {
         config::load(&self.config_path)
     }
 
+    // `restore` only: it never binds keys, so a config whose keys cannot be bound must not stop it.
+    fn config_for_restore(&self) -> Res<Config> {
+        config::load_for_restore(&self.config_path)
+    }
+
     // `herdr pane report-metadata` for the priority token: Some(n) sets it, None clears it.
     // Output is captured, never inherited: the popup's terminal is live while this runs. Err holds stderr.
     fn report_priority(&self, token: &str, id: &str, n: Option<&str>) -> Result<(), String> {
@@ -392,19 +397,20 @@ fn with_detail(msg: String, detail: &str) -> String {
 
 // Herdr drops tokens when its server restarts: set again the saved priority of every pane that lost it.
 fn restore(env: &Env) -> Res<()> {
-    let cfg = env.config()?;
-    // The lock is held only while the saved priorities are read, so a concurrent write is never
-    // half seen; the herdr calls below do not need it.
-    let todo: Vec<(String, Value)> = {
+    let cfg = env.config_for_restore()?;
+    // The pane list is fetched before the lock is taken, so a slow `herdr pane list` never holds
+    // it (other acts wait at most 2 s for the lock). The lock then covers only reading the saved
+    // priorities, so a concurrent write is never half seen; the herdr calls below do not need it.
+    let list = env.pane_list()?;
+    let st = {
         let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
-        let st = State::load(&env.state_path);
-        Snapshot::empty()
-            .rows(env, &cfg, &st)?
-            .into_iter()
-            .filter(|r| !r.has_token)
-            .filter_map(|r| st.lookup("prio", &r.key).map(|saved| (r.id, saved)))
-            .collect()
+        State::load(&env.state_path)
     };
+    let todo: Vec<(String, Value)> = rows::build(list.as_ref(), &cfg, &st)?
+        .into_iter()
+        .filter(|r| !r.has_token)
+        .filter_map(|r| st.lookup("prio", &r.key).map(|saved| (r.id, saved)))
+        .collect();
     for (id, saved) in todo {
         if let Err(detail) = env.report_priority(&cfg.priority_token, &id, Some(&tostring(&saved)))
         {
@@ -638,6 +644,30 @@ mod tests {
         let err = restore(&env).err().unwrap_or_default();
         assert!(err.starts_with("cannot lock "), "{err}");
         drop(held);
+        // herdr is not installed here, so the one saved priority fails and is reported, not raised.
+        assert!(restore(&env).is_ok());
+    }
+
+    #[test]
+    fn restore_reads_the_pane_list_before_it_waits_for_the_lock() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let env = env_with("restorelist", panes, json!({"prio": {"p1": 3}}));
+        std::fs::write(env.list.as_deref().unwrap_or_default(), "garbage")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let held =
+            state::Lock::acquire(&env.state_dir, &env.state_path).unwrap_or_else(|e| panic!("{e}"));
+        // The pane list is fetched first, so its error wins over the held lock instead of the
+        // fetch running under it.
+        let err = restore(&env).err().unwrap_or_default();
+        assert_eq!(err, LIST_ERR);
+        drop(held);
+    }
+
+    #[test]
+    fn restore_works_when_the_configs_keys_cannot_be_bound() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let env = env_with("restorekeys", panes, json!({"prio": {"p1": 3}}));
+        std::fs::write(&env.config_path, r#"{"keys":[]}"#).unwrap_or_else(|e| panic!("{e}"));
         // herdr is not installed here, so the one saved priority fails and is reported, not raised.
         assert!(restore(&env).is_ok());
     }

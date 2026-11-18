@@ -30,13 +30,13 @@ jobs:
         run: |
           key=$(git rev-parse HEAD:agent-search | cut -c1-12)
           echo "key=$key" >> "$GITHUB_OUTPUT"
-          assets=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)
-          # Skip the build only when every asset of the key exists: 4 targets, each with its .sha256.
-          # Keep this list in step with the build matrix below.
+          assets=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"' 2>/dev/null || true)
+          # Skip the build only when every asset of the key exists, fully uploaded: 4 targets,
+          # each its binary and its .sha256. Keep this list in step with the build matrix below.
           exists=true
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin; do
             for suffix in "" ".sha256"; do
-              printf '%s\n' "$assets" | grep -qxF "agent-search-$key-$target$suffix" || exists=false
+              printf '%s\n' "$assets" | grep -qxF "agent-search-$key-$target$suffix uploaded" || exists=false
             done
           done
           echo "exists=$exists" >> "$GITHUB_OUTPUT"
@@ -97,17 +97,28 @@ jobs:
           gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             gh release create agent-search-binaries --repo "$GITHUB_REPOSITORY" --prerelease \
               --title "agent-search binaries" --notes "Prebuilt agent-search binaries, named by the git tree hash of agent-search/. Installed by agent-search/scripts/fetch-or-build.sh."
-          # Only assets the release does not have yet are uploaded, and none is ever replaced: a
-          # binary a user has already downloaded and checked must not change under its checksum.
-          existing=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          assets=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"')
+          # A binary and its .sha256 are one pair. Only a pair whose two assets finished uploading
+          # is complete, and a complete pair is never replaced: a binary a user has already
+          # downloaded and checked must not change under its checksum. Half a pair or an asset
+          # still uploading is deleted and the pair is uploaded again.
           for f in dist/*; do
+            case "$f" in *.sha256) continue ;; esac
             name=$(basename "$f")
-            if printf '%s\n' "$existing" | grep -qxF "$name"; then
-              echo "keeping the existing $name"
+            if printf '%s\n' "$assets" | grep -qxF "$name uploaded" &&
+              printf '%s\n' "$assets" | grep -qxF "$name.sha256 uploaded"; then
+              echo "keeping the existing $name pair"
               continue
             fi
-            if ! gh release upload agent-search-binaries --repo "$GITHUB_REPOSITORY" "$f"; then
-              # A parallel run may have uploaded it first; that is fine, any other failure is not.
-              gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qxF "$name" || exit 1
+            for a in "$name" "$name.sha256"; do
+              if printf '%s\n' "$assets" | cut -d' ' -f1 | grep -qxF "$a"; then
+                gh release delete-asset agent-search-binaries --repo "$GITHUB_REPOSITORY" -y "$a" || exit 1
+              fi
+            done
+            if ! gh release upload agent-search-binaries --repo "$GITHUB_REPOSITORY" "$f" "$f.sha256"; then
+              # A parallel run may have completed the pair first; that is fine, any other failure is not.
+              assets=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"')
+              printf '%s\n' "$assets" | grep -qxF "$name uploaded" &&
+                printf '%s\n' "$assets" | grep -qxF "$name.sha256 uploaded" || exit 1
             fi
           done

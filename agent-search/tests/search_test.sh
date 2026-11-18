@@ -232,6 +232,29 @@ rc=0
 pane report-metadata w2:p1 --source takashiaihara.agent-search --token prio=4;pane report-metadata w2:p2 --source takashiaihara.agent-search --token prio=2;"
 
 fresh
+run act prio 4 w2:p1
+jq 'del(.result.panes[].tokens.prio)' "$tmp/list.json" > "$tmp/lostkeys.json"
+echo '{"keys":{"sort":"x","up":"ctrl-nonsense"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+: > "$FAKE_CALLS"
+check "restore does not need valid keys" \
+  "$(AGENT_SEARCH_LIST="$tmp/lostkeys.json" pk restore 2>&1; echo "rc=$?"; cat "$FAKE_CALLS")" \
+  "rc=0
+pane report-metadata w2:p1 --source takashiaihara.agent-search --token prio=4"
+echo '{"keys":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "restore does not need keys that are even an object" \
+  "$(AGENT_SEARCH_LIST="$tmp/lostkeys.json" pk restore 2>&1; echo "rc=$?")" "rc=0"
+echo '{"columns":["title."]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a bad field still fails restore" \
+  "$(AGENT_SEARCH_LIST="$tmp/lostkeys.json" pk restore 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: invalid field \"title.\": its path has an empty part
+rc=1"
+echo '{"columns":"title"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a shape error in restore no longer names keys" \
+  "$(AGENT_SEARCH_LIST="$tmp/lostkeys.json" pk restore 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)
+rc=1"
+
+fresh
 echo '{"groups":[{"name":"ws","by":["workspace_id"]}],"sorts":[{"name":"title","by":["title:desc"]}]}' \
   > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "configured sorts and groups replace the defaults" "$(run header | head -1)" "sort: title  group: ws"
@@ -488,9 +511,14 @@ check "a lock file left behind by a process that is gone blocks nobody" \
 state.json state.json.lock "
 
 fresh
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do pk act sort-next & done
-wait
-check "twelve concurrent acts are serialized, none is lost" "$(jq -c '.sort' "$HERDR_PLUGIN_STATE_DIR/state.json")" "null"
+# Ten runs: the sort cycles every 3 writes, so 10 serialized writes land on "manual" and a lost
+# update lands on "status" or null. Each run's exit status is collected too, so a run that could
+# not take the lock shows up instead of being silently counted.
+rcs=$(
+  for i in 1 2 3 4 5 6 7 8 9 10; do pk act sort-next 2>&1 || echo "rc=$?" & done
+  wait
+)
+check "ten concurrent acts are serialized, none is lost" "$(jq -c '.sort' "$HERDR_PLUGIN_STATE_DIR/state.json")$rcs" '"manual"'
 
 fresh
 echo '{"sorts":[{"name":"a","by":["title"]},{"name":"bad","by":["tokens.repo.x"]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
@@ -514,7 +542,13 @@ check "two spellings of one key are a config error" "$(run lines 2>&1 >/dev/null
   "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.group \"alt-shift-a\" is the same key as keys.sort
 rc=1"
 echo '{"keys":{"sort":"shift-1"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
-check "shift with a non-letter is a config error naming the key" "$(run lines 2>&1 >/dev/null | grep -c '"shift-1": shift only combines with a letter or a named key')" "1"
+check "shift with a non-letter is a config error naming the key" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: \"shift-1\": shift only combines with a letter or a named key; the terminal reports the shifted character itself, so name that character in keys.sort
+rc=1"
+echo '{"keys":{"sort":"ctrl-m"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a ctrl name that is another key's byte is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.sort \"ctrl-m\" is the same key as enter to a terminal
+rc=1"
 echo '{"keys":{"sort":"shift-tab"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "shift-tab is accepted" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
 echo '{"columns":["title."]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
