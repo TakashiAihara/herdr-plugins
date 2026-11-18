@@ -94,7 +94,7 @@ A config that is not a JSON object, or has a key of the wrong shape (an empty li
 
 ## State
 
-`state.json` in the plugin state directory holds the current sort and grouping, the manual order, and the priorities the popup set. An agent is keyed by its agent session id when it has one, so its manual order survives a Herdr restart that renumbers panes; other panes are keyed by pane id. Entries of panes that are gone are dropped on every change.
+`state.json` in the plugin state directory holds the current sort and grouping, the manual order, and the priorities the popup set. An agent is keyed by its agent session id when it has one, so its manual order survives a Herdr restart that renumbers panes; other panes are keyed by pane id. Entries of panes that are gone from `herdr pane list` are dropped on every change made outside the popup (the popup works on a snapshot, so it never drops anything). Concurrent writers are serialized with `state.json.lock`.
 
 ## Limits
 

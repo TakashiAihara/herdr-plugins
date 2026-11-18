@@ -31,11 +31,15 @@ jobs:
           key=$(git rev-parse HEAD:agent-search | cut -c1-12)
           echo "key=$key" >> "$GITHUB_OUTPUT"
           assets=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)
-          if printf '%s\n' "$assets" | grep -qx "agent-search-$key-x86_64-unknown-linux-musl.sha256"; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Skip the build only when every asset of the key exists: 4 targets, each with its .sha256.
+          # Keep this list in step with the build matrix below.
+          exists=true
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin; do
+            for suffix in "" ".sha256"; do
+              printf '%s\n' "$assets" | grep -qxF "agent-search-$key-$target$suffix" || exists=false
+            done
+          done
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
 
   build:
     needs: key

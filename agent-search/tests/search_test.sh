@@ -19,7 +19,7 @@ if [ "$1 $2" = "pane list" ]; then [ -n "${FAKE_PANE_LIST_FAIL:-}" ] && exit 1; 
 # report-metadata edits the list file agent-search reads, as Herdr would change its own pane list.
 # FAKE_META_FAIL=1 fails every call, FAKE_META_FAIL=<pane id> only the calls for that pane.
 if [ "$1 $2" = "pane report-metadata" ]; then
-  case "${FAKE_META_FAIL:-}" in 1|"$3") exit 1 ;; esac
+  case "${FAKE_META_FAIL:-}" in 1|"$3") [ -n "${FAKE_META_STDERR:-}" ] && echo "herdr: boom" >&2; exit 1 ;; esac
   f=${AGENT_SEARCH_LIST:-$FAKE_LIST}
   id=$3
   shift 3
@@ -436,6 +436,79 @@ fresh
 check "preview lists fields and tokens" "$(run preview w2:p1 | grep -E '^(title|tokens.task)' | tr '\t' '=' | tr '\n' ';')" \
   "title=write docs;tokens.task=urgent kaneo;"
 check "preview of a group header is empty" "$(run preview -:alpha)" ""
+
+fresh
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+echo '{"prio":{"w3:p1":5,"gone":2},"order":{"w3:p1":1,"gone":3,"s1":9}}' > "$HERDR_PLUGIN_STATE_DIR/state.json"
+jq '.result.panes += [{"pane_id":"w3:p1","workspace_id":"w3","tab_id":"w3:t1","title":"zsh"}]' "$tmp/list.json" > "$tmp/plain3.json"
+AGENT_SEARCH_LIST="$tmp/plain3.json" pk act sort-next
+check "pruning keeps the state of a pane that is in the list but not an agent, and drops one that is gone" \
+  "$(jq -c '[.prio, .order]' "$HERDR_PLUGIN_STATE_DIR/state.json")" '[{"w3:p1":5},{"w3:p1":1,"s1":9}]'
+AGENT_SEARCH_LIST="$tmp/plain3.json" pk act move down w1:p1
+check "a move keeps the saved position of a pane that is not listed" \
+  "$(jq -c '.order["w3:p1"]' "$HERDR_PLUGIN_STATE_DIR/state.json")" "1"
+echo '{"result":{"panes":[]}}' > "$tmp/nopanes.json"
+AGENT_SEARCH_LIST="$tmp/nopanes.json" pk act sort-next
+check "an empty pane list prunes nothing" "$(jq -c '.prio' "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"w3:p1":5}'
+
+fresh
+check "a state dir that cannot be written fails before herdr is called" \
+  "$(echo x > "$tmp/notadir"; HERDR_PLUGIN_STATE_DIR="$tmp/notadir/sub" pk act prio 2 w2:p2 2>&1; echo "rc=$?"; cat "$FAKE_CALLS")" \
+  "agent-search: cannot create $tmp/notadir/sub
+rc=1"
+
+fresh
+check "a failed herdr call leaves no state file when there was none" \
+  "$(FAKE_META_FAIL=1 pk act prio 2 w2:p2 2>&1; echo "rc=$?"; ls "$HERDR_PLUGIN_STATE_DIR" | tr '\n' ' ')" \
+  "agent-search: cannot set the priority of w2:p2
+rc=1"
+check "herdr's stderr is shown once, in the message, not written to the terminal" \
+  "$(FAKE_META_STDERR=1 FAKE_META_FAIL=1 pk act prio 2 w2:p2 2>&1)" \
+  "agent-search: cannot set the priority of w2:p2 (herdr: boom)"
+run act prio 4 w2:p1
+jq 'del(.result.panes[].tokens.prio)' "$tmp/list.json" > "$tmp/lost2.json"
+check "restore failures carry herdr's stderr in the one line" \
+  "$(FAKE_META_STDERR=1 FAKE_META_FAIL=1 AGENT_SEARCH_LIST="$tmp/lost2.json" pk restore 2>&1)" \
+  "agent-search: cannot restore the priority of w2:p1 (herdr: boom)"
+
+fresh
+mkdir -p "$HERDR_PLUGIN_STATE_DIR/state.json"
+check "a state file that exists but cannot be read aborts the act" \
+  "$(pk act prio 2 w2:p2 2>&1; echo "rc=$?"; cat "$FAKE_CALLS")" \
+  "agent-search: cannot read $HERDR_PLUGIN_STATE_DIR/state.json
+rc=1"
+check "an unreadable state does not stop the read-only commands" "$(ids)" "w1:p1 w1:p2 w2:p1 w2:p2 "
+
+fresh
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+touch -d '1 minute ago' "$HERDR_PLUGIN_STATE_DIR/state.json.lock"
+check "a lock older than 10 seconds is stale and taken over" \
+  "$(pk act sort-next 2>&1; echo "rc=$?"; ls "$HERDR_PLUGIN_STATE_DIR" | tr '\n' ' ')" "rc=0
+state.json "
+touch "$HERDR_PLUGIN_STATE_DIR/state.json.lock"
+check "a fresh lock held by someone else makes the act fail after waiting" \
+  "$(pk act sort-next 2>&1; echo "rc=$?"; [ -f "$HERDR_PLUGIN_STATE_DIR/state.json.lock" ] && echo lock-kept)" \
+  "agent-search: cannot lock $HERDR_PLUGIN_STATE_DIR/state.json: $HERDR_PLUGIN_STATE_DIR/state.json.lock is held
+rc=1
+lock-kept"
+
+fresh
+echo '{"keys":{"up":"ctrl-nonsense"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an unknown key name is a config error naming the key" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: unknown key name \"ctrl-nonsense\" in keys.up
+rc=1"
+echo '{"columns":["title."]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a field path with an empty part is a config error, not a pane list error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: invalid field \"title.\": its path has an empty part
+rc=1"
+echo '{"search":["tokens..repo"]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an empty part in a search field is a config error too" "$(run lines 2>&1 >/dev/null | grep -c 'invalid field "tokens..repo"')" "1"
+
+fresh
+jq '.result.panes[0].agent = 5' "$tmp/list.json" > "$tmp/agent5.json"
+check "an agent that is not a string makes no agent pane" "$(AGENT_SEARCH_LIST="$tmp/agent5.json" pk lines | cut -f1 | tr '\n' ' ')" "w1:p2 w2:p1 w2:p2 "
+AGENT_SEARCH_LIST="$tmp/agent5.json" pk focus w1:p1
+check "and focus treats it as a plain pane" "$(cat "$FAKE_CALLS" | tr '\n' ';')" "workspace focus w1;tab focus w1:t1;"
 
 if [ "$fails" -gt 0 ]; then echo "$fails failed"; exit 1; fi
 echo "all passed"

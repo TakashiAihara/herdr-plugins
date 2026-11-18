@@ -1,4 +1,5 @@
 mod config;
+mod keys;
 mod rows;
 mod state;
 mod ui;
@@ -56,11 +57,10 @@ impl Env {
             None => {
                 let out = Command::new(&self.herdr)
                     .args(["pane", "list"])
-                    .stderr(Stdio::inherit())
                     .output()
                     .map_err(|_| err())?;
                 if !out.status.success() {
-                    return Err(err());
+                    return Err(with_detail(err(), &String::from_utf8_lossy(&out.stderr)));
                 }
                 out.stdout
             }
@@ -77,18 +77,22 @@ impl Env {
     }
 
     // `herdr pane report-metadata` for the priority token: Some(n) sets it, None clears it.
-    fn report_priority(&self, token: &str, id: &str, n: Option<&str>) -> bool {
+    // Output is captured, never inherited: the popup's terminal is live while this runs. Err holds stderr.
+    fn report_priority(&self, token: &str, id: &str, n: Option<&str>) -> Result<(), String> {
         let token_arg = match n {
             Some(n) => ["--token".to_string(), format!("{token}={n}")],
             None => ["--clear-token".to_string(), token.to_string()],
         };
-        Command::new(&self.herdr)
+        let out = Command::new(&self.herdr)
             .args(["pane", "report-metadata", id, "--source", &self.plugin_id])
             .args(token_arg)
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()
-            .is_ok_and(|s| s.success())
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        }
     }
 }
 
@@ -112,6 +116,11 @@ impl Snapshot {
         rows::build(self.get(env)?.as_ref(), cfg, st)
     }
 
+    // None when the list is empty: no panes at all is not evidence that every saved pane is gone.
+    fn live_keys(&mut self, env: &Env) -> Res<Option<std::collections::HashSet<String>>> {
+        Ok(self.get(env)?.as_ref().and_then(rows::live_keys))
+    }
+
     // Mirrors a priority change Herdr accepted, so rows rebuilt from this snapshot show it.
     fn set_token(&mut self, id: &str, token: &str, value: Option<&str>) {
         let panes = self
@@ -132,9 +141,10 @@ impl Snapshot {
         };
         match value {
             Some(v) => {
-                let tokens = fields
-                    .entry("tokens")
-                    .or_insert_with(|| Value::Object(Map::new()));
+                let tokens = fields.entry("tokens").or_insert(Value::Null);
+                if !tokens.is_object() {
+                    *tokens = Value::Object(Map::new());
+                }
                 if let Some(t) = tokens.as_object_mut() {
                     t.insert(token.to_string(), Value::String(v.to_string()));
                 }
@@ -214,12 +224,12 @@ fn object(v: Option<&Value>) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-fn act(env: &Env, snap: &mut Snapshot, args: &[String]) -> Res<()> {
+// `prune` drops the saved priorities and positions of panes that are no longer in Herdr's pane list. It
+// is for acts that read the live list; the popup acts on a snapshot, where a pane opened after the
+// snapshot would lose its state.
+fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: bool) -> Res<()> {
     let arg = |i: usize| args.get(i).map_or("", String::as_str);
     let op = arg(0);
-    let cfg = env.config()?;
-    let st = State::load(&env.state_path);
-    let mut new = st.0.clone();
 
     let (dir, id, n) = match op {
         "sort-next" | "group-next" => ("", "", ""),
@@ -241,7 +251,14 @@ fn act(env: &Env, snap: &mut Snapshot, args: &[String]) -> Res<()> {
     if matches!(op, "move" | "prio" | "clear") && id.is_empty() {
         return Err(format!("{op} needs a pane id"));
     }
-    let rows = snap.rows(env, &cfg, &st)?;
+
+    let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
+    let before = state::read_raw(&env.state_path)?;
+    let st = State::parse(before.as_deref());
+    let mut new = st.0.clone();
+    let rows = snap.rows(env, cfg, &st)?;
+    // Set after the state is written, so a failed write never leaves Herdr ahead of the state.
+    let mut report: Option<Option<&str>> = None;
 
     match op {
         "sort-next" | "group-next" => {
@@ -270,7 +287,8 @@ fn act(env: &Env, snap: &mut Snapshot, args: &[String]) -> Res<()> {
                 if j < rows.len() && rows[j].group == rows[i].group {
                     let mut by_manual: Vec<&Row> = rows.iter().collect();
                     by_manual.sort_by(|a, b| cmp(&(kv(&a.manual), a.idx), &(kv(&b.manual), b.idx)));
-                    let mut order: Map<String, Value> = Map::new();
+                    // Only the listed panes are renumbered; the saved position of any other pane stays.
+                    let mut order = object(st.get("order"));
                     for (pos, r) in by_manual.iter().enumerate() {
                         order.insert(r.key.clone(), Value::from(pos));
                     }
@@ -285,10 +303,6 @@ fn act(env: &Env, snap: &mut Snapshot, args: &[String]) -> Res<()> {
         _ => {
             if let Some(r) = rows.iter().find(|r| r.id == id) {
                 let value = (op == "prio").then_some(n);
-                if !env.report_priority(&cfg.priority_token, id, value) {
-                    return Err(format!("cannot set the priority of {id}"));
-                }
-                snap.set_token(id, &cfg.priority_token, value);
                 // The state remembers it so `restore` can set the token again after a Herdr restart.
                 let mut prio = object(st.get("prio"));
                 match value {
@@ -298,17 +312,46 @@ fn act(env: &Env, snap: &mut Snapshot, args: &[String]) -> Res<()> {
                     None => prio.remove(&r.key),
                 };
                 new.insert("prio".into(), Value::Object(prio));
+                report = Some(value);
             }
         }
     }
 
-    // Every write drops priorities and positions of panes that are gone, so the state does not grow.
+    // A pane is gone when no pane in the list, agent or not, has its key.
+    let live = if prune { snap.live_keys(env)? } else { None };
     for k in ["prio", "order"] {
         let mut m = object(new.get(k));
-        m.retain(|key, _| rows.iter().any(|r| &r.key == key));
+        if let Some(live) = &live {
+            m.retain(|key, _| live.contains(key));
+        }
         new.insert(k.into(), Value::Object(m));
     }
-    state::write(&env.state_dir, &env.state_path, &Value::Object(new))
+    state::write(&env.state_dir, &env.state_path, &Value::Object(new))?;
+
+    if let Some(value) = report {
+        if let Err(detail) = env.report_priority(&cfg.priority_token, id, value) {
+            state::rollback(&env.state_dir, &env.state_path, before.as_deref())?;
+            return Err(with_detail(
+                format!("cannot set the priority of {id}"),
+                &detail,
+            ));
+        }
+        snap.set_token(id, &cfg.priority_token, value);
+    }
+    Ok(())
+}
+
+// The first line of what a Herdr subprocess printed on stderr, to put after our own message.
+fn with_detail(msg: String, detail: &str) -> String {
+    match detail
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+    {
+        Some(l) => format!("{msg} ({l})"),
+        None => msg,
+    }
 }
 
 // Herdr drops tokens when its server restarts: set again the saved priority of every pane that lost it.
@@ -319,8 +362,13 @@ fn restore(env: &Env) -> Res<()> {
         let Some(saved) = st.lookup("prio", &r.key).filter(|_| !r.has_token) else {
             continue;
         };
-        if !env.report_priority(&cfg.priority_token, &r.id, Some(&tostring(&saved))) {
-            eprintln!("agent-search: cannot restore the priority of {}", r.id);
+        if let Err(detail) =
+            env.report_priority(&cfg.priority_token, &r.id, Some(&tostring(&saved)))
+        {
+            eprintln!(
+                "agent-search: {}",
+                with_detail(format!("cannot restore the priority of {}", r.id), &detail)
+            );
         }
     }
     Ok(())
@@ -330,17 +378,17 @@ fn raw(v: Option<&Value>) -> String {
     v.map_or_else(|| "null".to_string(), tostring)
 }
 
-fn run_ok(herdr: &str, args: &[&str], quiet_err: bool) -> bool {
-    Command::new(herdr)
+// Err holds the subprocess's stderr, which is captured because the popup's terminal is live.
+fn run_ok(herdr: &str, args: &[&str]) -> Result<(), String> {
+    let out = Command::new(herdr)
         .args(args)
-        .stdout(Stdio::null())
-        .stderr(if quiet_err {
-            Stdio::null()
-        } else {
-            Stdio::inherit()
-        })
-        .status()
-        .is_ok_and(|s| s.success())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
 }
 
 // Herdr has no focus-by-pane-id for plain terminals: agent panes go through `agent focus` (which also
@@ -356,23 +404,14 @@ fn focus_in(env: &Env, list: &Option<Value>, id: &str) -> Res<()> {
     let Some(pane) = pane_with_id(&panes, id).into_iter().next() else {
         return Err(format!("pane {id} is gone"));
     };
-    let has_agent = match present(pane.get("agent")) {
-        None => false,
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(_) => true,
-    };
-    if has_agent && run_ok(&env.herdr, &["agent", "focus", id], true) {
+    if rows::is_agent(pane) && run_ok(&env.herdr, &["agent", "focus", id]).is_ok() {
         return Ok(());
     }
     let ws = raw(pane.get("workspace_id"));
     let tab = raw(pane.get("tab_id"));
-    if run_ok(&env.herdr, &["workspace", "focus", &ws], false)
-        && run_ok(&env.herdr, &["tab", "focus", &tab], false)
-    {
-        Ok(())
-    } else {
-        Err(format!("cannot focus {id}"))
-    }
+    run_ok(&env.herdr, &["workspace", "focus", &ws])
+        .and_then(|_| run_ok(&env.herdr, &["tab", "focus", &tab]))
+        .map_err(|detail| with_detail(format!("cannot focus {id}"), &detail))
 }
 
 fn focus(env: &Env, id: &str) -> Res<()> {
@@ -447,7 +486,9 @@ fn main() {
             enter(first(0));
             Ok(())
         }
-        "act" => act(&env, &mut Snapshot::empty(), rest),
+        "act" => env
+            .config()
+            .and_then(|cfg| act(&env, &cfg, &mut Snapshot::empty(), rest, true)),
         "restore" => restore(&env),
         "focus" => focus(&env, first(0)),
         "preview" => preview(&env, first(0)),
@@ -458,5 +499,78 @@ fn main() {
     if let Err(msg) = result {
         eprintln!("agent-search: {msg}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn snapshot(pane: Value) -> Snapshot {
+        Snapshot(Some(Some(json!({"result": {"panes": [pane]}}))))
+    }
+
+    fn tokens(snap: &Snapshot) -> Value {
+        snap.0
+            .as_ref()
+            .and_then(|l| l.as_ref())
+            .map_or(Value::Null, |l| l["result"]["panes"][0]["tokens"].clone())
+    }
+
+    #[test]
+    fn set_token_works_whether_tokens_is_an_object_null_or_missing() {
+        for pane in [
+            json!({"pane_id": "p"}),
+            json!({"pane_id": "p", "tokens": null}),
+            json!({"pane_id": "p", "tokens": "oops"}),
+            json!({"pane_id": "p", "tokens": {"repo": "a"}}),
+        ] {
+            let mut snap = snapshot(pane.clone());
+            snap.set_token("p", "prio", Some("4"));
+            assert_eq!(tokens(&snap)["prio"], "4", "{pane}");
+            snap.set_token("p", "prio", None);
+            assert!(tokens(&snap).get("prio").is_none(), "{pane}");
+        }
+        let mut keeps = snapshot(json!({"pane_id": "p", "tokens": {"repo": "a"}}));
+        keeps.set_token("p", "prio", Some("2"));
+        assert_eq!(tokens(&keeps), json!({"repo": "a", "prio": "2"}));
+    }
+
+    fn env_with(dir: &str, panes: Value, saved: Value) -> Env {
+        let dir =
+            std::env::temp_dir().join(format!("agent-search-act-{dir}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let list = dir.join("list.json");
+        std::fs::write(&list, json!({"result": {"panes": panes}}).to_string())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let state = dir.join("state.json");
+        std::fs::write(&state, saved.to_string()).unwrap_or_else(|e| panic!("{e}"));
+        Env {
+            herdr: "herdr-that-does-not-exist".into(),
+            config_path: dir.join("config.json").to_string_lossy().into_owned(),
+            state_dir: dir.to_string_lossy().into_owned(),
+            state_path: state.to_string_lossy().into_owned(),
+            list: Some(list.to_string_lossy().into_owned()),
+            plugin_id: "t".into(),
+        }
+    }
+
+    #[test]
+    fn an_act_on_a_snapshot_does_not_prune_but_one_on_the_live_list_does() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let saved = json!({"prio": {"p1": 2, "opened-later": 5}, "order": {"opened-later": 1}});
+        for (prune, kept) in [
+            (false, json!({"p1": 2, "opened-later": 5})),
+            (true, json!({"p1": 2})),
+        ] {
+            let env = env_with(&format!("prune{prune}"), panes.clone(), saved.clone());
+            let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+            let args = vec!["sort-next".to_string()];
+            act(&env, &cfg, &mut Snapshot::empty(), &args, prune).unwrap_or_else(|e| panic!("{e}"));
+            let after = State::load(&env.state_path);
+            assert_eq!(after.get("prio"), Some(&kept), "prune={prune}");
+        }
     }
 }

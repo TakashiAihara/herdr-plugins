@@ -1,4 +1,5 @@
-use crate::config::Keys;
+use crate::config::{Config, Keys};
+use crate::keys::{parse_key, Bind};
 use crate::rows::{self, Row};
 use crate::state::State;
 use crate::{act, focus_in, header_text, preview_text, Env, Res, Snapshot};
@@ -6,63 +7,12 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-// A key as written in the config (fzf-style names: ctrl-s, alt-up, alt-0).
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Bind {
-    code: KeyCode,
-    mods: KeyModifiers,
-}
-
-pub fn parse_key(name: &str) -> Option<Bind> {
-    let lower = name.to_ascii_lowercase();
-    let mut rest = lower.as_str();
-    let mut mods = KeyModifiers::NONE;
-    loop {
-        if let Some(r) = rest.strip_prefix("ctrl-") {
-            mods |= KeyModifiers::CONTROL;
-            rest = r;
-        } else if let Some(r) = rest.strip_prefix("alt-") {
-            mods |= KeyModifiers::ALT;
-            rest = r;
-        } else if let Some(r) = rest.strip_prefix("shift-") {
-            mods |= KeyModifiers::SHIFT;
-            rest = r;
-        } else {
-            break;
-        }
-    }
-    let code = match rest {
-        "up" => KeyCode::Up,
-        "down" => KeyCode::Down,
-        "left" => KeyCode::Left,
-        "right" => KeyCode::Right,
-        "enter" | "return" => KeyCode::Enter,
-        "esc" | "escape" => KeyCode::Esc,
-        "tab" => KeyCode::Tab,
-        "space" => KeyCode::Char(' '),
-        "backspace" | "bspace" => KeyCode::Backspace,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "pgup" | "page-up" => KeyCode::PageUp,
-        "pgdn" | "page-down" => KeyCode::PageDown,
-        "delete" | "del" => KeyCode::Delete,
-        "insert" => KeyCode::Insert,
-        s => match (
-            s.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()),
-            s.chars().count(),
-        ) {
-            (Some(n), _) if (1..=12).contains(&n) => KeyCode::F(n),
-            (_, 1) => KeyCode::Char(s.chars().next()?),
-            _ => return None,
-        },
-    };
-    Some(Bind { code, mods })
-}
+pub const REORDER_HINT: &str = "clear the search to reorder";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Op {
@@ -122,6 +72,8 @@ pub struct App {
     pub query: String,
     pub items: Vec<Item>,
     pub cur: usize,
+    // The last failure of an action, shown under the list until the next key.
+    pub status: String,
 }
 
 // Rows whose search text matches every word of the query, in the order they have.
@@ -148,6 +100,7 @@ impl App {
             query: String::new(),
             items: vec![],
             cur: 0,
+            status: String::new(),
         };
         app.refresh(None);
         app
@@ -158,6 +111,10 @@ impl App {
             Some(Item::Pane(i)) => Some(self.rows[*i].id.clone()),
             _ => None,
         }
+    }
+
+    pub fn searching(&self) -> bool {
+        !self.query.trim().is_empty()
     }
 
     // Rebuilds the visible items; the cursor stays on pane `keep` when it is still shown, else goes to
@@ -225,9 +182,16 @@ pub fn handle_key(app: &mut App, binds: &Binds, key: KeyEvent) -> Action {
     if key.kind == KeyEventKind::Release {
         return Action::None;
     }
+    app.status.clear();
+    // Some terminals report a typed capital without SHIFT; a bind for it always carries SHIFT.
+    let shifted = matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase());
     let pressed = Bind {
         code: key.code,
-        mods: key.modifiers,
+        mods: if shifted {
+            key.modifiers | KeyModifiers::SHIFT
+        } else {
+            key.modifiers
+        },
     };
     if let Some((_, op)) = binds.0.iter().find(|(b, _)| *b == pressed) {
         return Action::Op(*op);
@@ -255,11 +219,43 @@ pub fn handle_key(app: &mut App, binds: &Binds, key: KeyEvent) -> Action {
     }
 }
 
+fn op_args(op: Op, id: &str) -> Vec<String> {
+    match op {
+        Op::SortNext => vec!["sort-next".into()],
+        Op::GroupNext => vec!["group-next".into()],
+        Op::Up => vec!["move".into(), "up".into(), id.into()],
+        Op::Down => vec!["move".into(), "down".into(), id.into()],
+        Op::Clear => vec!["clear".into(), id.into()],
+        Op::Prio(n) => vec!["prio".into(), n.to_string(), id.into()],
+    }
+}
+
+// Runs one op for the selected pane. `run` performs the act and returns the rebuilt rows; a failure
+// goes to the status line and the popup stays open.
+pub fn dispatch(app: &mut App, op: Op, run: impl FnOnce(Vec<String>) -> Res<Vec<Row>>) {
+    // While a query hides rows, the pane's neighbors in the manual order are not the ones on screen.
+    if matches!(op, Op::Up | Op::Down) && app.searching() {
+        app.status = REORDER_HINT.to_string();
+        return;
+    }
+    let needs_pane = !matches!(op, Op::SortNext | Op::GroupNext);
+    let id = match app.selected_id() {
+        Some(id) => id,
+        None if needs_pane => return,
+        None => String::new(),
+    };
+    match run(op_args(op, &id)) {
+        Ok(rows) => app.set_rows(rows),
+        Err(msg) => app.status = msg,
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
-    let [head, input, body] = Layout::vertical([
+    let [head, input, body, status] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
         Constraint::Min(1),
+        Constraint::Length(1),
     ])
     .areas(frame.area());
     let [list_area, preview_area] =
@@ -270,10 +266,13 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
         head,
     );
     frame.render_widget(Paragraph::new(format!("> {}", app.query)), input);
-    frame.set_cursor_position((
-        input.x + 2 + u16::try_from(rows::width(&app.query)).unwrap_or(0),
-        input.y,
-    ));
+    let typed = u16::try_from(rows::width(&app.query)).unwrap_or(u16::MAX);
+    let x = input
+        .x
+        .saturating_add(2)
+        .saturating_add(typed)
+        .min(input.right().saturating_sub(1));
+    frame.set_cursor_position((x, input.y));
 
     let widths = rows::col_widths(&app.rows);
     let items: Vec<ListItem> = app
@@ -304,6 +303,10 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
             .wrap(Wrap { trim: false }),
         preview_area,
     );
+    frame.render_widget(
+        Paragraph::new(app.status.as_str()).style(Style::new().fg(Color::Red)),
+        status,
+    );
 }
 
 fn show_error(term: &mut DefaultTerminal, msg: &str) {
@@ -330,30 +333,18 @@ fn show_error(term: &mut DefaultTerminal, msg: &str) {
     }
 }
 
-fn op_args(op: Op, id: &str) -> Vec<String> {
-    let words: Vec<String> = match op {
-        Op::SortNext => vec!["sort-next".into()],
-        Op::GroupNext => vec!["group-next".into()],
-        Op::Up => vec!["move".into(), "up".into(), id.into()],
-        Op::Down => vec!["move".into(), "down".into(), id.into()],
-        Op::Clear => vec!["clear".into(), id.into()],
-        Op::Prio(n) => vec!["prio".into(), n.to_string(), id.into()],
-    };
-    words
-}
-
-fn session(env: &Env, term: &mut DefaultTerminal) -> Res<()> {
-    let cfg = env.config()?;
+// The popup uses this one config for the list, the keys and every act.
+fn session(env: &Env, cfg: &Config, term: &mut DefaultTerminal) -> Res<()> {
     let binds = Binds::new(&cfg.keys)?;
     let mut snap = Snapshot::empty();
-    let mut app = App::new(snap.rows(env, &cfg, &State::load(&env.state_path))?);
+    let mut app = App::new(snap.rows(env, cfg, &State::load(&env.state_path))?);
     loop {
         let st = State::load(&env.state_path);
         let list = snap.get(env)?;
         let preview = app
             .selected_id()
             .map_or(String::new(), |id| preview_text(list, &id));
-        let header = header_text(&cfg, &st);
+        let header = header_text(cfg, &st);
         term.draw(|f| draw(f, &app, &header, &preview))
             .map_err(|e| format!("cannot draw the screen: {e}"))?;
         let Event::Key(key) =
@@ -365,25 +356,18 @@ fn session(env: &Env, term: &mut DefaultTerminal) -> Res<()> {
             Action::None => {}
             Action::Quit => return Ok(()),
             Action::Focus(id) => return focus_in(env, snap.get(env)?, &id),
-            Action::Op(op) => {
-                let needs_pane = !matches!(op, Op::SortNext | Op::GroupNext);
-                let Some(id) = app
-                    .selected_id()
-                    .or_else(|| (!needs_pane).then(String::new))
-                else {
-                    continue;
-                };
-                act(env, &mut snap, &op_args(op, &id))?;
-                let st = State::load(&env.state_path);
-                app.set_rows(snap.rows(env, &cfg, &st)?);
-            }
+            // The snapshot is the popup's whole view of Herdr, so an act here must not prune against it.
+            Action::Op(op) => dispatch(&mut app, op, |args| {
+                act(env, cfg, &mut snap, &args, false)?;
+                snap.rows(env, cfg, &State::load(&env.state_path))
+            }),
         }
     }
 }
 
 pub fn run(env: &Env) -> Res<()> {
     let mut term = ratatui::try_init().map_err(|e| format!("cannot start the terminal UI: {e}"))?;
-    let result = session(env, &mut term);
+    let result = env.config().and_then(|cfg| session(env, &cfg, &mut term));
     if let Err(msg) = &result {
         show_error(&mut term, msg);
     }
@@ -432,41 +416,6 @@ mod tests {
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
-    }
-
-    #[test]
-    fn key_names_parse_into_code_and_modifiers() {
-        assert_eq!(
-            parse_key("ctrl-s"),
-            Some(Bind {
-                code: KeyCode::Char('s'),
-                mods: KeyModifiers::CONTROL
-            })
-        );
-        assert_eq!(
-            parse_key("alt-up"),
-            Some(Bind {
-                code: KeyCode::Up,
-                mods: KeyModifiers::ALT
-            })
-        );
-        assert_eq!(
-            parse_key("Alt-0"),
-            Some(Bind {
-                code: KeyCode::Char('0'),
-                mods: KeyModifiers::ALT
-            })
-        );
-        assert_eq!(
-            parse_key("ctrl-alt-f5"),
-            Some(Bind {
-                code: KeyCode::F(5),
-                mods: KeyModifiers::CONTROL | KeyModifiers::ALT
-            })
-        );
-        assert_eq!(parse_key("tab").map(|b| b.code), Some(KeyCode::Tab));
-        assert_eq!(parse_key("ctrl-nonsense"), None);
-        assert_eq!(parse_key("ctrl-"), None);
     }
 
     #[test]
@@ -673,5 +622,135 @@ mod tests {
         assert!(all.contains("── alpha (2) ──"));
         assert!(all.contains("> title a2"));
         assert!(all.contains("title  fix login"));
+    }
+
+    fn default_keys(sort: &str) -> Keys {
+        Keys {
+            sort: sort.into(),
+            group: "ctrl-g".into(),
+            up: "alt-up".into(),
+            down: "alt-down".into(),
+            clear: "alt-0".into(),
+        }
+    }
+
+    #[test]
+    fn a_failed_act_goes_to_the_status_line_and_keeps_the_rows_and_the_popup() {
+        let mut app = grouped();
+        app.move_cursor(1);
+        dispatch(&mut app, Op::Prio(3), |args| {
+            assert_eq!(args, ["prio", "3", "a2"]);
+            Err("cannot set the priority of a2".to_string())
+        });
+        assert_eq!(app.status, "cannot set the priority of a2");
+        assert_eq!(app.selected_id().as_deref(), Some("a2"));
+        assert_eq!(shown(&app).len(), 7);
+
+        let binds = Binds::new(&default_keys("ctrl-s")).unwrap_or_else(|e| panic!("{e}"));
+        handle_key(&mut app, &binds, key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.status, "", "the next key clears the status");
+
+        dispatch(&mut app, Op::SortNext, |_| Ok(vec![row("z9", None, "zed")]));
+        assert_eq!(app.selected_id().as_deref(), Some("z9"));
+    }
+
+    #[test]
+    fn reordering_while_searching_is_refused_with_a_hint() {
+        let mut app = grouped();
+        app.type_char('a');
+        for op in [Op::Up, Op::Down] {
+            dispatch(&mut app, op, |_| {
+                panic!("the act must not run while a query is active")
+            });
+            assert_eq!(app.status, REORDER_HINT);
+            app.status.clear();
+        }
+        app.backspace();
+        let mut ran = false;
+        dispatch(&mut app, Op::Down, |args| {
+            ran = true;
+            assert_eq!(args, ["move", "down", "a1"]);
+            Ok(vec![row("a1", None, "x")])
+        });
+        assert!(ran);
+        assert_eq!(app.status, "");
+    }
+
+    #[test]
+    fn a_pane_op_with_nothing_selected_does_not_run() {
+        let mut app = grouped();
+        for c in "zzzz".chars() {
+            app.type_char(c);
+        }
+        dispatch(&mut app, Op::Clear, |_| panic!("no pane is selected"));
+        assert_eq!(app.status, "");
+    }
+
+    #[test]
+    fn a_capital_letter_bind_is_distinct_from_the_lowercase_letter() {
+        let mut keys = default_keys("ctrl-s");
+        keys.group = "A".into();
+        let binds = Binds::new(&keys).unwrap_or_else(|e| panic!("{e}"));
+        let mut app = grouped();
+        assert_eq!(
+            handle_key(
+                &mut app,
+                &binds,
+                key(KeyCode::Char('A'), KeyModifiers::SHIFT)
+            ),
+            Action::Op(Op::GroupNext)
+        );
+        assert_eq!(
+            handle_key(
+                &mut app,
+                &binds,
+                key(KeyCode::Char('A'), KeyModifiers::NONE)
+            ),
+            Action::Op(Op::GroupNext),
+            "a terminal that reports a capital without SHIFT"
+        );
+        assert_eq!(
+            handle_key(
+                &mut app,
+                &binds,
+                key(KeyCode::Char('a'), KeyModifiers::NONE)
+            ),
+            Action::None
+        );
+        assert_eq!(
+            app.query, "a",
+            "the lowercase letter is typed into the query"
+        );
+    }
+
+    fn screen(width: u16, app: &App) -> (Vec<String>, ratatui::layout::Position) {
+        let mut term = Terminal::new(TestBackend::new(width, 8)).unwrap_or_else(|e| panic!("{e}"));
+        term.draw(|f| draw(f, app, "h\nk\n", ""))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let pos = term.get_cursor_position().unwrap_or_else(|e| panic!("{e}"));
+        let buf = term.backend().buffer();
+        let lines = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        (lines, pos)
+    }
+
+    #[test]
+    fn the_status_line_is_drawn_under_the_list() {
+        let mut app = grouped();
+        app.status = "cannot set the priority of a2".into();
+        let (lines, _) = screen(60, &app);
+        assert!(lines[7].starts_with("cannot set the priority of a2"));
+    }
+
+    #[test]
+    fn the_cursor_stays_inside_the_input_line_whatever_the_query_length() {
+        let mut app = grouped();
+        app.query = "x".repeat(70_000);
+        let (_, pos) = screen(20, &app);
+        assert_eq!((pos.x, pos.y), (19, 2));
+        app.query = "ab".into();
+        let (_, pos) = screen(20, &app);
+        assert_eq!((pos.x, pos.y), (4, 2));
     }
 }

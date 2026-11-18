@@ -24,12 +24,21 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 build_from_source() {
   # Herdr started from a desktop launcher may not have the login shell's PATH.
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+  [ -n "${HOME:-}" ] && [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
   if ! have cargo; then
     echo "agent-search: no prebuilt binary and no cargo to build one. Install Rust from https://rustup.rs, then run: herdr plugin update" >&2
     exit 1
   fi
-  cd "$root" && exec cargo build --release --locked
+  # --target-dir pins the output next to the manifest's command path, whatever CARGO_TARGET_DIR says.
+  (cd "$root" && cargo build --release --locked --target-dir "$root/target") || exit 1
+  built="$root/target/release/agent-search"
+  if [ "$built" != "$out" ]; then
+    { mkdir -p "$(dirname "$out")" && cp -f "$built" "$out"; } || {
+      echo "agent-search: cannot copy $built to $out" >&2
+      exit 1
+    }
+  fi
+  exit 0
 }
 
 fallback() {
@@ -62,6 +71,9 @@ key="${AGENT_SEARCH_KEY:-}"
 if [ -z "$key" ]; then
   have git || fallback "git is not available to identify this checkout"
   key=$(git -C "$root" rev-parse HEAD:agent-search 2>/dev/null) || fallback "not a git checkout"
+  # A linked working copy with edits is not the committed tree the binary was built from.
+  dirty=$(git -C "$root" status --porcelain -- . 2>/dev/null) || fallback "cannot read the git status"
+  [ -z "$dirty" ] || fallback "agent-search/ has uncommitted changes"
 fi
 key=$(printf '%s' "$key" | cut -c1-12)
 asset="agent-search-$key-$triple"

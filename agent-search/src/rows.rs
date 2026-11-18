@@ -63,37 +63,9 @@ pub fn clean(s: &str) -> String {
         .collect()
 }
 
-// Terminal cell width: East Asian wide characters and most emoji take two cells, combining marks
-// and variation selectors none. shortcut: ambiguous-width characters count as one cell.
+// The cell width ratatui renders a string at, so padding matches the screen.
 pub fn width(s: &str) -> usize {
-    const WIDE: [(u32, u32); 10] = [
-        (4352, 4447),
-        (11904, 42191),
-        (44032, 55203),
-        (63744, 64255),
-        (65040, 65049),
-        (65072, 65135),
-        (65280, 65376),
-        (65504, 65510),
-        (127744, 129791),
-        (131072, 262141),
-    ];
-    s.chars()
-        .map(|c| {
-            let c = c as u32;
-            if WIDE.iter().any(|&(lo, hi)| c >= lo && c <= hi) {
-                2
-            } else if (768..=879).contains(&c)
-                || (65024..=65039).contains(&c)
-                || c == 8203
-                || c == 8205
-            {
-                0
-            } else {
-                1
-            }
-        })
-        .sum()
+    unicode_width::UnicodeWidthStr::width(s)
 }
 
 // jq's split: an empty string has no parts.
@@ -174,15 +146,34 @@ fn to_number(v: &Value) -> Option<Value> {
 // .result.panes array.
 fn agent_panes(list: &Value) -> Option<Vec<&Value>> {
     let all = list.get("result")?.get("panes")?.as_array()?;
-    Some(
-        all.iter()
-            .filter(|p| {
-                p.get("agent")
-                    .and_then(Value::as_str)
-                    .is_some_and(|a| !a.is_empty())
-            })
-            .collect(),
-    )
+    Some(all.iter().filter(|p| is_agent(p)).collect())
+}
+
+// The one test for an agent pane: `agent` is a non-empty string.
+pub fn is_agent(pane: &Value) -> bool {
+    pane.get("agent")
+        .and_then(Value::as_str)
+        .is_some_and(|a| !a.is_empty())
+}
+
+// The pane id and session id of every pane in the list, agent or not, which are the keys a saved
+// priority or position can belong to. None when the list has no .result.panes array or no pane.
+pub fn live_keys(list: &Value) -> Option<std::collections::HashSet<String>> {
+    let panes = list.get("result")?.get("panes")?.as_array()?;
+    if panes.is_empty() {
+        return None;
+    }
+    let mut keys = std::collections::HashSet::new();
+    for p in panes {
+        if let Some(id) = p.get("pane_id").and_then(Value::as_str) {
+            keys.insert(id.to_string());
+        }
+        let sid = session_id(p);
+        if !sid.is_empty() {
+            keys.insert(sid);
+        }
+    }
+    Some(keys)
 }
 
 fn session_id(p: &Value) -> String {
@@ -405,4 +396,41 @@ pub fn lines(rows: &[Row]) -> String {
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn width_counts_cells_the_way_the_terminal_draws_them() {
+        assert_eq!(width("abc"), 3);
+        assert_eq!(width("日本"), 4);
+        assert_eq!(width("e\u{301}"), 1);
+    }
+
+    #[test]
+    fn only_a_non_empty_string_agent_makes_an_agent_pane() {
+        let pane = |v: Value| json!({"pane_id": "p", "agent": v});
+        assert!(is_agent(&pane(json!("claude"))));
+        for no in [json!(""), json!(5), json!(true), json!(null), json!({})] {
+            assert!(!is_agent(&pane(no)));
+        }
+        assert!(!is_agent(&json!({"pane_id": "p"})));
+    }
+
+    #[test]
+    fn live_keys_cover_every_pane_not_only_agents() {
+        let list = json!({"result": {"panes": [
+            {"pane_id": "w1:p1", "agent": "claude", "agent_session": {"value": "s1"}},
+            {"pane_id": "w1:p2"},
+            {"pane_id": "w1:p3", "agent": "", "agent_session": {"value": "s9"}}
+        ]}});
+        let keys = live_keys(&list).unwrap_or_default();
+        let mut got: Vec<&str> = keys.iter().map(String::as_str).collect();
+        got.sort();
+        assert_eq!(got, ["s1", "s9", "w1:p1", "w1:p2", "w1:p3"]);
+        assert!(live_keys(&json!({"result": {"panes": []}})).is_none());
+        assert!(live_keys(&json!({"result": {}})).is_none());
+    }
 }
