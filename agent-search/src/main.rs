@@ -7,7 +7,12 @@ mod testutil {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         for n in 0..1000u32 {
-            let dir = std::env::temp_dir().join(format!(
+            // Under the crate's target/ (ignored, removed by `cargo clean`), not the system temp
+            // directory: a failed assertion skips any cleanup, and /tmp is often a small tmpfs.
+            let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp");
+            std::fs::create_dir_all(&base)
+                .unwrap_or_else(|e| panic!("cannot create {base:?}: {e}"));
+            let dir = base.join(format!(
                 "agent-search-{name}-{}-{nanos}-{n}",
                 std::process::id()
             ));
@@ -402,7 +407,12 @@ fn restore(env: &Env) -> Res<()> {
     // The pane list is fetched before any lock is taken, so a slow `herdr pane list` never holds
     // one up (other acts wait at most 2 s for the lock).
     let list = env.pane_list()?;
-    let planned = State::load(&env.state_path);
+    // The plan is read under the same lock as `act`, so it never sees a change an act has written
+    // but may still roll back.
+    let planned = {
+        let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
+        State::load(&env.state_path)
+    };
     let todo: Vec<(String, String, Value)> = rows::build(list.as_ref(), &cfg, &planned)?
         .into_iter()
         .filter(|r| !r.has_token)
@@ -416,7 +426,14 @@ fn restore(env: &Env) -> Res<()> {
     // each pane's check and call serializes the two: a priority set or cleared after the state
     // above was read is seen on the re-read, and the pane is skipped instead of overwritten.
     for (id, key, saved) in todo {
-        let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
+        // A lock held past the wait by a slow act skips only this pane; the rest are still restored.
+        let _lock = match state::Lock::acquire(&env.state_dir, &env.state_path) {
+            Ok(lock) => lock,
+            Err(e) => {
+                eprintln!("agent-search: cannot restore the priority of {id}: {e}");
+                continue;
+            }
+        };
         if State::load(&env.state_path).lookup("prio", &key).as_ref() != Some(&saved) {
             continue;
         }
