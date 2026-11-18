@@ -97,4 +97,17 @@ jobs:
           gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             gh release create agent-search-binaries --repo "$GITHUB_REPOSITORY" --prerelease \
               --title "agent-search binaries" --notes "Prebuilt agent-search binaries, named by the git tree hash of agent-search/. Installed by agent-search/scripts/fetch-or-build.sh."
-          gh release upload agent-search-binaries --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          # Only assets the release does not have yet are uploaded, and none is ever replaced: a
+          # binary a user has already downloaded and checked must not change under its checksum.
+          existing=$(gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          for f in dist/*; do
+            name=$(basename "$f")
+            if printf '%s\n' "$existing" | grep -qxF "$name"; then
+              echo "keeping the existing $name"
+              continue
+            fi
+            if ! gh release upload agent-search-binaries --repo "$GITHUB_REPOSITORY" "$f"; then
+              # A parallel run may have uploaded it first; that is fine, any other failure is not.
+              gh release view agent-search-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qxF "$name" || exit 1
+            fi
+          done

@@ -101,9 +101,24 @@ check "a working copy with uncommitted changes builds from source instead of dow
 1"
 git -C "$tmp/repo" checkout -q -- agent-search/f
 echo new > "$tmp/repo/agent-search/untracked"
-ROOT="$tmp/repo/agent-search" fetch
-check "an untracked file counts as a change too" "$(head -1 "$out")" "agent-search: agent-search/ has uncommitted changes; building from source."
+printf '[status]\n\tshowUntrackedFiles = no\n' > "$tmp/gitconfig"
+GIT_CONFIG_GLOBAL="$tmp/gitconfig" ROOT="$tmp/repo/agent-search" fetch; rc=$?
+check "an untracked file counts as a change even when git is told to hide them, and the source build installs the binary" \
+  "$(echo "rc=$rc"; head -1 "$out"; cat "$AGENT_SEARCH_OUT"; cargo_calls)" \
+  "rc=0
+agent-search: agent-search/ has uncommitted changes; building from source.
+built
+1"
 rm "$tmp/repo/agent-search/untracked"
+
+pushd "$tmp/repo" > /dev/null || exit 1
+ROOT=agent-search AGENT_SEARCH_KEY=000000000000 fetch; rc=$?
+popd > /dev/null || exit 1
+check "a relative AGENT_SEARCH_ROOT is resolved before the build" \
+  "$(echo "rc=$rc"; sed -e 's/ in .*//' -e "s|$tmp/repo|REPO|" "$FAKE_CARGO_LOG"; cat "$AGENT_SEARCH_OUT")" \
+  "rc=0
+cargo build --release --locked --target-dir REPO/agent-search/target
+built"
 echo y > "$tmp/repo/other" && echo w >> "$tmp/repo/other"
 ROOT="$tmp/repo/agent-search" fetch
 check "a change outside agent-search/ does not matter" "$(head -1 "$out")" "agent-search: installed prebuilt agent-search-$tree-x86_64-unknown-linux-musl"

@@ -16,7 +16,10 @@ set -u
 
 repo="TakashiAihara/herdr-plugins"
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-root="${AGENT_SEARCH_ROOT:-$script_dir/..}"
+root=$(CDPATH='' cd -- "${AGENT_SEARCH_ROOT:-$script_dir/..}" 2>/dev/null && pwd) || {
+  echo "agent-search: cannot enter ${AGENT_SEARCH_ROOT:-$script_dir/..}" >&2
+  exit 1
+}
 out="${AGENT_SEARCH_OUT:-$root/target/release/agent-search}"
 base_url="${AGENT_SEARCH_BASE_URL:-https://github.com/$repo/releases/download/agent-search-binaries}"
 
@@ -72,7 +75,8 @@ if [ -z "$key" ]; then
   have git || fallback "git is not available to identify this checkout"
   key=$(git -C "$root" rev-parse HEAD:agent-search 2>/dev/null) || fallback "not a git checkout"
   # A linked working copy with edits is not the committed tree the binary was built from.
-  dirty=$(git -C "$root" status --porcelain -- . 2>/dev/null) || fallback "cannot read the git status"
+  # --untracked-files=all so a user's status.showUntrackedFiles=no does not hide new files.
+  dirty=$(git -C "$root" status --porcelain --untracked-files=all -- . 2>/dev/null) || fallback "cannot read the git status"
   [ -z "$dirty" ] || fallback "agent-search/ has uncommitted changes"
 fi
 key=$(printf '%s' "$key" | cut -c1-12)

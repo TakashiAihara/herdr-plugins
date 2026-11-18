@@ -445,8 +445,8 @@ AGENT_SEARCH_LIST="$tmp/plain3.json" pk act sort-next
 check "pruning keeps the state of a pane that is in the list but not an agent, and drops one that is gone" \
   "$(jq -c '[.prio, .order]' "$HERDR_PLUGIN_STATE_DIR/state.json")" '[{"w3:p1":5},{"w3:p1":1,"s1":9}]'
 AGENT_SEARCH_LIST="$tmp/plain3.json" pk act move down w1:p1
-check "a move keeps the saved position of a pane that is not listed" \
-  "$(jq -c '.order["w3:p1"]' "$HERDR_PLUGIN_STATE_DIR/state.json")" "1"
+check "a move renumbers over the saved keys too, so a pane hidden from the list keeps its place" \
+  "$(jq -c '.order | [.["w3:p1"], .["w1:p2"], .s1]' "$HERDR_PLUGIN_STATE_DIR/state.json")" "[0,1,2]"
 echo '{"result":{"panes":[]}}' > "$tmp/nopanes.json"
 AGENT_SEARCH_LIST="$tmp/nopanes.json" pk act sort-next
 check "an empty pane list prunes nothing" "$(jq -c '.prio' "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"w3:p1":5}'
@@ -459,9 +459,10 @@ rc=1"
 
 fresh
 check "a failed herdr call leaves no state file when there was none" \
-  "$(FAKE_META_FAIL=1 pk act prio 2 w2:p2 2>&1; echo "rc=$?"; ls "$HERDR_PLUGIN_STATE_DIR" | tr '\n' ' ')" \
+  "$(FAKE_META_FAIL=1 pk act prio 2 w2:p2 2>&1; echo "rc=$?"; [ -e "$HERDR_PLUGIN_STATE_DIR/state.json" ] || echo no-state-file)" \
   "agent-search: cannot set the priority of w2:p2
-rc=1"
+rc=1
+no-state-file"
 check "herdr's stderr is shown once, in the message, not written to the terminal" \
   "$(FAKE_META_STDERR=1 FAKE_META_FAIL=1 pk act prio 2 w2:p2 2>&1)" \
   "agent-search: cannot set the priority of w2:p2 (herdr: boom)"
@@ -481,22 +482,41 @@ check "an unreadable state does not stop the read-only commands" "$(ids)" "w1:p1
 
 fresh
 mkdir -p "$HERDR_PLUGIN_STATE_DIR"
-touch -d '1 minute ago' "$HERDR_PLUGIN_STATE_DIR/state.json.lock"
-check "a lock older than 10 seconds is stale and taken over" \
+: > "$HERDR_PLUGIN_STATE_DIR/state.json.lock" || { echo "FAIL could not prepare the lock file"; fails=$((fails + 1)); }
+check "a lock file left behind by a process that is gone blocks nobody" \
   "$(pk act sort-next 2>&1; echo "rc=$?"; ls "$HERDR_PLUGIN_STATE_DIR" | tr '\n' ' ')" "rc=0
-state.json "
-touch "$HERDR_PLUGIN_STATE_DIR/state.json.lock"
-check "a fresh lock held by someone else makes the act fail after waiting" \
-  "$(pk act sort-next 2>&1; echo "rc=$?"; [ -f "$HERDR_PLUGIN_STATE_DIR/state.json.lock" ] && echo lock-kept)" \
-  "agent-search: cannot lock $HERDR_PLUGIN_STATE_DIR/state.json: $HERDR_PLUGIN_STATE_DIR/state.json.lock is held
-rc=1
-lock-kept"
+state.json state.json.lock "
+
+fresh
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do pk act sort-next & done
+wait
+check "twelve concurrent acts are serialized, none is lost" "$(jq -c '.sort' "$HERDR_PLUGIN_STATE_DIR/state.json")" "null"
+
+fresh
+echo '{"sorts":[{"name":"a","by":["title"]},{"name":"bad","by":["tokens.repo.x"]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a sort the list cannot be built under is refused" "$(pk act sort-next 2>&1; echo "rc=$?")" "agent-search: cannot read the pane list
+rc=1"
+check "and it is not saved, so later commands still work" \
+  "$([ -e "$HERDR_PLUGIN_STATE_DIR/state.json" ] || echo no-state-file; ids)" "no-state-file
+w1:p1 w2:p2 w1:p2 w2:p1 "
 
 fresh
 echo '{"keys":{"up":"ctrl-nonsense"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "an unknown key name is a config error naming the key" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
   "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: unknown key name \"ctrl-nonsense\" in keys.up
 rc=1"
+echo '{"keys":{"sort":"x"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a key that would make a character untypable in the search is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.sort \"x\" is already used by the popup (alt-1..alt-9, esc, enter, backspace, up, down, ctrl-p, ctrl-n, ctrl-c, or a character typed into the search)
+rc=1"
+echo '{"keys":{"sort":"alt-A","group":"alt-shift-a"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "two spellings of one key are a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.group \"alt-shift-a\" is the same key as keys.sort
+rc=1"
+echo '{"keys":{"sort":"shift-1"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "shift with a non-letter is a config error naming the key" "$(run lines 2>&1 >/dev/null | grep -c '"shift-1": shift only combines with a letter or a named key')" "1"
+echo '{"keys":{"sort":"shift-tab"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "shift-tab is accepted" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
 echo '{"columns":["title."]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a field path with an empty part is a config error, not a pane list error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
   "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: invalid field \"title.\": its path has an empty part

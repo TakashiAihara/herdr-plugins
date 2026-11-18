@@ -1,3 +1,26 @@
+#[cfg(test)]
+mod testutil {
+    // A fresh directory made with `create_dir`, which fails if the name exists, so a test never
+    // writes into a directory somebody else prepared at a predictable path.
+    pub fn unique_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        for n in 0..1000u32 {
+            let dir = std::env::temp_dir().join(format!(
+                "agent-search-{name}-{}-{nanos}-{n}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("cannot create a test directory: {e}"),
+            }
+        }
+        panic!("no free test directory name for {name}");
+    }
+}
+
 mod config;
 mod keys;
 mod rows;
@@ -5,7 +28,7 @@ mod state;
 mod ui;
 
 use config::{pick, Config};
-use rows::{clean, cmp, kv, tostring, Row, LIST_ERR};
+use rows::{clean, cmp, kv, tostring, Row, K, LIST_ERR};
 use serde_json::{Map, Value};
 use state::{present, State};
 use std::io::Write;
@@ -271,6 +294,9 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
                 .get(pick(names, st.get(k)) + 1)
                 .map_or(Value::Null, |n| Value::String(n.name.clone()));
             new.insert(k.into(), next);
+            // Rows must build under the new selection before it is saved: a sort or group whose
+            // fields fail on this list would otherwise be saved and break every later command.
+            snap.rows(env, cfg, &State(new.clone()))?;
         }
         "move" => {
             let i = rows.iter().position(|r| r.id == id);
@@ -285,12 +311,22 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
                 // The neighbor must be in the same group: groups are rebuilt on every reload, so a
                 // swap across a header would snap back.
                 if j < rows.len() && rows[j].group == rows[i].group {
-                    let mut by_manual: Vec<&Row> = rows.iter().collect();
-                    by_manual.sort_by(|a, b| cmp(&(kv(&a.manual), a.idx), &(kv(&b.manual), b.idx)));
-                    // Only the listed panes are renumbered; the saved position of any other pane stays.
+                    // Renumber the listed panes together with the keys already in `order` that this
+                    // view does not list (a pane hidden right now keeps its place among the others);
+                    // listed panes without a saved position count as last, in list order.
                     let mut order = object(st.get("order"));
-                    for (pos, r) in by_manual.iter().enumerate() {
-                        order.insert(r.key.clone(), Value::from(pos));
+                    let mut seq: Vec<(K, usize, String)> = rows
+                        .iter()
+                        .map(|r| (kv(&r.manual), r.idx, r.key.clone()))
+                        .collect();
+                    for (key, v) in &order {
+                        if !rows.iter().any(|r| &r.key == key) {
+                            seq.push((kv(v), usize::MAX, key.clone()));
+                        }
+                    }
+                    seq.sort_by(|a, b| cmp(&(&a.0, a.1), &(&b.0, b.1)));
+                    for (pos, (_, _, key)) in seq.into_iter().enumerate() {
+                        order.insert(key, Value::from(pos));
                     }
                     let ni = order.get(&rows[i].key).cloned().unwrap_or(Value::Null);
                     let nj = order.get(&rows[j].key).cloned().unwrap_or(Value::Null);
@@ -357,17 +393,24 @@ fn with_detail(msg: String, detail: &str) -> String {
 // Herdr drops tokens when its server restarts: set again the saved priority of every pane that lost it.
 fn restore(env: &Env) -> Res<()> {
     let cfg = env.config()?;
-    let st = State::load(&env.state_path);
-    for r in Snapshot::empty().rows(env, &cfg, &st)? {
-        let Some(saved) = st.lookup("prio", &r.key).filter(|_| !r.has_token) else {
-            continue;
-        };
-        if let Err(detail) =
-            env.report_priority(&cfg.priority_token, &r.id, Some(&tostring(&saved)))
+    // The lock is held only while the saved priorities are read, so a concurrent write is never
+    // half seen; the herdr calls below do not need it.
+    let todo: Vec<(String, Value)> = {
+        let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
+        let st = State::load(&env.state_path);
+        Snapshot::empty()
+            .rows(env, &cfg, &st)?
+            .into_iter()
+            .filter(|r| !r.has_token)
+            .filter_map(|r| st.lookup("prio", &r.key).map(|saved| (r.id, saved)))
+            .collect()
+    };
+    for (id, saved) in todo {
+        if let Err(detail) = env.report_priority(&cfg.priority_token, &id, Some(&tostring(&saved)))
         {
             eprintln!(
                 "agent-search: {}",
-                with_detail(format!("cannot restore the priority of {}", r.id), &detail)
+                with_detail(format!("cannot restore the priority of {id}"), &detail)
             );
         }
     }
@@ -538,10 +581,7 @@ mod tests {
     }
 
     fn env_with(dir: &str, panes: Value, saved: Value) -> Env {
-        let dir =
-            std::env::temp_dir().join(format!("agent-search-act-{dir}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let dir = testutil::unique_dir(&format!("act-{dir}"));
         let list = dir.join("list.json");
         std::fs::write(&list, json!({"result": {"panes": panes}}).to_string())
             .unwrap_or_else(|e| panic!("{e}"));
@@ -572,5 +612,50 @@ mod tests {
             let after = State::load(&env.state_path);
             assert_eq!(after.get("prio"), Some(&kept), "prune={prune}");
         }
+    }
+
+    #[test]
+    fn a_move_renumbers_over_saved_keys_the_view_does_not_list() {
+        let panes = json!([
+            {"pane_id": "p1", "agent": "claude"},
+            {"pane_id": "p2", "agent": "claude"}
+        ]);
+        let env = env_with("hidden", panes, json!({"order": {"hidden": 1}}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let args: Vec<String> = ["move", "down", "p1"].map(String::from).to_vec();
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        let after = State::load(&env.state_path);
+        let order = after.get("order").cloned().unwrap_or(Value::Null);
+        assert_eq!(order, json!({"hidden": 0, "p1": 2, "p2": 1}));
+    }
+
+    #[test]
+    fn restore_waits_for_the_state_lock_and_fails_when_it_is_held() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let env = env_with("restorelock", panes, json!({"prio": {"p1": 3}}));
+        let held =
+            state::Lock::acquire(&env.state_dir, &env.state_path).unwrap_or_else(|e| panic!("{e}"));
+        let err = restore(&env).err().unwrap_or_default();
+        assert!(err.starts_with("cannot lock "), "{err}");
+        drop(held);
+        // herdr is not installed here, so the one saved priority fails and is reported, not raised.
+        assert!(restore(&env).is_ok());
+    }
+
+    #[test]
+    fn selecting_a_sort_that_fails_to_build_keeps_the_old_state() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude", "tokens": {"repo": "a"}}]);
+        let env = env_with("badsort", panes, json!({"group": "x"}));
+        std::fs::write(
+            &env.config_path,
+            r#"{"sorts":[{"name":"a","by":["title"]},{"name":"bad","by":["tokens.repo.x"]}]}"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let before = std::fs::read(&env.state_path).unwrap_or_default();
+        let args = vec!["sort-next".to_string()];
+        let err = act(&env, &cfg, &mut Snapshot::empty(), &args, true).err();
+        assert_eq!(err.as_deref(), Some(LIST_ERR));
+        assert_eq!(std::fs::read(&env.state_path).unwrap_or_default(), before);
     }
 }

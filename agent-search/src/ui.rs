@@ -1,5 +1,5 @@
 use crate::config::{Config, Keys};
-use crate::keys::{parse_key, Bind};
+use crate::keys::{self, Bind};
 use crate::rows::{self, Row};
 use crate::state::State;
 use crate::{act, focus_in, header_text, preview_text, Env, Res, Snapshot};
@@ -37,15 +37,8 @@ pub struct Binds(Vec<(Bind, Op)>);
 impl Binds {
     pub fn new(k: &Keys) -> Res<Binds> {
         let mut list = Vec::new();
-        for (name, op) in [
-            (&k.sort, Op::SortNext),
-            (&k.group, Op::GroupNext),
-            (&k.up, Op::Up),
-            (&k.down, Op::Down),
-            (&k.clear, Op::Clear),
-        ] {
-            let bind =
-                parse_key(name).ok_or_else(|| format!("unknown key name {name:?} in keys"))?;
+        let ops = [Op::SortNext, Op::GroupNext, Op::Up, Op::Down, Op::Clear];
+        for ((_, bind), op) in keys::validate(k)?.into_iter().zip(ops) {
             list.push((bind, op));
         }
         for n in 1..=9u8 {
@@ -183,16 +176,7 @@ pub fn handle_key(app: &mut App, binds: &Binds, key: KeyEvent) -> Action {
         return Action::None;
     }
     app.status.clear();
-    // Some terminals report a typed capital without SHIFT; a bind for it always carries SHIFT.
-    let shifted = matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase());
-    let pressed = Bind {
-        code: key.code,
-        mods: if shifted {
-            key.modifiers | KeyModifiers::SHIFT
-        } else {
-            key.modifiers
-        },
-    };
+    let pressed = keys::normalize(key.code, key.modifiers);
     if let Some((_, op)) = binds.0.iter().find(|(b, _)| *b == pressed) {
         return Action::Op(*op);
     }
@@ -689,14 +673,14 @@ mod tests {
     #[test]
     fn a_capital_letter_bind_is_distinct_from_the_lowercase_letter() {
         let mut keys = default_keys("ctrl-s");
-        keys.group = "A".into();
+        keys.group = "alt-A".into();
         let binds = Binds::new(&keys).unwrap_or_else(|e| panic!("{e}"));
         let mut app = grouped();
         assert_eq!(
             handle_key(
                 &mut app,
                 &binds,
-                key(KeyCode::Char('A'), KeyModifiers::SHIFT)
+                key(KeyCode::Char('A'), KeyModifiers::ALT | KeyModifiers::SHIFT)
             ),
             Action::Op(Op::GroupNext)
         );
@@ -704,18 +688,24 @@ mod tests {
             handle_key(
                 &mut app,
                 &binds,
-                key(KeyCode::Char('A'), KeyModifiers::NONE)
+                key(KeyCode::Char('a'), KeyModifiers::ALT | KeyModifiers::SHIFT)
             ),
+            Action::Op(Op::GroupNext),
+            "a terminal that reports the lowercase letter with SHIFT"
+        );
+        assert_eq!(
+            handle_key(&mut app, &binds, key(KeyCode::Char('A'), KeyModifiers::ALT)),
             Action::Op(Op::GroupNext),
             "a terminal that reports a capital without SHIFT"
         );
         assert_eq!(
-            handle_key(
-                &mut app,
-                &binds,
-                key(KeyCode::Char('a'), KeyModifiers::NONE)
-            ),
+            handle_key(&mut app, &binds, key(KeyCode::Char('a'), KeyModifiers::ALT)),
             Action::None
+        );
+        handle_key(
+            &mut app,
+            &binds,
+            key(KeyCode::Char('a'), KeyModifiers::NONE),
         );
         assert_eq!(
             app.query, "a",

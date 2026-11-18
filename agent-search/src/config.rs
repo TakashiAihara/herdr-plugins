@@ -173,18 +173,7 @@ fn validate(cfg: &Config) -> Result<(), String> {
     for spec in cfg.sorts.iter().flat_map(|s| &s.by) {
         check_field(spec.strip_suffix(":desc").unwrap_or(spec))?;
     }
-    let k = &cfg.keys;
-    for (field, name) in [
-        ("sort", &k.sort),
-        ("group", &k.group),
-        ("up", &k.up),
-        ("down", &k.down),
-        ("clear", &k.clear),
-    ] {
-        if crate::keys::parse_key(name).is_none() {
-            return Err(format!("unknown key name {name:?} in keys.{field}"));
-        }
-    }
+    crate::keys::validate(&cfg.keys)?;
     Ok(())
 }
 
@@ -193,14 +182,12 @@ mod tests {
     use super::*;
 
     fn load_json(json: &str) -> Result<Config, String> {
-        let dir = std::env::temp_dir().join(format!("agent-search-cfg-{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        let file = dir.join(format!(
-            "{:x}.json",
-            json.len() * 31 + json.bytes().map(usize::from).sum::<usize>()
-        ));
+        let dir = crate::testutil::unique_dir("cfg");
+        let file = dir.join("config.json");
         fs::write(&file, json).unwrap_or_else(|e| panic!("{e}"));
-        load(&file.to_string_lossy())
+        let loaded = load(&file.to_string_lossy());
+        let _ = fs::remove_dir_all(&dir);
+        loaded
     }
 
     #[test]

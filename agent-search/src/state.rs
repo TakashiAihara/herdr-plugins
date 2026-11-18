@@ -105,48 +105,39 @@ pub fn rollback(dir: &str, path: &str, before: Option<&[u8]>) -> Result<(), Stri
     }
 }
 
-// A lock file next to the state file (`<state>.lock`), so two processes do not read-modify-write
-// the state at once. shortcut: two waiters that both judge one stale lock stale can remove each
-// other's fresh lock; a lock is held for milliseconds, so upgrade to flock if that is ever seen.
-pub struct Lock(String);
+// An exclusive OS lock on `<state>.lock`, next to the state file, so two processes do not
+// read-modify-write the state at once. The kernel drops it when the holder exits, so a crash never
+// leaves a stale lock; the file itself stays.
+pub struct Lock(fs::File);
 
 impl Lock {
     pub fn acquire(dir: &str, path: &str) -> Result<Lock, String> {
-        Lock::acquire_with(dir, path, Duration::from_secs(2), Duration::from_secs(10))
+        Lock::acquire_with(dir, path, Duration::from_secs(2))
     }
 
-    pub fn acquire_with(
-        dir: &str,
-        path: &str,
-        wait: Duration,
-        stale: Duration,
-    ) -> Result<Lock, String> {
+    pub fn acquire_with(dir: &str, path: &str, wait: Duration) -> Result<Lock, String> {
         fs::create_dir_all(dir).map_err(|_| format!("cannot create {dir}"))?;
         let lock = format!("{path}.lock");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock)
+            .map_err(|_| format!("cannot write {lock}"))?;
         let start = Instant::now();
         loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&lock)
-            {
-                Ok(_) => return Ok(Lock(lock)),
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    let age = fs::metadata(&lock)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok());
-                    if age.is_some_and(|a| a > stale) {
-                        let _ = fs::remove_file(&lock);
-                        continue;
-                    }
-                    if start.elapsed() >= wait {
-                        return Err(format!("cannot lock {path}: {lock} is held"));
-                    }
+            match file.try_lock() {
+                Ok(()) => return Ok(Lock(file)),
+                Err(fs::TryLockError::WouldBlock) if start.elapsed() < wait => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(_) => return Err(format!("cannot write {dir}")),
+                Err(fs::TryLockError::WouldBlock) => {
+                    return Err(format!(
+                        "cannot lock {path}: {lock} is held by another process"
+                    ))
+                }
+                Err(fs::TryLockError::Error(_)) => return Err(format!("cannot lock {lock}")),
             }
         }
     }
@@ -154,7 +145,7 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        let _ = self.0.unlock();
     }
 }
 
@@ -163,26 +154,45 @@ mod tests {
     use super::*;
 
     fn dir(name: &str) -> String {
-        let d = std::env::temp_dir().join(format!("agent-search-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap_or_else(|e| panic!("{e}"));
-        d.to_string_lossy().into_owned()
+        crate::testutil::unique_dir(name)
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[test]
-    fn a_held_lock_blocks_until_released_and_a_stale_one_is_taken_over() {
+    fn a_held_lock_blocks_until_released_and_dropping_releases_it() {
         let d = dir("lock");
         let path = format!("{d}/state.json");
         let first = Lock::acquire(&d, &path).unwrap_or_else(|e| panic!("{e}"));
-        let short = Duration::from_millis(100);
-        let err = Lock::acquire_with(&d, &path, short, Duration::from_secs(60)).err();
+        let err = Lock::acquire_with(&d, &path, Duration::from_millis(100)).err();
         assert!(err.is_some_and(|e| e.starts_with("cannot lock ")));
         drop(first);
-        assert!(!Path::new(&format!("{path}.lock")).exists());
-        let held = Lock::acquire(&d, &path).unwrap_or_else(|e| panic!("{e}"));
-        std::mem::forget(held);
-        let taken = Lock::acquire_with(&d, &path, short, Duration::ZERO);
-        assert!(taken.is_ok());
+        assert!(Lock::acquire_with(&d, &path, Duration::from_millis(100)).is_ok());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_waiter_gets_the_lock_when_the_holder_lets_go() {
+        let d = dir("waiter");
+        let path = format!("{d}/state.json");
+        let first = Lock::acquire(&d, &path).unwrap_or_else(|e| panic!("{e}"));
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(first);
+        });
+        assert!(Lock::acquire_with(&d, &path, Duration::from_secs(5)).is_ok());
+        releaser
+            .join()
+            .unwrap_or_else(|_| panic!("releaser panicked"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_leftover_lock_file_does_not_block_anyone() {
+        let d = dir("leftover");
+        let path = format!("{d}/state.json");
+        fs::write(format!("{path}.lock"), "").unwrap_or_else(|e| panic!("{e}"));
+        assert!(Lock::acquire_with(&d, &path, Duration::from_millis(100)).is_ok());
         let _ = fs::remove_dir_all(&d);
     }
 
