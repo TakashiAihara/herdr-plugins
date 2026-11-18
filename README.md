@@ -5,13 +5,14 @@
 
 Plugins for [Herdr](https://herdr.dev), the terminal multiplexer for coding agents. Each directory is one self-contained plugin; install only the ones you need.
 
-They come from running many Claude Code sessions side by side in Herdr: each plugin removes one manual step that would otherwise interrupt every session, and does it from Herdr's own event hooks instead of a wrapper around `claude`.
+They come from running many Claude Code sessions side by side in Herdr: each plugin removes one manual step that would otherwise interrupt every session, and does it from Herdr's own hooks, actions and panes instead of a wrapper around `claude`.
 
 ## Plugins
 
 | Plugin | What it does | Herdr | Platforms |
 |---|---|---|---|
 | [claude-dev-channels-accept](claude-dev-channels-accept/) | Answers Claude Code's development-channels warning so `claude --dangerously-load-development-channels` starts without a wrapper (`expect` and the like) | 0.9.3+ | Linux, macOS |
+| [pane-picker](pane-picker/) | A popup that jumps to a pane, searching every pane field and sorting, grouping, prioritizing and reordering the list (needs `jq` and `fzf`) | 0.9.5+ | Linux, macOS |
 
 Each plugin's README covers what it matches, when it acts, and where it deliberately leaves things to you.
 
@@ -33,15 +34,15 @@ herdr plugin log list --plugin <plugin-id>
 ## Design
 
 - One problem per plugin. No shared runtime, no daemon, no dependency between plugins.
-- Plain `bash` hooks on Herdr events, declared in `herdr-plugin.toml`.
+- Plain `bash` scripts on Herdr events, actions and panes, declared in `herdr-plugin.toml`.
 - Fail closed. When the screen or the event does not look exactly as expected, the plugin does nothing and leaves the pane as it would be without it. Failures exit non-zero so they show up in `herdr plugin log`.
 
 ## Layout
 
 ```text
 <plugin>/
-├── herdr-plugin.toml   # id, min_herdr_version, platforms, event hooks
-├── hook.sh             # the hook Herdr runs
+├── herdr-plugin.toml   # id, min_herdr_version, platforms, entrypoints
+├── *.sh                # the scripts Herdr runs
 ├── README.md           # behavior and limits
 └── tests/*_test.sh     # runs without Herdr
 ```
