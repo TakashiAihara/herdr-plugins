@@ -2,7 +2,9 @@ use crate::config::{Config, Keys, Match};
 use crate::keys::{self, Bind};
 use crate::rows::{self, Row};
 use crate::state::State;
-use crate::{act, focus_in, header_text, preview_text, sync_priorities, Env, Res, Snapshot};
+use crate::{
+    act, focus_in, header_text, preview_lines, sync_priorities, Env, PreviewLine, Res, Snapshot,
+};
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -20,6 +22,7 @@ pub enum Op {
     GroupNext,
     MatchNext,
     PreviewNext,
+    WrapNext,
     Up,
     Down,
     Clear,
@@ -46,6 +49,7 @@ impl Binds {
             Op::GroupNext,
             Op::MatchNext,
             Op::PreviewNext,
+            Op::WrapNext,
             Op::Up,
             Op::Down,
             Op::Clear,
@@ -80,6 +84,9 @@ pub struct App {
     pub mode: Match,
     // Whether the preview pane is shown; false gives the list the full width.
     pub show_preview: bool,
+    // Whether a preview line wider than the pane wraps with a hanging indent; false cuts it
+    // at the pane's right edge.
+    pub preview_wrap: bool,
     // The last failure of an action, shown under the list until the next key.
     pub status: String,
 }
@@ -125,6 +132,7 @@ impl App {
             cur: 0,
             mode: Match::Fuzzy,
             show_preview: true,
+            preview_wrap: false,
             status: String::new(),
         };
         app.refresh(None);
@@ -261,6 +269,7 @@ fn op_args(op: Op, id: &str) -> Vec<String> {
         Op::GroupNext => vec!["group-next".into()],
         Op::MatchNext => vec!["match-next".into()],
         Op::PreviewNext => vec!["preview-next".into()],
+        Op::WrapNext => vec!["wrap-next".into()],
         Op::Up => vec!["move".into(), "up".into(), id.into()],
         Op::Down => vec!["move".into(), "down".into(), id.into()],
         Op::Clear => vec!["clear".into(), id.into()],
@@ -288,7 +297,33 @@ pub fn dispatch(app: &mut App, op: Op, run: impl FnOnce(Vec<String>) -> Res<Vec<
     }
 }
 
-pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
+// Splits one logical preview row into lines of at most `width` display cells. The first line
+// starts at column 0; continuations hang at `hang` columns. A character wider than the space
+// left on a line moves whole to the next one, never split. When the hang alone fills the
+// width there is no room for a continuation, so the line is left whole and cut instead.
+fn wrap_cells(text: &str, hang: usize, width: usize) -> Vec<String> {
+    if hang >= width {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    let mut used = 0usize;
+    let mut prefix = 0usize;
+    for c in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > width && used > prefix {
+            lines.push(std::mem::replace(&mut cur, " ".repeat(hang)));
+            used = hang;
+            prefix = hang;
+        }
+        cur.push(c);
+        used += w;
+    }
+    lines.push(cur);
+    lines
+}
+
+pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &[PreviewLine]) {
     let [head, input, body, status] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
@@ -346,10 +381,24 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
     );
 
     if let Some(area) = preview_area {
+        // The border takes one column on each side. A wider line is either cut at the right
+        // edge or wrapped by hand, hanging at each line's value column; the paragraph itself
+        // never wraps, so ratatui's wrapper cannot move a continuation to column 0.
+        let width = usize::from(area.width.saturating_sub(2));
+        let mut text = String::new();
+        for l in preview {
+            if app.preview_wrap {
+                for w in wrap_cells(&l.text, l.hang, width) {
+                    text.push_str(&w);
+                    text.push('\n');
+                }
+            } else {
+                text.push_str(&l.text);
+                text.push('\n');
+            }
+        }
         frame.render_widget(
-            Paragraph::new(preview.replace('\t', "  "))
-                .block(Block::bordered().title("preview"))
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(text.replace('\t', "  ")).block(Block::bordered().title("preview")),
             area,
         );
     }
@@ -388,6 +437,7 @@ fn show_error(term: &mut DefaultTerminal, msg: &str) {
 pub(crate) fn apply_state(app: &mut App, cfg: &Config, st: &State) {
     app.set_mode(cfg.mode(st));
     app.show_preview = cfg.preview_on(st);
+    app.preview_wrap = cfg.wrap_on(st);
 }
 
 // Opening the popup first copies the priority tokens agents set themselves into the state. A
@@ -411,11 +461,10 @@ fn session(env: &Env, cfg: &Config, term: &mut DefaultTerminal) -> Res<()> {
         apply_state(&mut app, cfg, &st);
         let list = snap.get(env)?;
         let preview = if app.show_preview {
-            app.selected_id().map_or(String::new(), |id| {
-                preview_text(list, &id, &cfg.preview_hide)
-            })
+            app.selected_id()
+                .map_or_else(Vec::new, |id| preview_lines(list, &id, &cfg.preview_hide))
         } else {
-            String::new()
+            Vec::new()
         };
         let header = header_text(cfg, &st);
         term.draw(|f| draw(f, &app, &header, &preview))
@@ -516,6 +565,7 @@ mod tests {
             group: "ctrl-g".into(),
             r#match: "ctrl-r".into(),
             preview: "ctrl-o".into(),
+            wrap: "ctrl-w".into(),
             up: "alt-up".into(),
             down: "alt-down".into(),
             clear: "alt-0".into(),
@@ -534,6 +584,10 @@ mod tests {
         assert_eq!(
             press(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL),
             Action::Op(Op::PreviewNext)
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL),
+            Action::Op(Op::WrapNext)
         );
         assert_eq!(
             press(&mut app, KeyCode::Down, KeyModifiers::ALT),
@@ -630,6 +684,20 @@ mod tests {
         assert_eq!(shown(&app), ["▾ alpha (1)", "a2", "▾ beta (1)", "b1"]);
         app.backspace();
         assert_eq!(shown(&app).len(), 7);
+    }
+
+    #[test]
+    fn a_query_that_is_a_session_id_finds_only_the_pane_carrying_it() {
+        // The session id sits in the row's search text (agent_session.value is a default
+        // search field) while no token holds it.
+        let mut app = App::new(vec![
+            row("a1", None, "fix login /src alpha s3 urgent"),
+            row("a2", None, "write docs /src alpha s9 review"),
+        ]);
+        for c in "s3".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(shown(&app), ["a1"]);
     }
 
     #[test]
@@ -807,6 +875,7 @@ mod tests {
                 group: "ctrl-g".into(),
                 r#match: "ctrl-r".into(),
                 preview: "ctrl-o".into(),
+                wrap: "ctrl-w".into(),
                 up: "alt-up".into(),
                 down: "alt-down".into(),
                 clear: "alt-0".into(),
@@ -872,6 +941,7 @@ mod tests {
                 group: "ctrl-g".into(),
                 r#match: "ctrl-r".into(),
                 preview: "ctrl-o".into(),
+                wrap: "ctrl-w".into(),
                 up: "alt-up".into(),
                 down: "alt-down".into(),
                 clear: "alt-0".into(),
@@ -925,7 +995,10 @@ mod tests {
                 f,
                 &app,
                 "sort: priority  group: repo\nctrl-s sort\n",
-                "title\tfix login\n",
+                &[PreviewLine {
+                    text: "title  fix login".into(),
+                    hang: 7,
+                }],
             )
         })
         .unwrap_or_else(|e| panic!("{e}"));
@@ -951,6 +1024,7 @@ mod tests {
             group: "ctrl-g".into(),
             r#match: "ctrl-r".into(),
             preview: "ctrl-o".into(),
+            wrap: "ctrl-w".into(),
             up: "alt-up".into(),
             down: "alt-down".into(),
             clear: "alt-0".into(),
@@ -1054,7 +1128,7 @@ mod tests {
 
     fn screen(width: u16, app: &App) -> (Vec<String>, ratatui::layout::Position) {
         let mut term = Terminal::new(TestBackend::new(width, 8)).unwrap_or_else(|e| panic!("{e}"));
-        term.draw(|f| draw(f, app, "h\nk\n", ""))
+        term.draw(|f| draw(f, app, "h\nk\n", &[]))
             .unwrap_or_else(|e| panic!("{e}"));
         let pos = term.get_cursor_position().unwrap_or_else(|e| panic!("{e}"));
         let buf = term.backend().buffer();
@@ -1093,5 +1167,76 @@ mod tests {
         app.query = "ab".into();
         let (_, pos) = screen(20, &app);
         assert_eq!((pos.x, pos.y), (4, 2));
+    }
+
+    #[test]
+    fn wrap_cells_hangs_continuations_at_the_given_column() {
+        assert_eq!(
+            wrap_cells("key  averylongvalue", 4, 10),
+            ["key  avery", "    longva", "    lue"]
+        );
+        // A line that fits is returned whole.
+        assert_eq!(wrap_cells("key  short", 4, 10), ["key  short"]);
+    }
+
+    #[test]
+    fn wrap_cells_counts_display_cells_and_keeps_wide_characters_whole() {
+        // "key  " is 5 cells and the value hangs at column 5; width 8 leaves 3 cells a line.
+        // Each CJK character is 2 cells and moves to the next line rather than split.
+        assert_eq!(
+            wrap_cells("key  日本abc", 5, 8),
+            ["key  日", "     本a", "     bc"]
+        );
+        // An emoji is 2 cells too: it does not straddle the edge either.
+        assert_eq!(wrap_cells("a😀bc", 1, 4), ["a😀b", " c"]);
+        // A hang that fills the width leaves no room for a continuation: the line stays whole.
+        assert_eq!(wrap_cells("key  value", 8, 8), ["key  value"]);
+    }
+
+    fn preview_screen(width: u16, app: &App, preview: &[PreviewLine]) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(width, 8)).unwrap_or_else(|e| panic!("{e}"));
+        term.draw(|f| draw(f, app, "h\nk\n", preview))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_preview_wrap_toggle_switches_between_cutting_and_hanging_indent() {
+        let mut app = grouped();
+        // At width 60 the preview's inner width is 22 cells; the line is 32 cells long and
+        // its value column hangs at 12.
+        let preview = [PreviewLine {
+            text: "ab          abcdefghijklmnopqrst".into(),
+            hang: 12,
+        }];
+        app.preview_wrap = false;
+        let cut = preview_screen(60, &app, &preview).join("\n");
+        assert!(cut.contains("ab          abcdefghij"), "{cut}");
+        assert!(
+            !cut.contains("klmnopqrst"),
+            "a cut line has no continuation: {cut}"
+        );
+        app.preview_wrap = true;
+        let wrapped = preview_screen(60, &app, &preview).join("\n");
+        assert!(wrapped.contains("ab          abcdefghij"), "{wrapped}");
+        assert!(
+            wrapped.contains("            klmnopqrst"),
+            "the continuation hangs at the value column: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn the_wrap_toggle_needs_no_pane() {
+        let mut app = grouped();
+        let mut ran = false;
+        dispatch(&mut app, Op::WrapNext, |args| {
+            ran = true;
+            assert_eq!(args, ["wrap-next"]);
+            Ok(vec![])
+        });
+        assert!(ran);
     }
 }

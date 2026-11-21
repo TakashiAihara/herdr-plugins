@@ -1,6 +1,6 @@
 # agent-search
 
-A popup for jumping to an agent, built for sessions with many of them. It lists the panes Herdr's Agents view lists, searches every field Herdr reports for them (title, cwd, agent, status, and every metadata token, shown or not), and lets you sort, group, prioritize and reorder the list. The sort, grouping, match mode, preview choice and manual order stay between openings.
+A popup for jumping to an agent, built for sessions with many of them. It lists the panes Herdr's Agents view lists, searches every field Herdr reports for them (title, cwd, agent, status, the agent session id, and every metadata token, shown or not), and lets you sort, group, prioritize and reorder the list. The sort, grouping, match mode, preview and wrap choices and the manual order stay between openings.
 
 ## Requirements
 
@@ -35,13 +35,33 @@ description = "search agents"
 | `ctrl-g` | next grouping |
 | `ctrl-r` | toggle match mode: fuzzy ↔ substring |
 | `ctrl-o` | hide or show the preview |
+| `ctrl-w` | toggle preview wrapping: cut long lines ↔ wrap them with a hanging indent |
 | `alt-up` / `alt-down` | move the agent up or down (manual order) |
 | `alt-1` … `alt-5` | set the agent's priority (up to `priority_max`) |
 | `alt-0` | clear the agent's priority |
 
 The popup is 90% of the screen wide and 85% high, set in the plugin manifest; Herdr has no per-user override for a plugin's popup size.
 
-The right side previews the selected pane as an outline in up to two sections: `[pane]` holds its fields, `[ids]` `pane_id`, `workspace_id`, `tab_id` and any other field whose name ends in `_id`. A scalar field is one `key  value` line; a field holding a JSON object (the `tokens` map, `agent_session`, `state_labels`) is its name on one line with each key/value indented two spaces below it, recursively, and an array the same way with the index as the key. Every value starts in one column, and a section with nothing in it is left out. `ctrl-o` hides the preview so the list takes the full width; the choice is saved in the state like the sort and match mode, so it wins over the configured `preview` until toggled again. `preview_hide` is a list of field paths left out of the preview — a nested entry by its path (`tokens.flags`, `agent_session.kind`) or a whole object (`state_labels`) — and only affects the preview, never the search or the list. For example, to hide the statusline helper tokens:
+The right side previews the selected pane as an outline in up to three sections, in this order: `[ids]` holds every field whose name ends in `_id` (`pane_id`, `workspace_id`, `tab_id`, `terminal_id`, and any other identifier Herdr reports) under its Herdr name; `[metadata]` every other field but `tokens` (`agent`, `agent_status`, `cwd`, `title`, `state_labels`, `agent_session`, ...); `[tokens]` each token on its own line, named without the `tokens.` prefix. A scalar field is one `key  value` line; a field holding a JSON object or array (`agent_session`, `state_labels`, a token that is itself an object) is its name on one line with each entry indented two spaces below it, recursively, an array's index as the key. Every value starts in one column, and a section with nothing in it is left out. For example:
+
+```text
+[ids]
+pane_id        w2:p1
+workspace_id   w2
+tab_id         w2:t1
+[metadata]
+agent          devin
+agent_status   working
+agent_session
+  value        s3
+title          write docs
+cwd            /src/alpha
+[tokens]
+repo           alpha
+task           urgent kaneo
+```
+
+`ctrl-o` hides the preview so the list takes the full width; the choice is saved in the state like the sort and match mode, so it wins over the configured `preview` until toggled again. `ctrl-w` toggles wrapping, saved in the state the same way and winning over `preview_wrap` until toggled again. With wrapping off (the default), a line wider than the pane is cut at its right edge. With wrapping on, a long `key  value` line continues on the next lines starting at its value column, and a long outline parent (a key with no value of its own) continues at its own indent; wrapping counts terminal cells, so a wide character is never split down the middle. `preview_hide` is a list of field paths left out of the preview — a nested entry by its path (`tokens.flags`, `agent_session.kind`) or a whole object (`state_labels`) — and only affects the preview, never the search or the list. For example, to hide the statusline helper tokens:
 
 ```json
 {"preview_hide": ["tokens.last", "tokens.mid", "tokens.flags", "tokens.prtitle"]}
@@ -54,6 +74,8 @@ This is also how you see what is searchable and what to put in the config.
 The filter runs with `nucleo-matcher`, the same kind of matching as fzf, in one of two modes shown in the header. In `fuzzy` mode (the default), every space-separated word of the query must appear in the row's search text with its letters in order, not necessarily next to each other, so `agsr` matches `agent-search`. In `substring` mode every word must appear as a contiguous substring, so `agsr` does not match `agent-search` but `agent` does. Matching is smart case in both modes: an all-lowercase word ignores case, a capital letter makes it case-sensitive. The fzf pattern syntax works in both modes: `'exact` for a literal substring, `^prefix`, `suffix$`, and `!not` to exclude. Matches keep the current sort order; searching never reorders by score.
 
 `ctrl-r` toggles the mode, and the toggled mode is saved in the state like the sort and grouping: it wins over the configured `match` until toggled again.
+
+`search` and `columns` are independent lists: a field can be searchable without being shown in the list. The default `search` includes `agent_session.value`, the agent's stored native session id, so a session id finds its pane in any environment even when no token carries it.
 
 ## Priority
 
@@ -84,7 +106,7 @@ The defaults:
 ```json
 {
   "columns": ["prio", "agent_status", "title"],
-  "search": ["title", "cwd", "agent", "agent_status", "terminal_title_stripped", "tokens.*"],
+  "search": ["title", "cwd", "agent", "agent_status", "terminal_title_stripped", "agent_session.value", "tokens.*"],
   "sorts": [
     {"name": "priority", "by": ["prio:desc", "manual"]},
     {"name": "manual", "by": ["manual"]},
@@ -99,8 +121,9 @@ The defaults:
   "priority_max": 5,
   "match": "fuzzy",
   "preview": true,
+  "preview_wrap": false,
   "preview_hide": [],
-  "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
+  "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "wrap": "ctrl-w", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
 }
 ```
 
@@ -108,6 +131,7 @@ The defaults:
 - `priority_max` is an integer from 1 to 9 (default 5): the popup binds `alt-1` through `alt-<priority_max>` and the higher digits do nothing, though `alt-1` … `alt-9` stay reserved for priorities in `keys` validation either way. A value outside 1..9 or not an integer is a config error naming `priority_max`.
 - `match` is `"fuzzy"` (the default) or `"substring"`, the mode the popup's filter starts in; anything else is a config error naming `match`.
 - `preview` is `true` (the default) or `false`, whether the preview pane starts shown; anything else is a config error naming `preview`.
+- `preview_wrap` is `true` or `false` (default `false`), whether preview lines wider than the pane wrap with a hanging indent instead of being cut at the right edge; anything else is a config error naming `preview_wrap`. `ctrl-w` toggles it and the saved choice wins over this default until toggled again.
 - `preview_hide` is a list of field paths left out of the preview; every entry must be a non-empty string or it is a config error naming `preview_hide`.
 - For nested headers a group gives `levels` instead of `by`: a list of fallback chains, one per level, no chain empty. A group needs exactly one of `by` or `levels` (`by: []` means no grouping). Headers nest two spaces per level, count the agents under them, and a header with no matching agents is hidden. For example, repo over branch:
 
@@ -136,11 +160,11 @@ The defaults:
 }
 ```
 
-A config that is not a JSON object, or has a key of the wrong shape (an empty list, duplicate sort or group names, a group without exactly one of `by` and `levels` or with an empty `levels` chain, an empty key name, an invalid token name, a `priority_max` that is not an integer from 1 to 9, a `match` that is not `"fuzzy"` or `"substring"`, a `preview` that is not `true` or `false`, a `preview_hide` that is not a list of non-empty strings), stops the popup with a message instead of falling back to the defaults.
+A config that is not a JSON object, or has a key of the wrong shape (an empty list, duplicate sort or group names, a group without exactly one of `by` and `levels` or with an empty `levels` chain, an empty key name, an invalid token name, a `priority_max` that is not an integer from 1 to 9, a `match` that is not `"fuzzy"` or `"substring"`, a `preview` or `preview_wrap` that is not `true` or `false`, a `preview_hide` that is not a list of non-empty strings), stops the popup with a message instead of falling back to the defaults.
 
 ## State
 
-Each Herdr session has its own state file in the plugin state directory: `state-<tag>.json`, where `<tag>` is the first 12 hex characters of the SHA-256 of the session's `HERDR_SOCKET_PATH`, so a write, prune or lock in one session never touches another's; without `HERDR_SOCKET_PATH` the file is `state.json`. It holds the current sort, grouping, match mode and preview choice, the manual order, and the saved priorities: the ones the popup set plus every in-range priority token the popup or a CLI act saw on a live pane. An agent is keyed by its agent session id when it has one, so its manual order survives a Herdr restart that renumbers panes; other panes are keyed by pane id. Entries of panes that are gone from `herdr pane list` are dropped on every change made outside the popup, where gone means no pane in the list at all, agent or not, has that key. An empty pane list never prunes, since no panes at all is not evidence that every saved pane is gone. The popup works on a snapshot, so it never drops anything. Concurrent writers of one file are serialized by an exclusive lock on its `.lock` sibling, which the operating system releases when its holder exits.
+Each Herdr session has its own state file in the plugin state directory: `state-<tag>.json`, where `<tag>` is the first 12 hex characters of the SHA-256 of the session's `HERDR_SOCKET_PATH`, so a write, prune or lock in one session never touches another's; without `HERDR_SOCKET_PATH` the file is `state.json`. It holds the current sort, grouping, match mode, preview and wrap choices, the manual order, and the saved priorities: the ones the popup set plus every in-range priority token the popup or a CLI act saw on a live pane. An agent is keyed by its agent session id when it has one, so its manual order survives a Herdr restart that renumbers panes; other panes are keyed by pane id. Entries of panes that are gone from `herdr pane list` are dropped on every change made outside the popup, where gone means no pane in the list at all, agent or not, has that key. An empty pane list never prunes, since no panes at all is not evidence that every saved pane is gone. The popup works on a snapshot, so it never drops anything. Concurrent writers of one file are serialized by an exclusive lock on its `.lock` sibling, which the operating system releases when its holder exits.
 
 ## Limits
 

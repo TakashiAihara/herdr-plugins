@@ -322,7 +322,9 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
         }
         let mut search = Vec::new();
         for s in &cfg.search {
-            let v = field(s, p.pane).map_err(|_| err())?;
+            // A field that cannot be read on a pane (an intermediate value of another type)
+            // does not match it; sort, group and column fields stay strict.
+            let v = field(s, p.pane).unwrap_or(Value::Null);
             if !blank(&v) {
                 search.push(clean(&tostring(&v)));
             }
@@ -447,12 +449,14 @@ mod tests {
             priority_max: 5,
             r#match: Match::Fuzzy,
             preview: true,
+            preview_wrap: false,
             preview_hide: vec![],
             keys: Keys {
                 sort: "ctrl-s".into(),
                 group: "ctrl-g".into(),
                 r#match: "ctrl-r".into(),
                 preview: "ctrl-o".into(),
+                wrap: "ctrl-w".into(),
                 up: "alt-up".into(),
                 down: "alt-down".into(),
                 clear: "alt-0".into(),
@@ -552,6 +556,34 @@ mod tests {
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["p2", "p1", "p3"]
         );
+    }
+
+    #[test]
+    fn a_session_id_is_search_text_and_an_unreadable_search_field_only_skips_its_pane() {
+        let list = json!({"result": {"panes": [
+            {"pane_id": "p1", "agent": "claude", "title": "fix", "agent_session": {"value": "sess-1"}},
+            {"pane_id": "p2", "agent": "claude", "title": "docs", "agent_session": "not-an-object"},
+            {"pane_id": "p3", "agent": "claude", "title": "sess-1 typo"}
+        ]}});
+        let mut c = cfg(Group {
+            name: "g".into(),
+            levels: vec![vec![]],
+        });
+        c.search = vec!["agent_session.value".into()];
+        let rows =
+            build(Some(&list), &c, &State(Default::default())).unwrap_or_else(|e| panic!("{e}"));
+        let search_of = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .map(|r| r.search.as_str())
+                .unwrap_or("<missing>")
+        };
+        // p2's agent_session is a string, so the field cannot be read on it: the pane stays in
+        // the list with no session text instead of failing the whole build. p3's title holds
+        // "sess-1" but title is not a search field here, so it does not match either.
+        assert_eq!(search_of("p1"), "sess-1");
+        assert_eq!(search_of("p2"), "");
+        assert_eq!(search_of("p3"), "");
     }
 
     #[test]
