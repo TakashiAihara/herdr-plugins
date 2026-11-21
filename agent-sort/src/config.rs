@@ -244,6 +244,12 @@ fn preset(path: &str, i: usize, v: &toml::Value) -> Result<Preset, String> {
                 "{path}: preset name {s:?} has leading or trailing whitespace"
             ))
         }
+        // `presets` prints one name per line and `set` takes the name back as one argument.
+        Some(toml::Value::String(s)) if s.chars().any(char::is_control) => {
+            return Err(format!(
+                "{path}: preset name {s:?} contains a control character"
+            ))
+        }
         Some(toml::Value::String(s)) => s.clone(),
         Some(v) => {
             return Err(format!(
@@ -388,8 +394,8 @@ fn to_json(v: &toml::Value) -> Value {
 // Written by `edit` when there is no config file: parses to exactly the built-in presets.
 pub const TEMPLATE: &str = r#"# agent-sort configuration.
 #
-# default = "<name>": the preset `restore` applies on startup when the state
-# file does not name one. Uncomment to use.
+# default = "<name>": the preset used when no preset was picked yet, or when
+# the picked one is no longer in this file. Uncomment to use.
 #
 # default = "attention"
 #

@@ -189,6 +189,7 @@ check "restore of a saved preset the config no longer has says so once, forgets 
 \"label\":\"prio\"
 1
 no state"
+check "restore removed the state file itself" "$([ -e "$state" ] && echo present || echo absent)" "absent"
 fresh; run restore
 check "the next startup applies the default without another notification" \
   "$(reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show' "$tmp/calls")" "\"label\":\"prio\"
@@ -238,6 +239,9 @@ bad "an entry with both token and field is a config error" '[[sort_presets]]
 name = "x"
 sort = [{ field = "agent", token = "prio" }]' 'token'
 bad "a file that is not TOML is a config error" 'this is = = not toml' 'config.toml'
+bad "a preset name with a newline is a config error" '[[sort_presets]]
+name = "x\ny"
+sort = [{ field = "agent" }]' 'control character'
 
 reset; mkdir "$cfg"
 run presets; rc=$?
@@ -306,14 +310,30 @@ cat > "$tmp/editor" <<'SH'
 printf '[[sort_presets]]\nname = "other"\nsort = [{ field = "agent" }]\n' > "$1"
 SH
 VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
-check "edit that drops the active preset applies nothing and says so" \
-  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*attention.*gone' "$tmp/calls")" "rc=0
-1"
+check "edit that drops the active preset with no default takes our view down and says so" \
+  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*attention.*gone' "$tmp/calls"; [ -e "$state" ] && echo "state kept" || echo "state removed")" "rc=0
+agent.view.clear {$SRC}
+1
+state removed"
 
 fresh
 VISUAL=false run edit; rc=$?
 check "an editor that fails is an error and applies nothing" "$(echo "rc=$rc"; reqs; grep -c 'editor' "$tmp/err")" "rc=1
 1"
+
+fresh; echo '{"preset":"attention"}' > "$state"
+cat > "$tmp/editor" <<'SH'
+#!/bin/sh
+printf 'default = "other"\n[[sort_presets]]\nname = "first"\nsort = [{ field = "seen" }]\n[[sort_presets]]\nname = "other"\nsort = [{ field = "agent" }]\n' > "$1"
+SH
+VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
+check "edit that drops the active preset applies the default, says both, and forgets the name" \
+  "$(echo "rc=$rc"; reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show.*attention.*gone.*other' "$tmp/calls"; preset_in_state)" "rc=0
+\"label\":\"other\"
+1
+no state"
+fresh; run restore
+check "and the next startup does not report the drop again" "$(grep -c 'notification show' "$tmp/calls")" "0"
 
 fresh
 printf '#!/bin/sh\necho "broken = = =" > "$1"\n' > "$tmp/editor"

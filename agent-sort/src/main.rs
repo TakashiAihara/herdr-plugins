@@ -336,8 +336,10 @@ pub enum EditResult {
     // The current preset — the state's name, or the config default it falls back to — was
     // re-applied.
     Applied(String),
-    // The state's preset is gone from the new config and there is no default; nothing was sent.
+    // The state's preset is gone from the new config and there is no default; our view was cleared.
     Gone(String),
+    // The state's preset (first) is gone from the new config, so the default (second) was applied.
+    Replaced(String, String),
     // There is no current preset to re-apply.
     Nothing,
 }
@@ -385,12 +387,26 @@ fn edit_flow(env: &Env) -> Res<EditResult> {
         Saved::Named(n) if cfg.preset(n).is_none() => Some(n.clone()),
         _ => None,
     };
+    // The drop is reported here, so forget the name: restore would report it again at startup.
+    if dropped.is_some() {
+        state::remove(&env.state_path)?;
+    }
     match current(&cfg, &saved).and_then(|n| cfg.preset(n)) {
         Some(preset) => {
             env.call(&request::set(&env.plugin_id, preset))?;
-            Ok(EditResult::Applied(preset.name.clone()))
+            Ok(match dropped {
+                Some(gone) => EditResult::Replaced(gone, preset.name.clone()),
+                None => EditResult::Applied(preset.name.clone()),
+            })
         }
-        None => Ok(dropped.map_or(EditResult::Nothing, EditResult::Gone)),
+        None => match dropped {
+            // The dropped preset is still the view; take ours back down so Herdr's own sort shows.
+            Some(gone) => {
+                env.call(&request::clear(&env.plugin_id))?;
+                Ok(EditResult::Gone(gone))
+            }
+            None => Ok(EditResult::Nothing),
+        },
     }
 }
 
@@ -404,6 +420,12 @@ fn notify_edit(env: &Env, result: &EditResult) -> String {
         EditResult::Gone(name) => {
             env.notify_ok(&format!("Agents sort preset {name:?} is gone"));
             format!("preset {name:?} is gone")
+        }
+        EditResult::Replaced(gone, name) => {
+            env.notify_ok(&format!(
+                "Agents sort preset {gone:?} is gone; sorted by {name}"
+            ));
+            format!("preset {gone:?} is gone; applied {name}")
         }
         EditResult::Nothing => "config saved".to_string(),
     }
