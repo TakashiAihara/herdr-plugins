@@ -105,6 +105,8 @@ The file is read every time the popup opens, so a change shows up on the next op
 
 Lists (`columns`, `search`, `sorts`, `groups`) replace the default list whole; `keys` is merged key by key, so `{"keys": {"sort": "ctrl-x"}}` changes only that key. Fields are paths into one entry of `herdr pane list` (`title`, `agent_status`, `tokens.repo`). `tokens.*` means every token value. Suffix a field with `:basename` to keep the last path segment, and a sort field with `:desc` to reverse it (`cwd:basename:desc`). Two virtual fields exist: `prio` (the pane's priority; usable in `sorts` and `columns`) and `manual` (the order you set with `alt-up` / `alt-down`; usable in `sorts`).
 
+An `agent_status` column shows a one-cell glyph for the pane's status instead of the word — the same glyphs Herdr's Agents view draws, in the style of Herdr's `ui.status_indicators` config. `dots` (the default) gives ● for working, blocked and done, ○ for idle and · for unknown; `symbols` gives × for blocked, ◐ for working, ✓ for done, ○ for idle and · for unknown. The style is read from Herdr's own `config.toml` — `$HERDR_CONFIG_PATH` when set, else `$XDG_CONFIG_HOME/herdr/config.toml` or `~/.config/herdr/config.toml` — and a missing file, a missing key, an unreadable file or an unknown value all mean `dots`. The status word stays in the search text, so `working` and `done` still match, and `lines` prints the glyph without color. The glyph is colored with the terminal's basic colors — working yellow, blocked red, done cyan, idle green, unknown dark gray — which `status_colors` overrides per status; the colors come from the terminal palette, so Herdr's theme colors are not available to the plugin.
+
 The defaults:
 
 ```json
@@ -127,6 +129,7 @@ The defaults:
   "preview": true,
   "preview_wrap": false,
   "preview_hide": [],
+  "status_colors": {},
   "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "wrap": "ctrl-w", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
 }
 ```
@@ -137,6 +140,12 @@ The defaults:
 - `preview` is `true` (the default) or `false`, whether the preview pane starts shown; anything else is a config error naming `preview`.
 - `preview_wrap` is `true` or `false` (default `false`), whether preview lines wider than the pane wrap with a hanging indent instead of being cut at the right edge; anything else is a config error naming `preview_wrap`. `ctrl-w` toggles it and the saved choice wins over this default until toggled again.
 - `preview_hide` is a list of field paths left out of the preview; every entry must be a non-empty string or it is a config error naming `preview_hide`.
+- `status_colors` maps a status name (`working`, `blocked`, `done`, `idle`, `unknown`) to the color its status glyph gets — `"#rrggbb"` or a basic color name (`"red"`, `"light blue"`, ...). An unknown status name or an invalid color is a config error naming the key; the default `{}` keeps the colors described above. For example, to make working agents stand out:
+
+```json
+{"status_colors": {"working": "#ff0000", "done": "light cyan"}}
+```
+
 - For nested headers a group gives `levels` instead of `by`: a list of fallback chains, one per level, no chain empty. A group needs exactly one of `by` or `levels` (`by: []` means no grouping). Headers nest two spaces per level, count the agents under them, and a header with no matching agents is hidden. For example, repo over branch:
 
 ```json

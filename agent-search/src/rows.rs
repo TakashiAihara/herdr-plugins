@@ -1,5 +1,9 @@
 use crate::config::{pick, Config};
 use crate::state::{present, State};
+use crate::status::{Indicator, Status};
+use ratatui::style::Color;
+use ratatui::style::Style;
+use ratatui::text::Span;
 use serde_json::{json, Value};
 use std::cmp::Ordering;
 
@@ -16,6 +20,9 @@ pub struct Row {
     pub has_token: bool,
     pub groups: Vec<String>,
     pub cols: Vec<String>,
+    // The foreground each column cell is drawn with, parallel to cols: Some only on an
+    // agent_status glyph (its status color), None everywhere else.
+    pub fg: Vec<Option<Color>>,
     pub search: String,
 }
 
@@ -201,7 +208,12 @@ struct Pending<'a> {
 // when it has one, so manual order and priority survive a pane id change; otherwise the pane id.
 // Panes that share a session id would share one position and one priority, so only the first pane in
 // the list keeps the session id as its key.
-pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>, String> {
+pub fn build(
+    list: Option<&Value>,
+    cfg: &Config,
+    st: &State,
+    ind: Indicator,
+) -> Result<Vec<Row>, String> {
     let err = || LIST_ERR.to_string();
     let Some(list) = list else {
         return Ok(vec![]);
@@ -307,18 +319,30 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
             groups.push(name);
         }
         let mut cols = Vec::new();
+        let mut fg = Vec::new();
         for c in &cfg.columns {
-            cols.push(if c == "prio" {
-                match &p.prio {
+            if c == "prio" {
+                cols.push(match &p.prio {
                     Some(v) if v.as_i64() != Some(0) => format!("★{}", tostring(v)),
                     _ => "  ".to_string(),
+                });
+                fg.push(None);
+                continue;
+            }
+            let v = field(c, p.pane).map_err(|_| err())?;
+            let v = present(Some(&v)).cloned().unwrap_or_else(|| json!(""));
+            // An agent_status column shows Herdr's one-cell status glyph instead of the word;
+            // the word stays in the search text and the sort and group fields. A value that is
+            // not a known status shows as is.
+            if c.split(':').next() == Some("agent_status") {
+                if let Some(s) = v.as_str().and_then(Status::from_name) {
+                    cols.push(s.glyph(ind).to_string());
+                    fg.push(Some(cfg.status_color(s)));
+                    continue;
                 }
-            } else {
-                let v = field(c, p.pane).map_err(|_| err())?;
-                clean(&tostring(
-                    &present(Some(&v)).cloned().unwrap_or_else(|| json!("")),
-                ))
-            });
+            }
+            cols.push(clean(&tostring(&v)));
+            fg.push(None);
         }
         let mut search = Vec::new();
         for s in &cfg.search {
@@ -338,6 +362,7 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
             has_token: p.has_token,
             groups,
             cols,
+            fg,
             search: search.join(" "),
         });
     }
@@ -390,6 +415,29 @@ pub fn display(r: &Row, w: &[usize]) -> String {
         })
         .collect();
     cols.join("  ")
+}
+
+// The columns of one row as spans, padded like display(): cells with a color (the status
+// glyph) are styled, the rest plain.
+pub fn display_spans(r: &Row, w: &[usize]) -> Vec<Span<'static>> {
+    let last = r.cols.len().saturating_sub(1);
+    let mut spans = Vec::new();
+    for (i, c) in r.cols.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let pad = if i == last {
+            String::new()
+        } else {
+            " ".repeat(w[i].saturating_sub(width(c)))
+        };
+        let text = format!("{c}{pad}");
+        match r.fg.get(i).copied().flatten() {
+            Some(color) => spans.push(Span::styled(text, Style::new().fg(color))),
+            None => spans.push(Span::raw(text)),
+        }
+    }
+    spans
 }
 
 pub fn lines(rows: &[Row]) -> String {
@@ -451,6 +499,7 @@ mod tests {
             preview: true,
             preview_wrap: false,
             preview_hide: vec![],
+            status_colors: vec![],
             keys: Keys {
                 sort: "ctrl-s".into(),
                 group: "ctrl-g".into(),
@@ -477,8 +526,13 @@ mod tests {
             name: "r/w".into(),
             levels: vec![vec!["tokens.repo".into()], vec!["workspace_id".into()]],
         });
-        let rows =
-            build(Some(&list), &cfg, &State(Default::default())).unwrap_or_else(|e| panic!("{e}"));
+        let rows = build(
+            Some(&list),
+            &cfg,
+            &State(Default::default()),
+            Indicator::Dots,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["p1", "p5", "p2", "p3", "p4"]
@@ -528,8 +582,8 @@ mod tests {
             by: vec!["prio:desc".into()],
         }];
         c.columns = vec!["prio".into(), "title".into()];
-        let rows =
-            build(Some(&list), &c, &State(Default::default())).unwrap_or_else(|e| panic!("{e}"));
+        let rows = build(Some(&list), &c, &State(Default::default()), Indicator::Dots)
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["p2", "p1", "p3"],
@@ -550,8 +604,8 @@ mod tests {
             name: "p".into(),
             by: vec!["prio".into()],
         }];
-        let rows =
-            build(Some(&list), &c, &State(Default::default())).unwrap_or_else(|e| panic!("{e}"));
+        let rows = build(Some(&list), &c, &State(Default::default()), Indicator::Dots)
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["p2", "p1", "p3"]
@@ -570,8 +624,8 @@ mod tests {
             levels: vec![vec![]],
         });
         c.search = vec!["agent_session.value".into()];
-        let rows =
-            build(Some(&list), &c, &State(Default::default())).unwrap_or_else(|e| panic!("{e}"));
+        let rows = build(Some(&list), &c, &State(Default::default()), Indicator::Dots)
+            .unwrap_or_else(|e| panic!("{e}"));
         let search_of = |id: &str| {
             rows.iter()
                 .find(|r| r.id == id)
@@ -616,5 +670,110 @@ mod tests {
         assert_eq!(got, ["s1", "s9", "w1:p1", "w1:p2", "w1:p3"]);
         assert!(live_keys(&json!({"result": {"panes": []}})).is_none());
         assert!(live_keys(&json!({"result": {}})).is_none());
+    }
+
+    #[test]
+    fn an_agent_status_column_shows_the_glyph_and_keeps_the_word_for_search() {
+        let list = json!({"result": {"panes": [
+            {"pane_id": "p1", "agent": "claude", "title": "a", "agent_status": "working"},
+            {"pane_id": "p2", "agent": "claude", "title": "b", "agent_status": "done"},
+            {"pane_id": "p3", "agent": "claude", "title": "c", "agent_status": "paused"},
+            {"pane_id": "p4", "agent": "claude", "title": "d"}
+        ]}});
+        let mut c = cfg(Group {
+            name: "g".into(),
+            levels: vec![vec![]],
+        });
+        c.columns = vec!["agent_status".into(), "title".into()];
+        c.search = vec!["title".into(), "agent_status".into()];
+        let rows = build(Some(&list), &c, &State(Default::default()), Indicator::Dots)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let by_id = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        // Under dots, working and done share the ● glyph; the color tells them apart. A status
+        // word Herdr does not report and a missing status show as is.
+        assert_eq!(by_id("p1").cols, ["●", "a"]);
+        assert_eq!(by_id("p2").cols, ["●", "b"]);
+        assert_eq!(by_id("p3").cols, ["paused", "c"]);
+        assert_eq!(by_id("p4").cols, ["", "d"]);
+        assert_eq!(by_id("p1").fg, [Some(Color::Yellow), None]);
+        assert_eq!(by_id("p2").fg, [Some(Color::Cyan), None]);
+        assert_eq!(by_id("p3").fg, [None, None]);
+        assert_eq!(by_id("p4").fg, [None, None]);
+        // The word stays searchable even though the column shows the glyph.
+        assert_eq!(by_id("p1").search, "a working");
+        assert_eq!(by_id("p2").search, "b done");
+        assert_eq!(by_id("p3").search, "c paused");
+        assert_eq!(by_id("p4").search, "d");
+    }
+
+    #[test]
+    fn the_indicator_style_chooses_the_status_glyphs() {
+        let list = json!({"result": {"panes": [
+            {"pane_id": "p1", "agent": "claude", "title": "a", "agent_status": "working"},
+            {"pane_id": "p2", "agent": "claude", "title": "b", "agent_status": "blocked"},
+            {"pane_id": "p3", "agent": "claude", "title": "c", "agent_status": "done"},
+            {"pane_id": "p4", "agent": "claude", "title": "d", "agent_status": "idle"},
+            {"pane_id": "p5", "agent": "claude", "title": "e", "agent_status": "unknown"}
+        ]}});
+        let mut c = cfg(Group {
+            name: "g".into(),
+            levels: vec![vec![]],
+        });
+        c.columns = vec!["agent_status".into()];
+        let glyphs = |ind: Indicator| {
+            build(Some(&list), &c, &State(Default::default()), ind)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .iter()
+                .map(|r| r.cols[0].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(glyphs(Indicator::Dots), ["●", "●", "●", "○", "·"]);
+        assert_eq!(glyphs(Indicator::Symbols), ["◐", "×", "✓", "○", "·"]);
+    }
+
+    #[test]
+    fn status_colors_overrides_the_default_glyph_color() {
+        let list = json!({"result": {"panes": [
+            {"pane_id": "p1", "agent": "claude", "title": "a", "agent_status": "working"},
+            {"pane_id": "p2", "agent": "claude", "title": "b", "agent_status": "idle"}
+        ]}});
+        let mut c = cfg(Group {
+            name: "g".into(),
+            levels: vec![vec![]],
+        });
+        c.columns = vec!["agent_status".into(), "title".into()];
+        c.status_colors = vec![
+            (Status::Working, Color::Rgb(1, 2, 3)),
+            (Status::Idle, Color::Blue),
+        ];
+        let rows = build(Some(&list), &c, &State(Default::default()), Indicator::Dots)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(rows[0].fg, [Some(Color::Rgb(1, 2, 3)), None]);
+        assert_eq!(rows[1].fg, [Some(Color::Blue), None]);
+        // The spans the popup draws carry the color on the glyph cell only.
+        let spans = display_spans(&rows[0], &col_widths(&rows));
+        assert_eq!(spans[0].content.as_ref(), "●");
+        assert_eq!(spans[0].style.fg, Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(spans[2].style.fg, None);
+    }
+
+    #[test]
+    fn an_agent_status_field_with_a_transform_shows_the_glyph_too() {
+        let list = json!({"result": {"panes": [
+            {"pane_id": "p1", "agent": "claude", "title": "a", "agent_status": "working"}
+        ]}});
+        let mut c = cfg(Group {
+            name: "g".into(),
+            levels: vec![vec![]],
+        });
+        c.columns = vec!["agent_status:basename".into()];
+        let rows = build(Some(&list), &c, &State(Default::default()), Indicator::Dots)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(rows[0].cols, ["●"]);
+        assert_eq!(rows[0].fg, [Some(Color::Yellow)]);
     }
 }

@@ -406,11 +406,11 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &[PreviewLine])
                 h.clone(),
                 Style::new().add_modifier(Modifier::BOLD),
             ))),
-            Item::Pane(i) => ListItem::new(format!(
-                "{}{}",
-                "  ".repeat(app.rows[*i].groups.len()),
-                rows::display(&app.rows[*i], &widths)
-            )),
+            Item::Pane(i) => {
+                let mut spans = vec![Span::raw("  ".repeat(app.rows[*i].groups.len()))];
+                spans.extend(rows::display_spans(&app.rows[*i], &widths));
+                ListItem::new(Line::from(spans))
+            }
         })
         .collect();
     let selected = app.selected_id().map(|_| app.cur);
@@ -559,6 +559,7 @@ mod tests {
             has_token: false,
             groups: group.map(|g| vec![g.to_string()]).unwrap_or_default(),
             cols: vec![format!("title {id}")],
+            fg: vec![None],
             search: search.into(),
         }
     }
@@ -1048,6 +1049,30 @@ mod tests {
             "agent rows indent under their header"
         );
         assert!(all.contains("title  fix login"));
+    }
+
+    #[test]
+    fn the_status_glyph_cell_is_drawn_in_its_status_color() {
+        let mut r = row("a1", None, "working fix");
+        r.cols = vec!["●".into(), "fix".into()];
+        r.fg = vec![Some(Color::Yellow), None];
+        let app = App::new(vec![r]);
+        let mut term = Terminal::new(TestBackend::new(40, 8)).unwrap_or_else(|e| panic!("{e}"));
+        term.draw(|f| draw(f, &app, "h\n", &[]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let buf = term.backend().buffer();
+        let mut glyph = None;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol() == "●" {
+                    glyph = Some((x, y));
+                }
+            }
+        }
+        let (x, y) = glyph.unwrap_or_else(|| panic!("the status glyph is on screen"));
+        assert_eq!(buf[(x, y)].fg, Color::Yellow);
+        // The next column keeps the default color.
+        assert_eq!(buf[(x + 3, y)].fg, Color::Reset);
     }
 
     fn default_keys(sort: &str) -> Keys {
