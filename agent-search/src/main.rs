@@ -673,12 +673,15 @@ fn node_width(nodes: &[Node], indent: usize) -> usize {
         .unwrap_or(0)
 }
 
-// One row of the preview: the logical line and the column a wrapped continuation hangs at —
-// the section's value column for a `key  value` line, the key's indent + 2 for a bare
-// outline parent (its children sit there, so a continuation does not read as a sibling).
+// One row of the preview: the logical line, the column a wrapped continuation hangs at,
+// and for a `key  value` row the byte offset where the value starts (None for a bare
+// outline parent or a section header, which the wrapper cannot split). A scalar's hang is
+// its section's value column; a parent's is its indent + 4 — deeper than its children at
+// indent + 2, so a continuation does not read as a child key.
 pub struct PreviewLine {
     pub text: String,
     pub hang: usize,
+    pub split: Option<usize>,
 }
 
 fn render_nodes(nodes: &[Node], indent: usize, w: usize, out: &mut Vec<PreviewLine>) {
@@ -690,12 +693,14 @@ fn render_nodes(nodes: &[Node], indent: usize, w: usize, out: &mut Vec<PreviewLi
                 out.push(PreviewLine {
                     text: format!("{pad}{k}{gap}{v}"),
                     hang: w,
+                    split: Some(pad.len() + k.len() + gap.len()),
                 });
             }
             Node::Tree(k, children) => {
                 out.push(PreviewLine {
                     text: format!("{pad}{k}"),
-                    hang: indent + 2,
+                    hang: indent + 4,
+                    split: None,
                 });
                 render_nodes(children, indent + 2, w, out);
             }
@@ -751,6 +756,7 @@ pub fn preview_lines(list: &Option<Value>, id: &str, hide: &[String]) -> Vec<Pre
         lines.push(PreviewLine {
             text: (*name).to_string(),
             hang: 0,
+            split: None,
         });
         // A short section is not pushed right by a long key in another one.
         let w = node_width(nodes, 0) + 2;
@@ -1156,14 +1162,14 @@ mod tests {
             )
         );
         // The wrap metadata: a `key  value` line hangs at its section's value column, a bare
-        // outline parent at its indent + 2.
+        // outline parent at its indent + 4.
         let lines = preview_lines(&list, "w1:p1", &[]);
         let at = |text: &str| lines.iter().find(|l| l.text == text).map(|l| l.hang);
         assert_eq!(at("[ids]"), Some(0));
         assert_eq!(at("agent          claude"), Some(15));
-        assert_eq!(at("agent_session"), Some(2));
+        assert_eq!(at("agent_session"), Some(4));
         assert_eq!(at("  value        s1"), Some(15));
-        assert_eq!(at("note"), Some(2));
+        assert_eq!(at("note"), Some(4));
         assert_eq!(at("  deep  d"), Some(8));
         // A pane with no tokens and no extra identifiers leaves those sections out.
         let bare = Some(json!({"result": {"panes": [

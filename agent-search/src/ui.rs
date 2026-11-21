@@ -297,25 +297,52 @@ pub fn dispatch(app: &mut App, op: Op, run: impl FnOnce(Vec<String>) -> Res<Vec<
     }
 }
 
-// The column a wrapped continuation of one preview row hangs at in a pane `width` cells
-// wide: the row's own `hang` while it leaves at least 10 cells for the continuation, else
-// the key's indent + 2, else column 0 — a continuation never gets less room than that.
-fn hang_for(text: &str, hang: usize, width: usize) -> usize {
-    let mut h = hang;
-    if width.saturating_sub(h) < 10 {
-        h = text.chars().take_while(|c| *c == ' ').count() + 2;
+// The hang for one wrapped preview row in a pane `width` cells wide: the row's own hang
+// while it leaves at least 10 cells for a continuation, else column 0 — the last resort,
+// since a pane narrower than 10 cells cannot give any column that much room.
+fn hang_for(hang: usize, width: usize) -> usize {
+    if width.saturating_sub(hang) < 10 {
+        0
+    } else {
+        hang
     }
-    if width.saturating_sub(h) < 10 {
-        h = 0;
+}
+
+// One logical preview row as the wrapped pane shows it, `width` cells per line. A
+// `key  value` row whose value column would leave fewer than 10 cells puts the key on
+// its own line and the value on the lines below, starting at the key's indent + 4 —
+// column 0 when even that leaves fewer than 10 — wrapped with the same hang, so a
+// narrow pane never shows a value chopped to a cell or two. Every other row keeps its
+// text whole on the first line, continuations at its hang while that leaves 10 cells.
+fn wrapped_lines(l: &PreviewLine, width: usize) -> Vec<String> {
+    if let Some(split) = l.split {
+        if width.saturating_sub(l.hang) < 10 {
+            let (key, value) = l.text.split_at(split);
+            let key = key.trim_end();
+            let indent = key.len() - key.trim_start().len();
+            let vhang = if width.saturating_sub(indent + 4) >= 10 {
+                indent + 4
+            } else {
+                0
+            };
+            let mut out = wrap_cells(key, vhang, width);
+            out.extend(wrap_cells(
+                &format!("{}{value}", " ".repeat(vhang)),
+                vhang,
+                width,
+            ));
+            return out;
+        }
     }
-    h
+    wrap_cells(&l.text, hang_for(l.hang, width), width)
 }
 
 // Splits one logical preview row into lines of at most `width` display cells. The first
 // line starts at column 0; continuations hang at `hang` columns. A character wider than
 // the space left on a line moves whole to the next one; one that does not fit on a fresh
-// continuation either is cut, never split or left overflowing the pane. When the hang
-// alone fills the width there is no room for a continuation, so the line is left whole.
+// continuation either is cut, never split or left overflowing the pane. A `hang` that
+// fills the whole width leaves no room for a continuation; the callers only produce
+// that at width 0, where the line is left whole and clipped.
 fn wrap_cells(text: &str, hang: usize, width: usize) -> Vec<String> {
     if hang >= width {
         return vec![text.to_string()];
@@ -399,14 +426,14 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &[PreviewLine])
 
     if let Some(area) = preview_area {
         // The border takes one column on each side. A wider line is either cut at the right
-        // edge or wrapped by hand, hanging at each line's value column; the paragraph itself
-        // never wraps, so ratatui's wrapper cannot move a continuation to column 0.
+        // edge or wrapped by hand, hanging at each line's value column — or below the key
+        // when that column is too narrow; the paragraph itself never wraps, so ratatui's
+        // wrapper cannot move a continuation to column 0.
         let width = usize::from(area.width.saturating_sub(2));
         let mut text = String::new();
         for l in preview {
             if app.preview_wrap {
-                let hang = hang_for(&l.text, l.hang, width);
-                for w in wrap_cells(&l.text, hang, width) {
+                for w in wrapped_lines(l, width) {
                     text.push_str(&w);
                     text.push('\n');
                 }
@@ -1002,6 +1029,7 @@ mod tests {
                 &[PreviewLine {
                     text: "title  fix login".into(),
                     hang: 7,
+                    split: Some(7),
                 }],
             )
         })
@@ -1211,18 +1239,73 @@ mod tests {
     }
 
     #[test]
-    fn hang_for_gives_up_the_value_column_when_it_leaves_too_little_room() {
-        // The row's own hang while it leaves 10 cells of continuation or more.
-        assert_eq!(hang_for("agent          claude", 15, 30), 15);
-        // Fewer than 10: the key's indent + 2 — column 2 for a top-level key.
-        assert_eq!(hang_for("agent          claude", 25, 30), 2);
-        // A nested key's fallback is its own indent + 2.
-        assert_eq!(hang_for("  value        s1", 20, 28), 4);
-        // Still fewer than 10 there: continuations start at column 0.
-        assert_eq!(hang_for("  value        s1", 20, 12), 0);
-        // An outline parent's hang is its indent + 2 already; the same rule applies.
-        assert_eq!(hang_for("agent_session", 2, 30), 2);
-        assert_eq!(hang_for("agent_session", 2, 8), 0);
+    fn hang_for_keeps_the_hang_only_while_it_leaves_ten_cells() {
+        // Exactly 10 cells left: the hang is kept.
+        assert_eq!(hang_for(15, 25), 15);
+        // 9 cells left: continuations start at column 0.
+        assert_eq!(hang_for(15, 24), 0);
+        assert_eq!(hang_for(2, 30), 2);
+        assert_eq!(hang_for(2, 8), 0);
+    }
+
+    #[test]
+    fn wrapped_lines_moves_the_value_below_the_key_when_the_column_leaves_under_ten_cells() {
+        // The value column is 25; the text is 31 cells with the value "claude" at byte 25.
+        // At width 34 it leaves 9 cells — under 10 — so the value drops to its own line at
+        // the key's indent + 4; at width 35 it leaves exactly 10 and stays after the key.
+        let l = PreviewLine {
+            text: "agent                    claude".into(),
+            hang: 25,
+            split: Some(25),
+        };
+        assert_eq!(wrapped_lines(&l, 34), ["agent", "    claude"]);
+        assert_eq!(wrapped_lines(&l, 35), ["agent                    claude"]);
+    }
+
+    #[test]
+    fn wrapped_lines_keeps_a_short_value_whole_on_its_own_line() {
+        // The 80-column case: the preview's inner width is about 27 cells and the value
+        // column 25 leaves 2. "claude" fits whole at indent + 4, so it is never split.
+        let l = PreviewLine {
+            text: "agent                    claude".into(),
+            hang: 25,
+            split: Some(25),
+        };
+        assert_eq!(wrapped_lines(&l, 27), ["agent", "    claude"]);
+    }
+
+    #[test]
+    fn wrapped_lines_wraps_the_values_own_lines_at_the_key_indent_plus_four() {
+        let l = PreviewLine {
+            text: format!("key{}{}", " ".repeat(20), "x".repeat(30)),
+            hang: 23,
+            split: Some(23),
+        };
+        // width - hang = 4 < 10: the key sits alone and the 30-cell value wraps on lines
+        // hanging at column 4.
+        assert_eq!(
+            wrapped_lines(&l, 27),
+            [
+                "key",
+                &format!("    {}", "x".repeat(23)),
+                &format!("    {}", "x".repeat(7))
+            ]
+        );
+    }
+
+    #[test]
+    fn wrapped_lines_uses_column_zero_when_indent_plus_four_is_still_too_narrow() {
+        // A nested key at indent 2: indent + 4 = 6 leaves 9 cells at width 15, under 10,
+        // so the value's own lines start at column 0.
+        let l = PreviewLine {
+            text: format!("  key{}{}", " ".repeat(15), "v".repeat(20)),
+            hang: 20,
+            split: Some(20),
+        };
+        assert_eq!(
+            wrapped_lines(&l, 15),
+            ["  key", &"v".repeat(15), &"v".repeat(5)]
+        );
     }
 
     fn preview_screen(width: u16, app: &App, preview: &[PreviewLine]) -> Vec<String> {
@@ -1243,6 +1326,7 @@ mod tests {
         let preview = [PreviewLine {
             text: "ab          abcdefghijklmnopqrst".into(),
             hang: 12,
+            split: Some(12),
         }];
         app.preview_wrap = false;
         let cut = preview_screen(60, &app, &preview).join("\n");
@@ -1261,21 +1345,24 @@ mod tests {
     }
 
     #[test]
-    fn a_value_column_too_far_right_falls_back_to_the_keys_indent() {
+    fn a_value_column_too_far_right_moves_the_value_below_the_key() {
         let mut app = grouped();
         app.preview_wrap = true;
         // At width 60 the preview's inner width is 22 cells; hang 20 leaves 2, under the
-        // 10 a continuation needs, so it hangs at the key's indent + 2 = column 2.
+        // 10 a continuation needs, so the key sits on its own line and the value wraps
+        // below it at the key's indent + 4 = column 4.
         let preview = [PreviewLine {
             text: "ab                  abcdefghijklmnopqrst".into(),
             hang: 20,
+            split: Some(20),
         }];
         let lines = preview_screen(60, &app, &preview);
-        let cont = lines
-            .iter()
-            .find(|l| l.contains("cdefghijklmnopqrst"))
-            .unwrap_or_else(|| panic!("{lines:?}"));
-        assert!(cont.contains("│  cdefghijklmnopqrst"), "{cont}");
+        let joined = lines.join("\n");
+        assert!(joined.contains("│ab"), "{joined}");
+        assert!(
+            joined.contains("    abcdefghijklmnopqr"),
+            "the value starts at column 4: {joined}"
+        );
     }
 
     #[test]
