@@ -1,0 +1,31 @@
+id = "takashiaihara.agent-sort"
+name = "Agent sort"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Switch the sort of Herdr's Agents view between presets from a config file, mixing pane tokens and built-in fields"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "scripts/fetch-or-build.sh"]
+
+[[actions]]
+id = "next"
+title = "Next agent sort preset"
+command = ["target/release/agent-sort", "next"]
+
+[[actions]]
+id = "open"
+title = "Pick an agent sort preset"
+command = ["target/release/agent-sort", "open"]
+
+[[panes]]
+id = "picker"
+title = "Agent sort"
+placement = "popup"
+width = 60
+height = 20
+command = ["target/release/agent-sort", "ui"]
+
+# A view set through agent.view.set lasts only until the server exits; apply the saved preset again.
+[[startup]]
+command = ["target/release/agent-sort", "restore"]
