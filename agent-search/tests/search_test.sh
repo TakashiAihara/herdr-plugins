@@ -859,8 +859,9 @@ check "the status word stays in the search text under the glyph" \
   "$(pk lines | grep '^w2:p1' | cut -f3 | grep -cw working; pk lines | grep '^w1:p2' | cut -f3 | grep -cw unknown)" \
   "1
 1"
-check "lines shows the glyph without color" \
-  "$(pk lines | grep '^w2:p1' | cut -f2 | grep -c $'\033')" "0"
+check "lines shows the glyphs without color" \
+  "$(pk lines | grep -v '^-' | cut -f2 | grep -c $'\033'; echo "rc=${PIPESTATUS[0]}")" "0
+rc=0"
 
 fresh
 printf '[ui]\nstatus_indicators = "symbols"\n' > "$HERDR_CONFIG_PATH"
@@ -889,14 +890,17 @@ check "the key outside the ui table does not count" \
 
 fresh
 mkdir -p "$tmp/xdg/herdr" "$tmp/home/.config/herdr"
-printf '[ui]\nstatus_indicators = "symbols"\n' > "$tmp/xdg/herdr/config.toml"
-printf '[ui]\nstatus_indicators = "dots"\n' > "$tmp/home/.config/herdr/config.toml"
+# The two files disagree on purpose and HOME is pinned everywhere, so each check fails when
+# its own lookup is missing or reads the wrong one.
+printf '[ui]\nstatus_indicators = "dots"\n' > "$tmp/xdg/herdr/config.toml"
+printf '[ui]\nstatus_indicators = "symbols"\n' > "$tmp/home/.config/herdr/config.toml"
 check "XDG_CONFIG_HOME/herdr/config.toml is read when HERDR_CONFIG_PATH is unset" \
-  "$(env -u HERDR_CONFIG_PATH XDG_CONFIG_HOME="$tmp/xdg" "$bin" lines | grep '^w2:p1' | cut -f2)" "    ◐  write docs"
+  "$(env -u HERDR_CONFIG_PATH XDG_CONFIG_HOME="$tmp/xdg" HOME="$tmp/home" "$bin" lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
 check "HOME/.config/herdr/config.toml is the fallback when XDG_CONFIG_HOME is unset too" \
-  "$(env -u HERDR_CONFIG_PATH -u XDG_CONFIG_HOME HOME="$tmp/home" "$bin" lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
+  "$(env -u HERDR_CONFIG_PATH -u XDG_CONFIG_HOME HOME="$tmp/home" "$bin" lines | grep '^w2:p1' | cut -f2)" "    ◐  write docs"
+printf '[ui]\nstatus_indicators = "symbols"\n' > "$tmp/xdg/herdr/config.toml"
 check "HERDR_CONFIG_PATH wins over the config dir lookup" \
-  "$(env XDG_CONFIG_HOME="$tmp/xdg" "$bin" lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
+  "$(env XDG_CONFIG_HOME="$tmp/xdg" HOME="$tmp/home" "$bin" lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
 
 fresh
 echo '{"status_colors":{"working":"#ff0000","done":"light blue"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"

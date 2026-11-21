@@ -68,8 +68,9 @@ pub fn indicators() -> Indicator {
     indicators_from(herdr_config_path(&|k| std::env::var(k).ok()).as_deref())
 }
 
-// Herdr's config.toml: $HERDR_CONFIG_PATH when set, else <config dir>/herdr/config.toml where
-// the config dir is $XDG_CONFIG_HOME/herdr or ~/.config/herdr (Herdr's config_dir() at v0.9.5).
+// Herdr's config.toml path, resolved like Herdr's config_path()/config_dir() on unix in a
+// release build: $HERDR_CONFIG_PATH when the variable is set — empty counts as set — else
+// $XDG_CONFIG_HOME/herdr/config.toml, else ~/.config/herdr/config.toml.
 fn herdr_config_path(env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
     if let Some(p) = env("HERDR_CONFIG_PATH") {
         return Some(PathBuf::from(p));
@@ -228,6 +229,24 @@ mod tests {
             Some(PathBuf::from("/home/u/.config/herdr/config.toml"))
         );
         assert_eq!(herdr_config_path(&|_| None), None);
+        // Like Herdr's env::var(...).is_ok() checks, a set-but-empty variable still counts:
+        // an empty HERDR_CONFIG_PATH wins, and an empty XDG_CONFIG_HOME is used rather than
+        // skipped for HOME.
+        let empty_override = |k: &str| match k {
+            "HERDR_CONFIG_PATH" => Some(String::new()),
+            "XDG_CONFIG_HOME" => Some("/xdg".to_string()),
+            _ => None,
+        };
+        assert_eq!(herdr_config_path(&empty_override), Some(PathBuf::from("")));
+        let empty_xdg = |k: &str| match k {
+            "XDG_CONFIG_HOME" => Some(String::new()),
+            "HOME" => Some("/home/u".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            herdr_config_path(&empty_xdg),
+            Some(PathBuf::from("herdr/config.toml"))
+        );
     }
 
     #[test]

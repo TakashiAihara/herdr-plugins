@@ -1053,26 +1053,84 @@ mod tests {
 
     #[test]
     fn the_status_glyph_cell_is_drawn_in_its_status_color() {
-        let mut r = row("a1", None, "working fix");
-        r.cols = vec!["●".into(), "fix".into()];
-        r.fg = vec![Some(Color::Yellow), None];
-        let app = App::new(vec![r]);
+        let mut glyph = row("a1", None, "working fix");
+        glyph.cols = vec!["●".into(), "fix".into()];
+        glyph.fg = vec![Some(Color::Yellow), None];
+        // A wider status word on another row pads the glyph's column; the padding must stay
+        // uncolored or the reversed selection shows a bar of the glyph's color.
+        let mut word = row("a2", None, "paused docs");
+        word.cols = vec!["paused".into(), "docs".into()];
+        word.fg = vec![None, None];
+        let app = App::new(vec![glyph, word]);
         let mut term = Terminal::new(TestBackend::new(40, 8)).unwrap_or_else(|e| panic!("{e}"));
         term.draw(|f| draw(f, &app, "h\n", &[]))
             .unwrap_or_else(|e| panic!("{e}"));
         let buf = term.backend().buffer();
-        let mut glyph = None;
+        let mut at = None;
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
                 if buf[(x, y)].symbol() == "●" {
-                    glyph = Some((x, y));
+                    at = Some((x, y));
                 }
             }
         }
-        let (x, y) = glyph.unwrap_or_else(|| panic!("the status glyph is on screen"));
+        let (x, y) = at.unwrap_or_else(|| panic!("the status glyph is on screen"));
         assert_eq!(buf[(x, y)].fg, Color::Yellow);
-        // The next column keeps the default color.
-        assert_eq!(buf[(x + 3, y)].fg, Color::Reset);
+        // The five padding cells after the glyph and the next column keep the default color.
+        for dx in 1..=5 {
+            assert_eq!(
+                buf[(x + dx, y)].fg,
+                Color::Reset,
+                "cell {dx} after the glyph"
+            );
+        }
+        assert_eq!(buf[(x + 8, y)].fg, Color::Reset);
+    }
+
+    #[test]
+    fn a_glyph_row_and_a_wider_word_row_align_the_next_column() {
+        // The status column pads to its widest cell, so a one-cell glyph and a wider word
+        // like "paused" must start the following column at the same cell. The cursor is left
+        // on the group header so neither row carries the "> " marker and the cells compare
+        // directly.
+        let mut glyph = row("a1", Some("g"), "working fix");
+        glyph.cols = vec!["●".into(), "xylophone".into()];
+        glyph.fg = vec![Some(Color::Yellow), None];
+        let mut word = row("a2", Some("g"), "paused docs");
+        word.cols = vec!["paused".into(), "xenon".into()];
+        word.fg = vec![None, None];
+        let mut app = App::new(vec![glyph, word]);
+        app.cur = 0;
+        let mut term = Terminal::new(TestBackend::new(40, 9)).unwrap_or_else(|e| panic!("{e}"));
+        term.draw(|f| draw(f, &app, "h\n", &[]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let buf = term.backend().buffer();
+        let mut glyph_y = None;
+        let mut word_y = None;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                match buf[(x, y)].symbol() {
+                    "●" => glyph_y = Some(y),
+                    // "u" is in "paused" only: "xylophone" and "xenon" have none.
+                    "u" if word_y.is_none() => word_y = Some(y),
+                    _ => {}
+                }
+            }
+        }
+        let find = |y: u16, sym: &str| -> Option<u16> {
+            (0..buf.area.width).find(|&x| buf[(x, y)].symbol() == sym)
+        };
+        let (gy, wy) = (
+            glyph_y.unwrap_or_else(|| panic!("the glyph row is on screen")),
+            word_y.unwrap_or_else(|| panic!("the word row is on screen")),
+        );
+        let col2 =
+            |y: u16| find(y, "x").unwrap_or_else(|| panic!("the next column's text is on row {y}"));
+        assert_eq!(
+            col2(gy),
+            col2(wy),
+            "the column after the status starts at the same cell on both rows"
+        );
     }
 
     fn default_keys(sort: &str) -> Keys {

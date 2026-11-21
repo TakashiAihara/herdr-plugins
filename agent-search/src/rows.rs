@@ -399,42 +399,58 @@ pub fn col_widths(rows: &[Row]) -> Vec<usize> {
         .collect()
 }
 
-// The columns of one row, padded to the widths except the last one.
-pub fn display(r: &Row, w: &[usize]) -> String {
-    let last = r.cols.len().saturating_sub(1);
-    let cols: Vec<String> = r
-        .cols
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            if i == last {
-                c.clone()
-            } else {
-                format!("{c}{}", " ".repeat(w[i].saturating_sub(width(c))))
-            }
-        })
-        .collect();
-    cols.join("  ")
+// One column cell: its text, the padding that brings it to the column width (empty on the
+// last column), and the color it is drawn with, if any. display() and display_spans() share
+// it so the popup and `lines` pad the columns the same way.
+struct Cell {
+    text: String,
+    pad: String,
+    fg: Option<Color>,
 }
 
-// The columns of one row as spans, padded like display(): cells with a color (the status
-// glyph) are styled, the rest plain.
-pub fn display_spans(r: &Row, w: &[usize]) -> Vec<Span<'static>> {
+fn cells(r: &Row, w: &[usize]) -> Vec<Cell> {
     let last = r.cols.len().saturating_sub(1);
+    r.cols
+        .iter()
+        .enumerate()
+        .map(|(i, c)| Cell {
+            text: c.clone(),
+            pad: if i == last {
+                String::new()
+            } else {
+                " ".repeat(w[i].saturating_sub(width(c)))
+            },
+            fg: r.fg.get(i).copied().flatten(),
+        })
+        .collect()
+}
+
+// The columns of one row, padded to the widths except the last one.
+pub fn display(r: &Row, w: &[usize]) -> String {
+    cells(r, w)
+        .iter()
+        .map(|c| format!("{}{}", c.text, c.pad))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+// The columns of one row as spans, padded like display(): a colored cell (the status glyph)
+// styles only its text — the padding after it stays uncolored so a selected row shows no bar
+// of the glyph's color — and every other cell is plain.
+pub fn display_spans(r: &Row, w: &[usize]) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    for (i, c) in r.cols.iter().enumerate() {
+    for (i, cell) in cells(r, w).iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("  "));
         }
-        let pad = if i == last {
-            String::new()
-        } else {
-            " ".repeat(w[i].saturating_sub(width(c)))
-        };
-        let text = format!("{c}{pad}");
-        match r.fg.get(i).copied().flatten() {
-            Some(color) => spans.push(Span::styled(text, Style::new().fg(color))),
-            None => spans.push(Span::raw(text)),
+        match cell.fg {
+            Some(color) => {
+                spans.push(Span::styled(cell.text.clone(), Style::new().fg(color)));
+                if !cell.pad.is_empty() {
+                    spans.push(Span::raw(cell.pad.clone()));
+                }
+            }
+            None => spans.push(Span::raw(format!("{}{}", cell.text, cell.pad))),
         }
     }
     spans
@@ -775,5 +791,52 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(rows[0].cols, ["●"]);
         assert_eq!(rows[0].fg, [Some(Color::Yellow)]);
+    }
+
+    #[test]
+    fn the_spans_show_the_same_padded_columns_as_display() {
+        let list = json!({"result": {"panes": [
+            {"pane_id": "p1", "agent": "claude", "title": "a", "agent_status": "working"},
+            {"pane_id": "p2", "agent": "claude", "title": "bb", "agent_status": "paused"}
+        ]}});
+        let mut c = cfg(Group {
+            name: "g".into(),
+            levels: vec![vec![]],
+        });
+        c.columns = vec!["agent_status".into(), "title".into()];
+        let rows = build(Some(&list), &c, &State(Default::default()), Indicator::Dots)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let w = col_widths(&rows);
+        for r in &rows {
+            let text: String = display_spans(r, &w)
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert_eq!(text, display(r, &w), "{}", r.id);
+        }
+    }
+
+    #[test]
+    fn a_colored_glyph_leaves_its_padding_uncolored() {
+        // p1's one-cell glyph is padded to p2's wider "paused": the styled span is the glyph
+        // alone and the padding after it carries no color.
+        let list = json!({"result": {"panes": [
+            {"pane_id": "p1", "agent": "claude", "title": "a", "agent_status": "working"},
+            {"pane_id": "p2", "agent": "claude", "title": "b", "agent_status": "paused"}
+        ]}});
+        let mut c = cfg(Group {
+            name: "g".into(),
+            levels: vec![vec![]],
+        });
+        c.columns = vec!["agent_status".into(), "title".into()];
+        let rows = build(Some(&list), &c, &State(Default::default()), Indicator::Dots)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let w = col_widths(&rows);
+        assert_eq!(w[0], 6);
+        let spans = display_spans(&rows[0], &w);
+        assert_eq!(spans[0].content.as_ref(), "●");
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[1].content.as_ref(), "     ");
+        assert_eq!(spans[1].style.fg, None);
     }
 }

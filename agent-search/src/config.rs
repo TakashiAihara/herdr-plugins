@@ -251,7 +251,8 @@ fn key(keys: &serde_json::Map<String, Value>, name: &str) -> Option<String> {
 }
 
 // status_colors maps a status name to the color its glyph gets. load_with reports the
-// offending key in detail; here a value that fails the same check only has to yield None.
+// offending key in detail; extract reaches this only after that check passed, so a failure
+// here only ever becomes extract's generic shape error.
 fn status_colors(v: &Value) -> Result<Vec<(Status, Color)>, String> {
     let o = v
         .as_object()
@@ -626,12 +627,13 @@ mod tests {
     #[test]
     fn status_colors_maps_status_names_to_their_glyph_color() {
         let cfg = load_json(
-            r##"{"status_colors":{"working":"#ff0000","idle":"light blue","done":"cyan"}}"##,
+            r##"{"status_colors":{"working":"#ff0000","idle":"light blue","done":"magenta"}}"##,
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(cfg.status_color(Status::Working), Color::Rgb(255, 0, 0));
         assert_eq!(cfg.status_color(Status::Idle), Color::LightBlue);
-        assert_eq!(cfg.status_color(Status::Done), Color::Cyan);
+        // "magenta" differs from done's default cyan, so this fails if the override is dropped.
+        assert_eq!(cfg.status_color(Status::Done), Color::Magenta);
         // A status without an entry keeps its default color.
         assert_eq!(cfg.status_color(Status::Blocked), Color::Red);
         assert_eq!(load_json("{}").map(|c| c.status_colors), Ok(vec![]));
