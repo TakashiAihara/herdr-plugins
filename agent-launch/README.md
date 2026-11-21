@@ -36,7 +36,7 @@ Put a one-line template in `command` in the plugin's config directory (`herdr pl
 printf '%s\n' 'claude --model opus {prompt}' > "$(herdr plugin config-dir takashiaihara.agent-launch)/command"
 ```
 
-- `{prompt}` is replaced by the task as one single-quoted word, so quotes, `$` and backquotes in it reach the command as typed.
+- `{prompt}` is replaced by the task as one single-quoted word, so quotes, `$` and backquotes in it reach the command as typed. Do not put quotes around the placeholder yourself.
 - `{repo}` is optional. When the template has it, the popup asks for a repo first; what you type is passed as one quoted word, and an empty answer leaves the placeholder out. Use it with a launcher that takes a repo, for example a shell function that clones it and starts the agent in the clone: `mylaunch {repo} {prompt}`.
 - The command is typed into the new pane's shell, so shell functions and aliases from your shell's startup files work.
 

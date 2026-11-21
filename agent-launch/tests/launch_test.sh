@@ -32,8 +32,8 @@ reset() { rm -f "$FAKE_LOG" "$FAKE_OPEN" "$FAKE_RUN" "$HERDR_PLUGIN_CONFIG_DIR/c
 printf '{"result":{"panes":[{"agent":"claude","cwd":"/a","focused":false,"pane_id":"p1"},{"cwd":"/b c","focused":true,"pane_id":"p2"}]}}' > "$FAKE_LIST"
 reset; bash "$script" open; rc=$?
 check "open exits 0" "$rc" 0
-check "open passes the focused pane's cwd" "$(grep -c '^AGENT_LAUNCH_CWD=/b c$' "$FAKE_OPEN")" 1
-check "open opens the prompt entrypoint" "$(grep -c '^prompt$' "$FAKE_OPEN")" 1
+check "open opens the prompt popup with the focused pane's cwd" "$(tr '\n' ' ' < "$FAKE_OPEN")" \
+  "plugin pane open --plugin takashiaihara.agent-launch --entrypoint prompt --env AGENT_LAUNCH_CWD=/b c "
 
 printf '{"result":{"panes":[{"cwd":"/a","focused":false,"pane_id":"p1"}]}}' > "$FAKE_LIST"
 reset; bash "$script" open 2>/dev/null; rc=$?
@@ -41,7 +41,7 @@ check "open without a focused pane fails" "$rc" 1
 check "open without a focused pane opens nothing" "$([ -e "$FAKE_OPEN" ] && echo opened || echo none)" none
 
 # ui: the default command gets the prompt as one quoted word, run in a workspace at the cwd.
-reset; printf '%s\n' "fix it's \$HOME \`x\`" | AGENT_LAUNCH_CWD=/b MODE= bash "$script" ui >/dev/null; rc=$?
+reset; printf '%s\n' "fix it's \$HOME \`x\`" | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null; rc=$?
 check "ui exits 0" "$rc" 0
 check "ui creates and focuses the workspace at the remembered cwd" "$(grep -c "^workspace create --cwd /b --label fix it's \$HOME \`x\` --focus$" "$FAKE_LOG")" 1
 check "ui runs the command in the new root pane" "$(grep -c '^pane run w9:p1 ' "$FAKE_LOG")" 1
@@ -91,5 +91,10 @@ check "failed pane run exits 1" "$rc" 1
 printf '{"result":{"panes":[{"cwd":"/a\\\\b","focused":true,"pane_id":"p1"}]}}' > "$FAKE_LIST"
 reset; bash "$script" open 2>/dev/null; rc=$?
 check "escaped cwd fails and opens nothing" "$rc:$([ -e "$FAKE_OPEN" ] && echo opened || echo none)" "1:none"
+
+# open: two focused panes are refused rather than picking the first.
+printf '{"result":{"panes":[{"cwd":"/a","focused":true,"pane_id":"p1"},{"cwd":"/b","focused":true,"pane_id":"p2"}]}}' > "$FAKE_LIST"
+reset; bash "$script" open 2>/dev/null; rc=$?
+check "two focused panes fail and open nothing" "$rc:$([ -e "$FAKE_OPEN" ] && echo opened || echo none)" "1:none"
 
 exit $fail

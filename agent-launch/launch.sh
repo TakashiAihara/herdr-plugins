@@ -47,6 +47,8 @@ case "$MODE" in
     # A cwd with a JSON escape (\" or \\) does not match and stops here rather than being misread.
     re='"cwd":"([^"\\]*)","focused":true'
     [[ "$list" =~ $re ]] || die "no focused pane in herdr pane list"
+    # Herdr 0.9.5 marks one pane in all workspaces; if that ever changes, the first could be wrong.
+    [[ "${list#*\"focused\":true}" != *'"focused":true'* ]] || die "more than one focused pane"
     exec "$herdr" plugin pane open --plugin "${HERDR_PLUGIN_ID:-takashiaihara.agent-launch}" \
       --entrypoint prompt --env "AGENT_LAUNCH_CWD=${BASH_REMATCH[1]}" >/dev/null
     ;;
