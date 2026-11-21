@@ -184,15 +184,19 @@ fresh; run next
 check "next without state starts from the config default" "$(reqs)" "agent.view.set {\"label\":\"repo\",\"sort\":[{\"field\":{\"token\":\"repo\"},\"order\":\"asc\"}],$SRC}"
 
 fresh; echo '{"preset":"gone"}' > "$state"; run restore; rc=$?
-check "restore of a saved preset the config no longer has says so and applies the default" \
+check "restore of a saved preset the config no longer has says so once, forgets it and applies the default" \
   "$(echo "rc=$rc"; reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show.*error.*gone' "$tmp/calls"; preset_in_state)" "rc=0
 \"label\":\"prio\"
 1
-\"gone\""
+no state"
+fresh; run restore
+check "the next startup applies the default without another notification" \
+  "$(reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show' "$tmp/calls")" "\"label\":\"prio\"
+0"
 
 fresh; echo '{"preset":"gone"}' > "$state"; run next
-check "next from a preset the config no longer has starts from the first" "$(reqs | grep -o '"label":"[a-z]*"'; preset_in_state)" "\"label\":\"prio\"
-\"prio\""
+check "next from a preset the config no longer has continues from the default" "$(reqs | grep -o '"label":"[a-z]*"'; preset_in_state)" "\"label\":\"repo\"
+\"repo\""
 
 bad() { # bad <description> <config> <text the error must contain>
   reset; echo '{"preset":"x"}' > "$state"; printf '%s\n' "$2" > "$cfg"
