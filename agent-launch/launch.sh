@@ -72,12 +72,15 @@ case "$MODE" in
 
     # Focus moves last: this popup may close once it loses focus, and the command must be sent by then.
     out="$("$herdr" workspace create --cwd "$cwd" --label "${prompt:0:24}" --no-focus)"
-    re='"workspace":\{[^}]*"workspace_id":"([^"]+)"'
+    # The reply has one pane (pane_id) and one workspace id; a quote inside a value is escaped,
+    # so these keys cannot be matched inside the label or cwd, whatever braces those hold.
+    re='"workspace_id":"([^"]+)"'
     [[ "$out" =~ $re ]] || die "herdr workspace create returned no workspace: $out"
     ws="${BASH_REMATCH[1]}"
-    re='"root_pane":\{[^}]*"pane_id":"([^"]+)"'
-    [[ "$out" =~ $re ]] || die "herdr workspace create returned no root pane: $out"
-    "$herdr" pane run "${BASH_REMATCH[1]}" "$cmd" >/dev/null || die "herdr pane run failed"
+    re='"pane_id":"([^"]+)"'
+    [[ "$out" =~ $re ]] || { "$herdr" workspace close "$ws" >/dev/null; die "herdr workspace create returned no pane: $out"; }
+    "$herdr" pane run "${BASH_REMATCH[1]}" "$cmd" >/dev/null \
+      || { "$herdr" workspace close "$ws" >/dev/null; die "herdr pane run failed"; }
     "$herdr" workspace focus "$ws" >/dev/null || die "herdr workspace focus failed"
     ;;
   *) die "usage: launch.sh open|ui" ;;

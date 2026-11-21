@@ -14,7 +14,7 @@ case "$1 $2" in
   "pane list") cat "$FAKE_LIST" ;;
   "plugin pane") printf '%s\n' "$@" > "$FAKE_OPEN" ;;
   "workspace create") [ -n "${FAKE_WS_FAIL:-}" ] && exit 1
-    printf '{"result":{"root_pane":{"cwd":"/x","focused":false,"pane_id":"w9:p1","revision":0,"scroll":{"viewport_rows":74},"tab_id":"w9:t1","workspace_id":"w9"},"workspace":{"workspace_id":"w9"}}}' ;;
+    printf '{"result":{"root_pane":{"cwd":"/x}y","focused":false,"pane_id":"w9:p1","revision":0,"scroll":{"viewport_rows":74},"tab_id":"w9:t1","workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"workspace":{"label":"a}b","workspace_id":"w9"}}}' ;;
   "pane run") printf '%s' "$4" > "$FAKE_RUN"; [ -z "${FAKE_RUN_FAIL:-}" ] ;;
 esac
 FAKE
@@ -87,6 +87,7 @@ check "missing cwd fails and creates nothing" "$rc:$([ -e "$FAKE_LOG" ] && echo 
 # ui: a failed pane run fails.
 reset; printf '%s\n\n' "do x" | FAKE_RUN_FAIL=1 AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null 2>&1; rc=$?
 check "failed pane run exits 1" "$rc" 1
+check "failed pane run closes the new workspace" "$(grep -c '^workspace close w9$' "$FAKE_LOG")" 1
 
 # open: a cwd Herdr had to escape is refused.
 printf '{"result":{"panes":[{"cwd":"/a\\\\b","focused":true,"pane_id":"p1"}]}}' > "$FAKE_LIST"

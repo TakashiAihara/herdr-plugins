@@ -44,7 +44,7 @@ printf '%s\n' 'claude --model opus {prompt}' > "$(herdr plugin config-dir takash
 
 - A directory whose path Herdr has to escape in JSON (one with `"` or `\`) is refused with an error.
 - The workspace starts in the focused pane's directory as Herdr reports it (`cwd`), not the foreground program's.
-- A failure (no focused pane, `workspace create` returning nothing) stops before anything runs; in the popup the message stays until you press `Enter`, and it shows up in `herdr plugin log list --plugin takashiaihara.agent-launch`.
+- A failure (no focused pane, `workspace create` returning nothing, `pane run` failing) stops before the command runs, and a workspace already created for it is closed again; in the popup the message stays until you press `Enter`, and it shows up in `herdr plugin log list --plugin takashiaihara.agent-launch`.
 - It reads Herdr's JSON with a pattern for the 0.9.5 field order. If that changes, the plugin stops with an error rather than guessing.
 
 ## Test
