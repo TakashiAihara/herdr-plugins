@@ -1014,6 +1014,25 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_value_starts_in_the_same_column_as_a_top_level_value() {
+        // The nested key plus its indent is wider than any top-level key, so the shared value
+        // column is set by the nested level.
+        let list = Some(json!({"result": {"panes": [{
+            "pane_id": "w1:p1", "agent": "claude",
+            "tokens": {"a_rather_long_token_name": "deep"}
+        }]}}));
+        let out = preview_text(&list, "w1:p1", &[]);
+        let col = |prefix: &str, value: &str| {
+            out.lines()
+                .find(|l| l.trim_start().starts_with(prefix))
+                .and_then(|l| l.find(value))
+        };
+        let top = col("agent ", "claude");
+        assert!(top.is_some(), "{out}");
+        assert_eq!(top, col("a_rather_long_token_name", "deep"), "{out}");
+    }
+
+    #[test]
     fn preview_hide_leaves_out_named_entries_and_whole_objects() {
         let list = Some(json!({"result": {"panes": [{
             "pane_id": "w1:p1", "workspace_id": "w1", "agent": "claude",
