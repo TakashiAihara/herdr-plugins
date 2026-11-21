@@ -133,6 +133,16 @@ null
 fresh; run restore; rc=$?
 check "restore after clear sends nothing" "$(echo "rc=$rc"; reqs)" "rc=0"
 
+fresh; echo '{"preset":"recent"}' > "$state"
+echo '{"result":{"type":"agent_view","active":true,"source":"plugin:other.thing"}}' > "$tmp/reply.json"
+run clear; rc=$?
+check "clear while another source owns the view says so instead of cleared, and drops our preset" \
+  "$(echo "rc=$rc"; preset_in_state; grep -c 'notification show.*set by plugin:other.thing' "$tmp/calls"; grep -c 'notification show.*cleared' "$tmp/calls")" "rc=0
+null
+1
+0"
+fresh; echo '{"preset":null}' > "$state"
+
 fresh; run next
 check "next after clear starts again from the first preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
 \"attention\""
