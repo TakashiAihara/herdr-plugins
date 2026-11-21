@@ -680,21 +680,23 @@ check "open launches the search pane entrypoint" "$(cat "$FAKE_CALLS")" \
 
 fresh
 check "preview is an outline in ids, metadata and tokens sections" "$(run preview w2:p1 | grep -xcE '\[ids\]|\[metadata\]|\[tokens\]' | tr '\n' ' '; run preview w2:p1 | grep -nE '^\[(ids|metadata|tokens)\]$' | cut -d: -f1,2 | sed 's/:/=/' | tr '\n' ';')" \
-  "3 1=[ids];5=[metadata];12=[tokens];"
+  "3 1=[ids];6=[metadata];14=[tokens];"
+check "a blank line comes before every section but the first" \
+  "$(run preview w2:p1 | grep -nx '' | cut -d: -f1 | tr '\n' ' ')" "5 13 "
 check "ids holds the identifier fields under their Herdr names" \
   "$(run preview w2:p1 | sed -n '1,4p' | tr '\n' ';')" \
   "[ids];pane_id       w2:p1;workspace_id  w2;tab_id        w2:t1;"
 check "metadata holds the other fields and tokens lists each token" \
-  "$(run preview w2:p1 | sed -n '5,14p' | tr '\n' ';')" \
-  "[metadata];agent          devin;agent_status   working;agent_session;  value        s3;title          write docs;cwd            /src/alpha;[tokens];repo  alpha;task  urgent kaneo;"
+  "$(run preview w2:p1 | sed -n '6,16p' | tr '\n' ';')" \
+  "[metadata];agent          devin;agent_status   working;agent_session;  value        s3;title          write docs;cwd            /src/alpha;;[tokens];repo  alpha;task  urgent kaneo;"
 check "preview token names lose the tokens. prefix" "$(run preview w2:p1 | grep -E '(title|task)' | sed -E 's/^ *([^ ]+) +/\1=/' | tr '\n' ';')" \
   "title=write docs;task=urgent kaneo;"
 check "a pane without tokens has no tokens section" "$(run preview w1:p2 | grep -cxE 'tokens|\[tokens\]')" "0"
 fresh
 printf '%s' '{"result":{"panes":[{"pane_id":"w1:p1","terminal_id":"t9","request_id":"r7","agent":"claude","title":"t"}]}}' > "$tmp/ids.json"
 check "every field ending in _id is under ids, which comes first" \
-  "$(AGENT_SEARCH_LIST="$tmp/ids.json" pk preview w1:p1 | sed -n '1,6p' | tr '\n' ';')" \
-  "[ids];pane_id      w1:p1;terminal_id  t9;request_id   r7;[metadata];agent  claude;"
+  "$(AGENT_SEARCH_LIST="$tmp/ids.json" pk preview w1:p1 | sed -n '1,7p' | tr '\n' ';')" \
+  "[ids];pane_id      w1:p1;terminal_id  t9;request_id   r7;;[metadata];agent  claude;"
 check "each section lines its values up on their own column" \
   "$(run preview w2:p1 | awk '{if (match($0,/^ *[^ ]+  +/)) print RLENGTH}' | sort -un | tr '\n' ' ')" "6 14 15 "
 check "preview lines up wide token names by display width" "$(printf '%s' '{"result":{"panes":[{"pane_id":"w1:p1","agent":"claude","title":"t","tokens":{"界界":"wide","ab":"narrow"}}]}}' > "$tmp/wide.json"; AGENT_SEARCH_LIST="$tmp/wide.json" pk preview w1:p1 | grep -E '(界界|ab)' | python3 -c 'import sys,unicodedata as u
