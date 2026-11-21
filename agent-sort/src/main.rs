@@ -354,8 +354,10 @@ fn editor_argv(editor: &str, path: &str) -> Vec<String> {
 }
 
 fn run_editor(env: &Env) -> Res<()> {
-    let editor = var("VISUAL")
-        .or_else(|| var("EDITOR"))
+    // A blank value would leave the config path as the command to run.
+    let set = |k: &str| var(k).filter(|v| !v.trim().is_empty());
+    let editor = set("VISUAL")
+        .or_else(|| set("EDITOR"))
         .unwrap_or_else(|| "vi".into());
     let argv = editor_argv(&editor, &env.config_path);
     let status = Command::new(&argv[0])

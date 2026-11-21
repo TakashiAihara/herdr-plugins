@@ -316,6 +316,10 @@ agent.view.clear {$SRC}
 1
 state removed"
 
+fresh; mkdir -p "$tmp/bin"; printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/vi"; chmod +x "$tmp/bin/vi"
+VISUAL='   ' EDITOR= PATH="$tmp/bin:$PATH" run edit; rc=$?
+check "a blank \$VISUAL falls back to vi instead of running the config" "$(echo "rc=$rc")" "rc=0"
+
 fresh
 VISUAL=false run edit; rc=$?
 check "an editor that fails is an error and applies nothing" "$(echo "rc=$rc"; reqs; grep -c 'editor' "$tmp/err")" "rc=1
@@ -332,8 +336,11 @@ check "edit that drops the active preset applies the default, says both, and for
 \"label\":\"other\"
 1
 no state"
-fresh; run restore
-check "and the next startup does not report the drop again" "$(grep -c 'notification show' "$tmp/calls")" "0"
+fresh; run restore; rc=$?
+check "and the next startup applies the default without reporting the drop again" \
+  "$(echo "rc=$rc"; reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show' "$tmp/calls")" "rc=0
+\"label\":\"other\"
+0"
 
 fresh
 printf '#!/bin/sh\necho "broken = = =" > "$1"\n' > "$tmp/editor"
