@@ -157,7 +157,8 @@ check "preview-next toggles back on" \
   "$(jq -c .preview "$HERDR_PLUGIN_STATE_DIR/state.json")" "true"
 
 fresh
-echo '{"preview":false}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+run act preview-next
+echo '{"preview":true}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 run act preview-next
 check "the saved preview choice wins over the config default" \
   "$(jq -c .preview "$HERDR_PLUGIN_STATE_DIR/state.json")" "true"

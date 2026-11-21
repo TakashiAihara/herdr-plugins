@@ -1,6 +1,6 @@
 # agent-search
 
-A popup for jumping to an agent, built for sessions with many of them. It lists the panes Herdr's Agents view lists, searches every field Herdr reports for them (title, cwd, agent, status, and every metadata token, shown or not), and lets you sort, group, prioritize and reorder the list. The sort, grouping, match mode and manual order stay between openings.
+A popup for jumping to an agent, built for sessions with many of them. It lists the panes Herdr's Agents view lists, searches every field Herdr reports for them (title, cwd, agent, status, and every metadata token, shown or not), and lets you sort, group, prioritize and reorder the list. The sort, grouping, match mode, preview choice and manual order stay between openings.
 
 ## Requirements
 
@@ -27,7 +27,7 @@ description = "search agents"
 
 | Key | Action |
 |---|---|
-| type | fuzzy filter on the `search` fields |
+| type | filter on the `search` fields (fuzzy or substring) |
 | `Up` / `Down`, `Ctrl-P` / `Ctrl-N` | move |
 | `Enter` | jump to the agent |
 | `Esc`, `Ctrl-C` | close |
@@ -63,7 +63,7 @@ A pane's priority is a metadata token on the pane, `prio` by default (`priority_
 herdr pane report-metadata "$HERDR_PANE_ID" --source takashiaihara.agent-search --token prio=3
 ```
 
-The token is the source of truth: when the popup opens and whenever a CLI act reads the live pane list, a token that is an integer from 1 to `priority_max` is copied into the saved state (under the state lock) when it differs from the saved value, and a token of `0` removes the saved value — `--token prio=0` is how an agent clears its own priority. Any other token value is shown but not copied, and a pane without the token keeps its saved value: a token cleared from outside cannot be told apart from one Herdr dropped at a restart, so it is not removed from the state and comes back on the next restore. Acts run inside the popup never copy tokens: its pane list can be minutes old, and a stale token would overwrite a newer priority. Other tools and your sidebar rows (`$prio`) see it too, and a token only shows up in the sidebar when your `[ui.sidebar.agents] rows` names it, so you can also report tokens that exist only to be searched.
+The token is the source of truth: when the popup opens and whenever a CLI act reads the live pane list, a token that is an integer from 1 to `priority_max` is copied into the saved state (under the state lock) when it differs from the saved value, and a token of `0` removes the saved value and counts as no priority — the pane shows an empty priority and sorts with the panes that have none — `--token prio=0` is how an agent clears its own priority. Any other token value is shown but not copied, and a pane without the token keeps its saved value: a token cleared from outside cannot be told apart from one Herdr dropped at a restart, so it is not removed from the state and comes back on the next restore. Acts run inside the popup never copy tokens: its pane list can be minutes old, and a stale token would overwrite a newer priority. Other tools and your sidebar rows (`$prio`) see it too, and a token only shows up in the sidebar when your `[ui.sidebar.agents] rows` names it, so you can also report tokens that exist only to be searched.
 
 Herdr drops tokens when its server restarts. The state keeps the copy taken above, and `restore` (run by the startup hook and whenever Herdr detects an agent) writes the saved value back to every pane that lost it, so a priority an agent set itself survives a restart once the popup or a CLI act has run. `restore` only writes to panes that are missing the token; it never copies a pane's token into the state.
 
@@ -136,11 +136,11 @@ The defaults:
 }
 ```
 
-A config that is not a JSON object, or has a key of the wrong shape (an empty list, duplicate sort or group names, a group without exactly one of `by` and `levels` or with an empty `levels` chain, an empty key name, an invalid token name, a `priority_max` that is not an integer from 1 to 9, a `match` that is not `"fuzzy"` or `"substring"`), stops the popup with a message instead of falling back to the defaults.
+A config that is not a JSON object, or has a key of the wrong shape (an empty list, duplicate sort or group names, a group without exactly one of `by` and `levels` or with an empty `levels` chain, an empty key name, an invalid token name, a `priority_max` that is not an integer from 1 to 9, a `match` that is not `"fuzzy"` or `"substring"`, a `preview` that is not `true` or `false`, a `preview_hide` that is not a list of non-empty strings), stops the popup with a message instead of falling back to the defaults.
 
 ## State
 
-Each Herdr session has its own state file in the plugin state directory: `state-<tag>.json`, where `<tag>` is the first 12 hex characters of the SHA-256 of the session's `HERDR_SOCKET_PATH`, so a write, prune or lock in one session never touches another's; without `HERDR_SOCKET_PATH` the file is `state.json`. It holds the current sort, grouping and match mode, the manual order, and the saved priorities: the ones the popup set plus every in-range priority token the popup or a CLI act saw on a live pane. An agent is keyed by its agent session id when it has one, so its manual order survives a Herdr restart that renumbers panes; other panes are keyed by pane id. Entries of panes that are gone from `herdr pane list` are dropped on every change made outside the popup, where gone means no pane in the list at all, agent or not, has that key. An empty pane list never prunes, since no panes at all is not evidence that every saved pane is gone. The popup works on a snapshot, so it never drops anything. Concurrent writers of one file are serialized by an exclusive lock on its `.lock` sibling, which the operating system releases when its holder exits.
+Each Herdr session has its own state file in the plugin state directory: `state-<tag>.json`, where `<tag>` is the first 12 hex characters of the SHA-256 of the session's `HERDR_SOCKET_PATH`, so a write, prune or lock in one session never touches another's; without `HERDR_SOCKET_PATH` the file is `state.json`. It holds the current sort, grouping, match mode and preview choice, the manual order, and the saved priorities: the ones the popup set plus every in-range priority token the popup or a CLI act saw on a live pane. An agent is keyed by its agent session id when it has one, so its manual order survives a Herdr restart that renumbers panes; other panes are keyed by pane id. Entries of panes that are gone from `herdr pane list` are dropped on every change made outside the popup, where gone means no pane in the list at all, agent or not, has that key. An empty pane list never prunes, since no panes at all is not evidence that every saved pane is gone. The popup works on a snapshot, so it never drops anything. Concurrent writers of one file are serialized by an exclusive lock on its `.lock` sibling, which the operating system releases when its holder exits.
 
 ## Limits
 

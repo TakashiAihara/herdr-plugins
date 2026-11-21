@@ -297,10 +297,46 @@ fn merged_priorities(rows: &[Row], st: &State, max: u8) -> Option<Map<String, Va
     changed.then_some(prio)
 }
 
+// The prio map to write under the state lock: the token merge of the locked state, but a key is
+// touched only when its saved value is still the one `unlocked` read before the lock (or still
+// absent). A key a CLI act changed meanwhile keeps its locked value, so a stale token can neither
+// overwrite a newer priority nor bring back a cleared one.
+fn fresh_priorities(
+    rows: &[Row],
+    unlocked: &State,
+    locked: &State,
+    max: u8,
+) -> Option<Map<String, Value>> {
+    let mut prio = object(locked.get("prio"));
+    let mut changed = false;
+    for r in rows {
+        if locked.lookup("prio", &r.key) != unlocked.lookup("prio", &r.key) {
+            continue;
+        }
+        match r.prio.as_ref().and_then(Value::as_i64) {
+            Some(0) => {
+                if prio.remove(&r.key).is_some() {
+                    changed = true;
+                }
+            }
+            Some(n) if (1..=i64::from(max)).contains(&n) => {
+                let cur = Value::from(n);
+                if prio.get(&r.key) != Some(&cur) {
+                    prio.insert(r.key.clone(), cur);
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    changed.then_some(prio)
+}
+
 // The popup's copy of the sync `act` does on the live list. The list read and the diff run without
 // the lock, so a slow `herdr pane list` never holds other writers up and an open with nothing to
-// copy creates neither the state dir nor the lock file. The diff is checked again under the lock:
-// another writer may have synced the same tokens meanwhile. Like `act`, the state is read with
+// copy creates neither the state dir nor the lock file. Under the lock a key is written only when
+// its saved value is still the one read before the lock (or still absent): a CLI `act prio` or
+// `act clear` that ran meanwhile wins over the stale token. Like `act`, the state is read with
 // `read_raw`, so an unreadable file fails the sync instead of being overwritten empty.
 fn sync_priorities(env: &Env, cfg: &Config, snap: &mut Snapshot) -> Res<()> {
     let unlocked = State::load(&env.state_path);
@@ -310,7 +346,7 @@ fn sync_priorities(env: &Env, cfg: &Config, snap: &mut Snapshot) -> Res<()> {
     }
     let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
     let st = State::parse(state::read_raw(&env.state_path)?.as_deref());
-    let Some(prio) = merged_priorities(&rows, &st, cfg.priority_max) else {
+    let Some(prio) = fresh_priorities(&rows, &unlocked, &st, cfg.priority_max) else {
         return Ok(());
     };
     let mut new = st.0.clone();
@@ -932,6 +968,33 @@ mod tests {
     }
 
     #[test]
+    fn a_priority_changed_since_the_unlocked_read_is_not_overwritten_by_a_stale_token() {
+        let panes = json!([
+            {"pane_id": "p1", "agent": "claude", "tokens": {"prio": "3"}},
+            {"pane_id": "p2", "agent": "claude", "tokens": {"prio": "2"}},
+            {"pane_id": "p3", "agent": "claude", "tokens": {"prio": "4"}},
+            {"pane_id": "p4", "agent": "claude", "tokens": {"prio": "0"}},
+            {"pane_id": "p5", "agent": "claude", "tokens": {"prio": "2"}},
+            {"pane_id": "p6", "agent": "claude", "tokens": {"prio": "1"}}
+        ]);
+        let env = env_with("syncrace", panes, json!({}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let mut snap = Snapshot::empty();
+        let unlocked = State::parse(Some(br#"{"prio":{"p1":3,"p2":4,"p3":1,"p4":2}}"#));
+        let rows = snap
+            .rows(&env, &cfg, &unlocked)
+            .unwrap_or_else(|e| panic!("{e}"));
+        // Between the unlocked read and the lock a CLI act set p1 to 5, cleared p2 and set p6 to 9.
+        let locked = State::parse(Some(br#"{"prio":{"p1":5,"p3":1,"p4":2,"p6":9}}"#));
+        assert_eq!(
+            fresh_priorities(&rows, &unlocked, &locked, cfg.priority_max).map(Value::Object),
+            Some(json!({"p1": 5, "p3": 4, "p5": 2, "p6": 9})),
+            "p1's token must not clobber the 5 the act saved, p2's token must not revive \
+             the cleared value, p6's must not overwrite the 9; p3, p4 and p5 are written as usual"
+        );
+    }
+
+    #[test]
     fn opening_the_popup_saves_a_priority_an_agent_set_on_its_own_pane() {
         let panes = json!([{"pane_id": "p1", "agent": "claude", "tokens": {"prio": "3"}}]);
         let env = env_with("opensync", panes, json!({}));
@@ -946,6 +1009,27 @@ mod tests {
             State::load(&env.state_path).get("prio"),
             Some(&json!({"p1": 3}))
         );
+    }
+
+    #[test]
+    fn open_and_every_reload_apply_the_saved_mode_and_preview_choice() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let env = env_with(
+            "openmode",
+            panes,
+            json!({"match": "substring", "preview": false}),
+        );
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let mut snap = Snapshot::empty();
+        let mut app = ui::open(&env, &cfg, &mut snap).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(app.mode, config::Match::Substring);
+        assert!(!app.show_preview);
+        // The same choice is re-read when the popup reloads its list.
+        std::fs::write(&env.state_path, r#"{"match":"fuzzy","preview":true}"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        ui::apply_state(&mut app, &cfg, &State::load(&env.state_path));
+        assert_eq!(app.mode, config::Match::Fuzzy);
+        assert!(app.show_preview);
     }
 
     #[test]

@@ -383,14 +383,20 @@ fn show_error(term: &mut DefaultTerminal, msg: &str) {
     }
 }
 
+// The mode and preview choice the saved state dictates, applied at open and on every reload of
+// the list so a choice saved from outside the popup shows up on the next key.
+pub(crate) fn apply_state(app: &mut App, cfg: &Config, st: &State) {
+    app.set_mode(cfg.mode(st));
+    app.show_preview = cfg.preview_on(st);
+}
+
 // Opening the popup first copies the priority tokens agents set themselves into the state. A
 // failed sync does not stop the popup: the error waits in the status line.
 pub(crate) fn open(env: &Env, cfg: &Config, snap: &mut Snapshot) -> Res<App> {
     let failed = sync_priorities(env, cfg, snap).err();
     let st = State::load(&env.state_path);
     let mut app = App::new(snap.rows(env, cfg, &st)?);
-    app.set_mode(cfg.mode(&st));
-    app.show_preview = cfg.preview_on(&st);
+    apply_state(&mut app, cfg, &st);
     app.status = failed.unwrap_or_default();
     Ok(app)
 }
@@ -402,8 +408,7 @@ fn session(env: &Env, cfg: &Config, term: &mut DefaultTerminal) -> Res<()> {
     let mut app = open(env, cfg, &mut snap)?;
     loop {
         let st = State::load(&env.state_path);
-        app.set_mode(cfg.mode(&st));
-        app.show_preview = cfg.preview_on(&st);
+        apply_state(&mut app, cfg, &st);
         let list = snap.get(env)?;
         let preview = if app.show_preview {
             app.selected_id().map_or(String::new(), |id| {
@@ -697,6 +702,37 @@ mod tests {
             app.type_char(c);
         }
         assert_eq!(shown(&app), ["▾ beta (1)", "b1", "▾ gamma (1)", "c1"]);
+    }
+
+    #[test]
+    fn substring_mode_turns_only_plain_words_into_substrings() {
+        let fresh = || {
+            let mut app = App::new(vec![
+                row("a1", None, "word first"),
+                row("a2", None, "last word"),
+                row("a3", None, "a word inside"),
+            ]);
+            app.set_mode(Match::Substring);
+            app
+        };
+        let mut app = fresh();
+        for c in "^word".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(
+            shown(&app),
+            ["a1"],
+            "^ keeps anchoring at the start: a mid-string word must not match"
+        );
+        let mut app = fresh();
+        for c in "word$".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(
+            shown(&app),
+            ["a2"],
+            "$ keeps anchoring at the end: a mid-string word must not match"
+        );
     }
 
     #[test]

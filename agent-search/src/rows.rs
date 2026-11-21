@@ -10,6 +10,8 @@ pub struct Row {
     pub key: String,
     pub manual: Value,
     pub idx: usize,
+    // The priority token's numeric value, 0 included: the sync needs it to tell "pane says no
+    // priority" (a 0 clears the saved value) apart from "pane has no token".
     pub prio: Option<Value>,
     pub has_token: bool,
     pub groups: Vec<String>,
@@ -254,7 +256,12 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
                 None => (spec.as_str(), false),
             };
             let v = match f {
-                "prio" => p.prio.clone().unwrap_or(Value::Null),
+                // A token of 0 means no priority: it sorts with the panes that have none.
+                "prio" => p
+                    .prio
+                    .clone()
+                    .filter(|v| v.as_i64() != Some(0))
+                    .unwrap_or(Value::Null),
                 "manual" => p.manual.clone(),
                 _ => field(f, p.pane).map_err(|_| err())?,
             };
@@ -303,8 +310,8 @@ pub fn build(list: Option<&Value>, cfg: &Config, st: &State) -> Result<Vec<Row>,
         for c in &cfg.columns {
             cols.push(if c == "prio" {
                 match &p.prio {
-                    None | Some(Value::Null) => "  ".to_string(),
-                    Some(v) => format!("★{}", tostring(v)),
+                    Some(v) if v.as_i64() != Some(0) => format!("★{}", tostring(v)),
+                    _ => "  ".to_string(),
                 }
             } else {
                 let v = field(c, p.pane).map_err(|_| err())?;
@@ -498,6 +505,52 @@ mod tests {
                 "-:6\t  \x1b[1m── w2 (1) ──\x1b[0m\t\n",
                 "p4\t    b2\t\x1b[2mb2\x1b[0m\n"
             )
+        );
+    }
+
+    #[test]
+    fn a_token_of_zero_counts_as_no_priority() {
+        let list = json!({"result": {"panes": [
+            {"pane_id": "p1", "agent": "claude", "title": "b", "tokens": {"prio": "0"}},
+            {"pane_id": "p2", "agent": "claude", "title": "a", "tokens": {"prio": "3"}},
+            {"pane_id": "p3", "agent": "claude", "title": "c"}
+        ]}});
+        let mut c = cfg(Group {
+            name: "g".into(),
+            levels: vec![vec![]],
+        });
+        c.sorts = vec![Named {
+            name: "p".into(),
+            by: vec!["prio:desc".into()],
+        }];
+        c.columns = vec!["prio".into(), "title".into()];
+        let rows =
+            build(Some(&list), &c, &State(Default::default())).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["p2", "p1", "p3"],
+            "a token of 0 sorts with the panes that have none, below a real priority"
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.cols[0].as_str()).collect::<Vec<_>>(),
+            ["★3", "  ", "  "],
+            "a token of 0 shows an empty priority column"
+        );
+        assert_eq!(
+            rows[1].prio,
+            Some(json!(0)),
+            "the raw token value stays on the row so the sync can clear the saved priority"
+        );
+        // And the ascending `prio` sort treats it the same way.
+        c.sorts = vec![Named {
+            name: "p".into(),
+            by: vec!["prio".into()],
+        }];
+        let rows =
+            build(Some(&list), &c, &State(Default::default())).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["p2", "p1", "p3"]
         );
     }
 
