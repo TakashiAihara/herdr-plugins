@@ -516,6 +516,8 @@ mod tests {
             preview_wrap: false,
             preview_hide: vec![],
             status_colors: vec![],
+            popup_width: "90%".into(),
+            popup_height: "85%".into(),
             keys: Keys {
                 sort: "ctrl-s".into(),
                 group: "ctrl-g".into(),

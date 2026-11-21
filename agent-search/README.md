@@ -40,7 +40,13 @@ description = "search agents"
 | `alt-1` … `alt-5` | set the agent's priority (up to `priority_max`) |
 | `alt-0` | clear the agent's priority |
 
-The popup is 90% of the screen wide and 85% high, set in the plugin manifest; Herdr has no per-user override for a plugin's popup size.
+The popup is 90% of the screen wide and 85% high. `popup_width` and `popup_height` in `config.json` override the manifest's `width`/`height` for the `open` action — each a percentage `1%`..`100%` or a positive number of cells:
+
+```json
+{"popup_width": "100%", "popup_height": 40}
+```
+
+The manifest values stay the fallback when the pane is opened another way.
 
 The right side previews the selected pane as an outline in up to three sections, in this order: `[ids]` holds every field whose name ends in `_id` (`pane_id`, `workspace_id`, `tab_id`, `terminal_id`, and any other identifier Herdr reports) under its Herdr name; `[metadata]` every other field but `tokens` (`agent`, `agent_status`, `cwd`, `title`, `state_labels`, `agent_session`, ...); `[tokens]` each token on its own line, named without the `tokens.` prefix. A scalar field is one `key  value` line; a field holding a JSON object or array (`agent_session`, `state_labels`, a token that is itself an object) is its name on one line with each entry indented two spaces below it, recursively, an array's index as the key. Within a section every value starts in one column — two spaces past the section's widest key at any depth — so a long key in one section does not push another section's values right, and a section with nothing in it is left out. A blank line separates the sections. Fields keep the order Herdr reports them, like this:
 
@@ -130,6 +136,8 @@ The defaults:
   "preview_wrap": false,
   "preview_hide": [],
   "status_colors": {},
+  "popup_width": "90%",
+  "popup_height": "85%",
   "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "wrap": "ctrl-w", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
 }
 ```
@@ -140,6 +148,7 @@ The defaults:
 - `preview` is `true` (the default) or `false`, whether the preview pane starts shown; anything else is a config error naming `preview`.
 - `preview_wrap` is `true` or `false` (default `false`), whether preview lines wider than the pane wrap with a hanging indent instead of being cut at the right edge; anything else is a config error naming `preview_wrap`. `ctrl-w` toggles it and the saved choice wins over this default until toggled again.
 - `preview_hide` is a list of field paths left out of the preview; every entry must be a non-empty string or it is a config error naming `preview_hide`.
+- `popup_width` and `popup_height` set the size the `open` action passes to `herdr plugin pane open`: each a percentage `1%`..`100%` or a number of cells from 1 to 65535, as a JSON number or a numeric string (defaults `"90%"` and `"85%"`, the manifest's `width`/`height`). Anything else is a config error naming the key.
 - `status_colors` maps a status name (`working`, `blocked`, `done`, `idle`, `unknown`) to the color its status glyph gets — `"#rrggbb"` or a basic color name (`"red"`, `"light blue"`, ...). An unknown status name or an invalid color is a config error naming the key; the default `{}` keeps the colors described above. For example, to make working agents stand out:
 
 ```json
@@ -173,7 +182,7 @@ The defaults:
 }
 ```
 
-A config that is not a JSON object, or has a key of the wrong shape (an empty list, duplicate sort or group names, a group without exactly one of `by` and `levels` or with an empty `levels` chain, an empty key name, an invalid token name, a `priority_max` that is not an integer from 1 to 9, a `match` that is not `"fuzzy"` or `"substring"`, a `preview` or `preview_wrap` that is not `true` or `false`, a `preview_hide` that is not a list of non-empty strings), stops the popup with a message instead of falling back to the defaults.
+A config that is not a JSON object, or has a key of the wrong shape (an empty list, duplicate sort or group names, a group without exactly one of `by` and `levels` or with an empty `levels` chain, an empty key name, an invalid token name, a `priority_max` that is not an integer from 1 to 9, a `match` that is not `"fuzzy"` or `"substring"`, a `preview` or `preview_wrap` that is not `true` or `false`, a `preview_hide` that is not a list of non-empty strings, a `popup_width` or `popup_height` that is not a percentage from 1% to 100% or a number of cells from 1 to 65535), stops the popup with a message instead of falling back to the defaults.
 
 ## State
 

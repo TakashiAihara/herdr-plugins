@@ -793,6 +793,14 @@ fn preview(env: &Env, id: &str) -> Res<()> {
 }
 
 fn open(env: &Env) -> i32 {
+    // The config is read before herdr runs so a bad popup size fails here, not inside the pane.
+    let cfg = match env.config() {
+        Ok(cfg) => cfg,
+        Err(msg) => {
+            eprintln!("agent-search: {msg}");
+            return 1;
+        }
+    };
     Command::new(&env.herdr)
         .args([
             "plugin",
@@ -802,6 +810,10 @@ fn open(env: &Env) -> i32 {
             &env.plugin_id,
             "--entrypoint",
             "search",
+            "--width",
+            &cfg.popup_width,
+            "--height",
+            &cfg.popup_height,
         ])
         .stdout(Stdio::null())
         .status()
