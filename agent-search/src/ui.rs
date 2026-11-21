@@ -19,6 +19,7 @@ pub enum Op {
     SortNext,
     GroupNext,
     MatchNext,
+    PreviewNext,
     Up,
     Down,
     Clear,
@@ -44,6 +45,7 @@ impl Binds {
             Op::SortNext,
             Op::GroupNext,
             Op::MatchNext,
+            Op::PreviewNext,
             Op::Up,
             Op::Down,
             Op::Clear,
@@ -76,6 +78,8 @@ pub struct App {
     pub items: Vec<Item>,
     pub cur: usize,
     pub mode: Match,
+    // Whether the preview pane is shown; false gives the list the full width.
+    pub show_preview: bool,
     // The last failure of an action, shown under the list until the next key.
     pub status: String,
 }
@@ -120,6 +124,7 @@ impl App {
             items: vec![],
             cur: 0,
             mode: Match::Fuzzy,
+            show_preview: true,
             status: String::new(),
         };
         app.refresh(None);
@@ -255,6 +260,7 @@ fn op_args(op: Op, id: &str) -> Vec<String> {
         Op::SortNext => vec!["sort-next".into()],
         Op::GroupNext => vec!["group-next".into()],
         Op::MatchNext => vec!["match-next".into()],
+        Op::PreviewNext => vec!["preview-next".into()],
         Op::Up => vec!["move".into(), "up".into(), id.into()],
         Op::Down => vec!["move".into(), "down".into(), id.into()],
         Op::Clear => vec!["clear".into(), id.into()],
@@ -270,7 +276,7 @@ pub fn dispatch(app: &mut App, op: Op, run: impl FnOnce(Vec<String>) -> Res<Vec<
         app.status = REORDER_HINT.to_string();
         return;
     }
-    let needs_pane = !matches!(op, Op::SortNext | Op::GroupNext | Op::MatchNext);
+    let needs_pane = matches!(op, Op::Up | Op::Down | Op::Clear | Op::Prio(_));
     let id = match app.selected_id() {
         Some(id) => id,
         None if needs_pane => return,
@@ -290,8 +296,14 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    let [list_area, preview_area] =
-        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(body);
+    let (list_area, preview_area) = if app.show_preview {
+        let [list, preview] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(body);
+        (list, Some(preview))
+    } else {
+        (body, None)
+    };
 
     frame.render_widget(
         Paragraph::new(header.trim_end()).style(Style::new().add_modifier(Modifier::DIM)),
@@ -333,12 +345,14 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
         &mut ListState::default().with_selected(selected),
     );
 
-    frame.render_widget(
-        Paragraph::new(preview.replace('\t', "  "))
-            .block(Block::bordered().title("preview"))
-            .wrap(Wrap { trim: false }),
-        preview_area,
-    );
+    if let Some(area) = preview_area {
+        frame.render_widget(
+            Paragraph::new(preview.replace('\t', "  "))
+                .block(Block::bordered().title("preview"))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
     frame.render_widget(
         Paragraph::new(app.status.as_str()).style(Style::new().fg(Color::Red)),
         status,
@@ -376,6 +390,7 @@ pub(crate) fn open(env: &Env, cfg: &Config, snap: &mut Snapshot) -> Res<App> {
     let st = State::load(&env.state_path);
     let mut app = App::new(snap.rows(env, cfg, &st)?);
     app.set_mode(cfg.mode(&st));
+    app.show_preview = cfg.preview_on(&st);
     app.status = failed.unwrap_or_default();
     Ok(app)
 }
@@ -388,10 +403,15 @@ fn session(env: &Env, cfg: &Config, term: &mut DefaultTerminal) -> Res<()> {
     loop {
         let st = State::load(&env.state_path);
         app.set_mode(cfg.mode(&st));
+        app.show_preview = cfg.preview_on(&st);
         let list = snap.get(env)?;
-        let preview = app
-            .selected_id()
-            .map_or(String::new(), |id| preview_text(list, &id));
+        let preview = if app.show_preview {
+            app.selected_id().map_or(String::new(), |id| {
+                preview_text(list, &id, &cfg.preview_hide)
+            })
+        } else {
+            String::new()
+        };
         let header = header_text(cfg, &st);
         term.draw(|f| draw(f, &app, &header, &preview))
             .map_err(|e| format!("cannot draw the screen: {e}"))?;
@@ -490,6 +510,7 @@ mod tests {
             sort: sort.into(),
             group: "ctrl-g".into(),
             r#match: "ctrl-r".into(),
+            preview: "ctrl-o".into(),
             up: "alt-up".into(),
             down: "alt-down".into(),
             clear: "alt-0".into(),
@@ -504,6 +525,10 @@ mod tests {
         assert_eq!(
             press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL),
             Action::Op(Op::MatchNext)
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL),
+            Action::Op(Op::PreviewNext)
         );
         assert_eq!(
             press(&mut app, KeyCode::Down, KeyModifiers::ALT),
@@ -721,6 +746,18 @@ mod tests {
     }
 
     #[test]
+    fn the_preview_toggle_needs_no_pane() {
+        let mut app = grouped();
+        let mut ran = false;
+        dispatch(&mut app, Op::PreviewNext, |args| {
+            ran = true;
+            assert_eq!(args, ["preview-next"]);
+            Ok(vec![])
+        });
+        assert!(ran);
+    }
+
+    #[test]
     fn a_query_with_no_match_leaves_nothing_selectable() {
         let mut app = grouped();
         for c in "zzzz".chars() {
@@ -733,6 +770,7 @@ mod tests {
                 sort: "ctrl-s".into(),
                 group: "ctrl-g".into(),
                 r#match: "ctrl-r".into(),
+                preview: "ctrl-o".into(),
                 up: "alt-up".into(),
                 down: "alt-down".into(),
                 clear: "alt-0".into(),
@@ -797,6 +835,7 @@ mod tests {
                 sort: "ctrl-s".into(),
                 group: "ctrl-g".into(),
                 r#match: "ctrl-r".into(),
+                preview: "ctrl-o".into(),
                 up: "alt-up".into(),
                 down: "alt-down".into(),
                 clear: "alt-0".into(),
@@ -875,6 +914,7 @@ mod tests {
             sort: sort.into(),
             group: "ctrl-g".into(),
             r#match: "ctrl-r".into(),
+            preview: "ctrl-o".into(),
             up: "alt-up".into(),
             down: "alt-down".into(),
             clear: "alt-0".into(),
@@ -986,6 +1026,18 @@ mod tests {
             .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
             .collect();
         (lines, pos)
+    }
+
+    #[test]
+    fn a_hidden_preview_gives_the_list_the_full_width() {
+        let mut app = grouped();
+        let (shown, _) = screen(60, &app);
+        assert!(shown.join("\n").contains("preview"));
+        assert_eq!(shown[4].matches('│').count(), 4);
+        app.show_preview = false;
+        let (hidden, _) = screen(60, &app);
+        assert!(!hidden.join("\n").contains("preview"));
+        assert_eq!(hidden[4].matches('│').count(), 2);
     }
 
     #[test]

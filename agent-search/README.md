@@ -34,13 +34,20 @@ description = "search agents"
 | `ctrl-s` | next sort |
 | `ctrl-g` | next grouping |
 | `ctrl-r` | toggle match mode: fuzzy ↔ substring |
+| `ctrl-o` | hide or show the preview |
 | `alt-up` / `alt-down` | move the agent up or down (manual order) |
 | `alt-1` … `alt-5` | set the agent's priority (up to `priority_max`) |
 | `alt-0` | clear the agent's priority |
 
 The popup is 90% of the screen wide and 85% high, set in the plugin manifest; Herdr has no per-user override for a plugin's popup size.
 
-The right side previews the selected pane in up to three sections: `[pane]` for its fields, `[tokens]` for its metadata tokens, and `[ids]` for `pane_id`, `workspace_id`, `tab_id` and any other field whose name ends in `_id`. A section with nothing in it is left out. This is also how you see what is searchable and what to put in the config.
+The right side previews the selected pane as an outline in up to two sections: `[pane]` holds its fields, `[ids]` `pane_id`, `workspace_id`, `tab_id` and any other field whose name ends in `_id`. A scalar field is one `key  value` line; a field holding a JSON object (the `tokens` map, `agent_session`, `state_labels`) is its name on one line with each key/value indented two spaces below it, recursively, and an array the same way with the index as the key. Every value starts in one column, and a section with nothing in it is left out. `ctrl-o` hides the preview so the list takes the full width; the choice is saved in the state like the sort and match mode, so it wins over the configured `preview` until toggled again. `preview_hide` is a list of field paths left out of the preview — a nested entry by its path (`tokens.flags`, `agent_session.kind`) or a whole object (`state_labels`) — and only affects the preview, never the search or the list. For example, to hide the statusline helper tokens:
+
+```json
+{"preview_hide": ["tokens.last", "tokens.mid", "tokens.flags", "tokens.prtitle"]}
+```
+
+This is also how you see what is searchable and what to put in the config.
 
 ## Search
 
@@ -91,13 +98,17 @@ The defaults:
   "priority_token": "prio",
   "priority_max": 5,
   "match": "fuzzy",
-  "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
+  "preview": true,
+  "preview_hide": [],
+  "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
 }
 ```
 
 - `sorts` and `groups` are cycled in the order listed; the first one is used until you switch. A sort's `by` is a list of tie-breakers. A group's `by` is a fallback chain: the first field with a value names the group, and agents with none go to `(none)`. Groups are ordered by their highest-ranked agent, so a group holding a high-priority agent comes first.
 - `priority_max` is an integer from 1 to 9 (default 5): the popup binds `alt-1` through `alt-<priority_max>` and the higher digits do nothing, though `alt-1` … `alt-9` stay reserved for priorities in `keys` validation either way. A value outside 1..9 or not an integer is a config error naming `priority_max`.
 - `match` is `"fuzzy"` (the default) or `"substring"`, the mode the popup's filter starts in; anything else is a config error naming `match`.
+- `preview` is `true` (the default) or `false`, whether the preview pane starts shown; anything else is a config error naming `preview`.
+- `preview_hide` is a list of field paths left out of the preview; every entry must be a non-empty string or it is a config error naming `preview_hide`.
 - For nested headers a group gives `levels` instead of `by`: a list of fallback chains, one per level, no chain empty. A group needs exactly one of `by` or `levels` (`by: []` means no grouping). Headers nest two spaces per level, count the agents under them, and a header with no matching agents is hidden. For example, repo over branch:
 
 ```json

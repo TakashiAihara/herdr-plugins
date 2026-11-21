@@ -87,7 +87,7 @@ check "search text holds every token value" \
   "$(pk lines | grep '^w2:p1' | cut -f3 | plain)" "write docs /src/alpha devin working alpha urgent kaneo"
 check "search text holds the cwd" "$(pk lines | grep '^w1:p2' | cut -f3 | grep -c '/src/beta/')" "1"
 check "header names the first sort and group, then the keys" "$(run header)" "sort: priority  group: none  match: fuzzy
-ctrl-s sort  ctrl-g group  ctrl-r match  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
+ctrl-s sort  ctrl-g group  ctrl-r match  ctrl-o preview  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
 
 fresh
 run act group-next
@@ -138,7 +138,7 @@ rc=1"
 fresh
 echo '{"keys":{"match":"ctrl-t"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "the match key merges key by key" "$(run header | sed -n 2p)" \
-  "ctrl-s sort  ctrl-g group  ctrl-t match  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
+  "ctrl-s sort  ctrl-g group  ctrl-t match  ctrl-o preview  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
 echo '{"keys":{"match":"ctrl-s"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a match key duplicating another key is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
   "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.match \"ctrl-s\" is the same key as keys.sort
@@ -146,6 +146,59 @@ rc=1"
 echo '{"keys":{"match":"x"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a match key that steals a typed character is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
   "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.match \"x\" is already used by the popup (alt-1..alt-9, esc, enter, backspace, up, down, ctrl-p, ctrl-n, ctrl-c, or a character typed into the search)
+rc=1"
+
+fresh
+run act preview-next
+check "preview-next hides the preview and saves it in the state" \
+  "$(jq -c .preview "$HERDR_PLUGIN_STATE_DIR/state.json")" "false"
+run act preview-next
+check "preview-next toggles back on" \
+  "$(jq -c .preview "$HERDR_PLUGIN_STATE_DIR/state.json")" "true"
+
+fresh
+echo '{"preview":false}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+run act preview-next
+check "the saved preview choice wins over the config default" \
+  "$(jq -c .preview "$HERDR_PLUGIN_STATE_DIR/state.json")" "true"
+
+fresh
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+echo '{"preview":"bogus"}' > "$HERDR_PLUGIN_STATE_DIR/state.json"
+run act preview-next
+check "a saved preview value that is not a boolean is ignored" \
+  "$(jq -c .preview "$HERDR_PLUGIN_STATE_DIR/state.json")" "false"
+
+fresh
+echo '{"preview":"yes"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a preview that is not true or false is a config error naming the key" \
+  "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: preview must be true or false
+rc=1"
+
+fresh
+echo '{"preview_hide":5}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a preview_hide that is not a list of strings is a config error naming the key" \
+  "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: preview_hide must be a list of non-empty strings
+rc=1"
+echo '{"preview_hide":[""]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an empty preview_hide entry is a config error naming the key" \
+  "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: preview_hide must be a list of non-empty strings
+rc=1"
+
+fresh
+echo '{"keys":{"preview":"ctrl-t"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "the preview key merges key by key" "$(run header | sed -n 2p)" \
+  "ctrl-s sort  ctrl-g group  ctrl-r match  ctrl-t preview  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
+echo '{"keys":{"preview":"ctrl-s"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a preview key duplicating another key is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.preview \"ctrl-s\" is the same key as keys.sort
+rc=1"
+echo '{"keys":{"preview":"x"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a preview key that steals a typed character is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.preview \"x\" is already used by the popup (alt-1..alt-9, esc, enter, backspace, up, down, ctrl-p, ctrl-n, ctrl-c, or a character typed into the search)
 rc=1"
 
 fresh
@@ -391,10 +444,10 @@ check "panes without the sort value go last" "$(ids)" "w1:p1 w2:p1 w2:p2 w1:p2 "
 fresh
 echo '{"keys":{"sort":"ctrl-x"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a partial keys object keeps the other default keys" "$(run header | sed -n 2p)" \
-  "ctrl-x sort  ctrl-g group  ctrl-r match  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
+  "ctrl-x sort  ctrl-g group  ctrl-r match  ctrl-o preview  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
 
 shape_error() {
-  printf '%s\n%s' "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -), and keys sort/group/match/up/down/clear non-empty strings" "rc=1"
+  printf '%s\n%s' "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -), and keys sort/group/match/preview/up/down/clear non-empty strings" "rc=1"
 }
 fresh
 echo '{"sorts":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
@@ -434,7 +487,7 @@ done
 fresh
 echo '{"priority_max":9}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "priority_max 9 is accepted and the header shows the full range" "$(run header | sed -n 2p)" \
-  "ctrl-s sort  ctrl-g group  ctrl-r match  alt-up/alt-down move  alt-1..9 prio  alt-0 clear"
+  "ctrl-s sort  ctrl-g group  ctrl-r match  ctrl-o preview  alt-up/alt-down move  alt-1..9 prio  alt-0 clear"
 fresh
 echo '{"priority_max":1}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "priority_max 1 is accepted" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
@@ -580,18 +633,28 @@ check "open launches the search pane entrypoint" "$(cat "$FAKE_CALLS")" \
   "plugin pane open --plugin takashiaihara.agent-search --entrypoint search"
 
 fresh
-check "preview splits into pane, tokens and ids sections" "$(run preview w2:p1 | grep -xcE '\[pane\]|\[tokens\]|\[ids\]' | tr '\n' ' '; run preview w2:p1 | grep -nE '^\[(pane|tokens|ids)\]$' | cut -d: -f1,2 | sed 's/:/=/' | tr '\n' ';')" \
-  "3 1=[pane];7=[tokens];10=[ids];"
-check "preview token names lose the tokens. prefix" "$(run preview w2:p1 | grep -E '^(title|task)' | sed -E 's/^([^ ]+) +/\1=/' | tr '\n' ';')" \
+check "preview is an outline grouped into pane and ids sections" "$(run preview w2:p1 | grep -xcE '\[pane\]|\[ids\]' | tr '\n' ' '; run preview w2:p1 | grep -nE '^\[(pane|ids)\]$' | cut -d: -f1,2 | sed 's/:/=/' | tr '\n' ';')" \
+  "2 1=[pane];11=[ids];"
+check "object fields and tokens are outline nodes with indented entries" \
+  "$(run preview w2:p1 | sed -n '4p;5p;8,10p' | tr '\n' ';')" \
+  "agent_session;  value        s3;tokens;  repo         alpha;  task         urgent kaneo;"
+check "preview token names lose the tokens. prefix" "$(run preview w2:p1 | grep -E '(title|task)' | sed -E 's/^ *([^ ]+) +/\1=/' | tr '\n' ';')" \
   "title=write docs;task=urgent kaneo;"
-check "identifier fields are under ids" "$(run preview w2:p1 | awk 'f{print;exit} /^\[ids\]$/{f=1}')" "pane_id       w2:p1"
-check "a pane without tokens has no tokens section" "$(run preview w1:p2 | grep -c '^\[tokens\]$')" "0"
-check "preview values inside a section start in one column" \
-  "$(run preview w2:p1 | awk 'NF==1{s=$0;next}{match($0,/^[^ ]+ +/); if (seen[s]&&seen[s]!=RLENGTH) bad=1; seen[s]=RLENGTH}END{print bad+0}')" "0"
-check "preview lines up wide token names by display width" "$(printf '%s' '{"result":{"panes":[{"pane_id":"w1:p1","agent":"claude","title":"t","tokens":{"界界":"wide","ab":"narrow"}}]}}' > "$tmp/wide.json"; AGENT_SEARCH_LIST="$tmp/wide.json" pk preview w1:p1 | grep -E '^(界界|ab)' | python3 -c 'import sys,unicodedata as u
+check "identifier fields are under ids" "$(run preview w2:p1 | awk 'f{print;exit} /^\[ids\]$/{f=1}')" "pane_id        w2:p1"
+check "a pane without tokens has no tokens node" "$(run preview w1:p2 | grep -cxE 'tokens|\[tokens\]')" "0"
+check "preview values start in one column at every level" \
+  "$(run preview w2:p1 | awk '{if (match($0,/^ *[^ ]+  +/)) print RLENGTH}' | sort -un | wc -l | tr -d ' ')" "1"
+check "preview lines up wide token names by display width" "$(printf '%s' '{"result":{"panes":[{"pane_id":"w1:p1","agent":"claude","title":"t","tokens":{"界界":"wide","ab":"narrow"}}]}}' > "$tmp/wide.json"; AGENT_SEARCH_LIST="$tmp/wide.json" pk preview w1:p1 | grep -E '(界界|ab)' | python3 -c 'import sys,unicodedata as u
 print(len({sum(2 if u.east_asian_width(c) in "WF" else 1 for c in l[:l.index(l.split()[-1])]) for l in sys.stdin}))')" "1"
 check "preview has more than one line" "$([ "$(run preview w2:p1 | wc -l)" -gt 3 ] && echo yes)" "yes"
 check "preview of a group header is empty" "$(run preview -:alpha)" ""
+
+fresh
+echo '{"preview_hide":["tokens.task","workspace_id","agent_session"]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "preview_hide drops named entries, nested paths and whole objects" \
+  "$(run preview w2:p1 | grep -cwE 'task|urgent|workspace_id|agent_session|value' | tr '\n' ' '; run preview w2:p1 | grep -c '  repo')" \
+  "0 1"
+check "preview_hide never changes the list" "$(ids)" "w1:p1 w1:p2 w2:p1 w2:p2 "
 
 fresh
 mkdir -p "$HERDR_PLUGIN_STATE_DIR"

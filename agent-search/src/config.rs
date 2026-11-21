@@ -65,6 +65,7 @@ pub struct Keys {
     pub sort: String,
     pub group: String,
     pub r#match: String,
+    pub preview: String,
     pub up: String,
     pub down: String,
     pub clear: String,
@@ -78,6 +79,8 @@ pub struct Config {
     pub priority_token: String,
     pub priority_max: u8,
     pub r#match: Match,
+    pub preview: bool,
+    pub preview_hide: Vec<String>,
     pub keys: Keys,
 }
 
@@ -89,6 +92,14 @@ impl Config {
             .and_then(Value::as_str)
             .and_then(Match::from_name)
             .unwrap_or(self.r#match)
+    }
+
+    // Whether the preview pane starts shown: the state's saved choice when it is a boolean,
+    // else the config's `preview`.
+    pub fn preview_on(&self, st: &State) -> bool {
+        st.get("preview")
+            .and_then(Value::as_bool)
+            .unwrap_or(self.preview)
     }
 }
 
@@ -109,7 +120,9 @@ fn defaults() -> Value {
         "priority_token": "prio",
         "priority_max": 5,
         "match": "fuzzy",
-        "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
+        "preview": true,
+        "preview_hide": [],
+        "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
     })
 }
 
@@ -238,10 +251,13 @@ fn extract(v: &Value) -> Option<Config> {
             .as_u64()
             .and_then(|n| u8::try_from(n).ok())?,
         r#match: Match::from_name(o.get("match")?.as_str()?)?,
+        preview: o.get("preview")?.as_bool()?,
+        preview_hide: strs(o.get("preview_hide")?)?,
         keys: Keys {
             sort: key(keys, "sort")?,
             group: key(keys, "group")?,
             r#match: key(keys, "match")?,
+            preview: key(keys, "preview")?,
             up: key(keys, "up")?,
             down: key(keys, "down")?,
             clear: key(keys, "clear")?,
@@ -287,10 +303,25 @@ fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
             return Err(format!("{path}: match must be \"fuzzy\" or \"substring\""));
         }
     }
+    if let Some(v) = merged.get("preview") {
+        if !v.is_boolean() {
+            return Err(format!("{path}: preview must be true or false"));
+        }
+    }
+    if let Some(v) = merged.get("preview_hide") {
+        let ok = v
+            .as_array()
+            .is_some_and(|a| a.iter().all(|x| x.as_str().is_some_and(|s| !s.is_empty())));
+        if !ok {
+            return Err(format!(
+                "{path}: preview_hide must be a list of non-empty strings"
+            ));
+        }
+    }
     let cfg = extract(&merged).ok_or_else(|| {
         let fields = "columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)";
         if need_keys {
-            format!("{path}: {fields}, and keys sort/group/match/up/down/clear non-empty strings")
+            format!("{path}: {fields}, and keys sort/group/match/preview/up/down/clear non-empty strings")
         } else {
             format!("{path}: {fields}")
         }
@@ -436,6 +467,69 @@ mod tests {
             "{err}"
         );
         assert!(load_json(r#"{"keys":{"match":""}}"#).is_err());
+    }
+
+    #[test]
+    fn a_preview_other_than_true_or_false_is_a_config_error_naming_the_key() {
+        for bad in ["\"yes\"", "5", "null", "[]"] {
+            let err = load_json(&format!("{{\"preview\":{bad}}}"))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                err.contains("preview must be true or false"),
+                "{bad}: {err}"
+            );
+        }
+        assert_eq!(load_json("{}").map(|c| c.preview), Ok(true));
+        assert_eq!(
+            load_json(r#"{"preview":false}"#).map(|c| c.preview),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_preview_hide_entry_that_is_not_a_non_empty_string_is_a_config_error_naming_the_key() {
+        for bad in ["\"tokens.repo\"", "5", "[\"\"]", "[5]", "[null]", "{}"] {
+            let err = load_json(&format!("{{\"preview_hide\":{bad}}}"))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                err.contains("preview_hide must be a list of non-empty strings"),
+                "{bad}: {err}"
+            );
+        }
+        let cfg = load_json(r#"{"preview_hide":["tokens.flags","state_labels"]}"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.preview_hide, ["tokens.flags", "state_labels"]);
+        assert_eq!(load_json("{}").map(|c| c.preview_hide), Ok(vec![]));
+    }
+
+    #[test]
+    fn the_saved_preview_choice_wins_over_the_config_and_a_non_boolean_is_ignored() {
+        let cfg = load_json("{}").unwrap_or_else(|e| panic!("{e}"));
+        let off = load_json(r#"{"preview":false}"#).unwrap_or_else(|e| panic!("{e}"));
+        let st = |s: &str| State::parse(Some(s.as_bytes()));
+        assert!(!cfg.preview_on(&st(r#"{"preview":false}"#)));
+        assert!(cfg.preview_on(&st(r#"{"preview":"bogus"}"#)));
+        assert!(cfg.preview_on(&st("{}")));
+        assert!(off.preview_on(&st(r#"{"preview":true}"#)));
+        assert!(!off.preview_on(&st(r#"{"preview":"bogus"}"#)));
+        assert!(!off.preview_on(&st("{}")));
+    }
+
+    #[test]
+    fn the_preview_key_merges_key_by_key_and_is_validated_like_the_others() {
+        let cfg = load_json(r#"{"keys":{"preview":"ctrl-t"}}"#).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.keys.preview, "ctrl-t");
+        assert_eq!(cfg.keys.sort, "ctrl-s");
+        let err = load_json(r#"{"keys":{"preview":"ctrl-s"}}"#)
+            .err()
+            .unwrap_or_default();
+        assert!(
+            err.contains("keys.preview \"ctrl-s\" is the same key as keys.sort"),
+            "{err}"
+        );
+        assert!(load_json(r#"{"keys":{"preview":""}}"#).is_err());
     }
 
     #[test]

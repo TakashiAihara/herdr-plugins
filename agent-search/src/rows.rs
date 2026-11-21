@@ -439,10 +439,13 @@ mod tests {
             priority_token: "prio".into(),
             priority_max: 5,
             r#match: Match::Fuzzy,
+            preview: true,
+            preview_hide: vec![],
             keys: Keys {
                 sort: "ctrl-s".into(),
                 group: "ctrl-g".into(),
                 r#match: "ctrl-r".into(),
+                preview: "ctrl-o".into(),
                 up: "alt-up".into(),
                 down: "alt-down".into(),
                 clear: "alt-0".into(),

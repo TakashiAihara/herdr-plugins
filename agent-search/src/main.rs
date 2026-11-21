@@ -235,8 +235,8 @@ fn header_text(cfg: &Config, st: &State) -> String {
     let mode = cfg.mode(st).name();
     let k = &cfg.keys;
     format!(
-        "sort: {sort}  group: {group}  match: {mode}\n{} sort  {} group  {} match  {}/{} move  alt-1..{} prio  {} clear\n",
-        k.sort, k.group, k.r#match, k.up, k.down, cfg.priority_max, k.clear
+        "sort: {sort}  group: {group}  match: {mode}\n{} sort  {} group  {} match  {} preview  {}/{} move  alt-1..{} prio  {} clear\n",
+        k.sort, k.group, k.r#match, k.preview, k.up, k.down, cfg.priority_max, k.clear
     )
 }
 
@@ -326,7 +326,7 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
     let op = arg(0);
 
     let (dir, id, n) = match op {
-        "sort-next" | "group-next" | "match-next" => ("", "", ""),
+        "sort-next" | "group-next" | "match-next" | "preview-next" => ("", "", ""),
         "move" => {
             if arg(1) != "up" && arg(1) != "down" {
                 return Err("move needs up or down".into());
@@ -385,6 +385,9 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
         "match-next" => {
             let next = cfg.mode(&st).other();
             new.insert("match".into(), Value::String(next.name().into()));
+        }
+        "preview-next" => {
+            new.insert("preview".into(), Value::Bool(!cfg.preview_on(&st)));
         }
         "move" => {
             let i = rows.iter().position(|r| r.id == id);
@@ -572,71 +575,130 @@ fn focus(env: &Env, id: &str) -> Res<()> {
     focus_in(env, &env.pane_list()?, id)
 }
 
-// One preview section: its name on its own line, then `key<pad>value` rows with the values
-// starting in one column (padded by display width: a wide character takes two cells). A section
-// with nothing in it is left out.
-fn section(name: &str, entries: &[(String, String)]) -> String {
-    if entries.is_empty() {
-        return String::new();
-    }
-    let w = entries
-        .iter()
-        .map(|(k, _)| rows::width(k))
-        .max()
-        .unwrap_or(0);
-    let mut text = format!("{name}\n");
-    for (k, v) in entries {
-        let pad = " ".repeat(w - rows::width(k) + 2);
-        text.push_str(&format!("{k}{pad}{v}\n"));
-    }
-    text
+// One entry of a preview section: a scalar on one line, or a node whose children indent two
+// spaces below its name.
+enum Node {
+    Leaf(String, String),
+    Tree(String, Vec<Node>),
 }
 
-// Three sections: the pane's fields, its tokens, then the internal identifiers (every field
-// whose name ends in `_id`).
-fn preview_text(list: &Option<Value>, id: &str) -> String {
-    let mut text = String::new();
+impl Node {
+    fn key(&self) -> &str {
+        match self {
+            Node::Leaf(k, _) | Node::Tree(k, _) => k,
+        }
+    }
+}
+
+// The node for one field: an object or an array becomes a node with children (an array's key is
+// the index), anything else a scalar line. `path` is the dot-joined key path preview_hide names,
+// so a nested entry or a whole object can be left out.
+fn node(path: &str, key: &str, v: &Value, hide: &[String]) -> Option<Node> {
+    if hide.iter().any(|p| p == path) {
+        return None;
+    }
+    let key = clean(key);
+    match v {
+        Value::Object(m) => Some(Node::Tree(
+            key,
+            m.iter()
+                .filter(|(_, v)| !v.is_null())
+                .filter_map(|(k, v)| node(&format!("{path}.{k}"), k, v, hide))
+                .collect(),
+        )),
+        Value::Array(a) => Some(Node::Tree(
+            key,
+            a.iter()
+                .enumerate()
+                .filter(|(_, v)| !v.is_null())
+                .filter_map(|(i, v)| node(&format!("{path}.{i}"), &i.to_string(), v, hide))
+                .collect(),
+        )),
+        _ => Some(Node::Leaf(key, clean(&tostring(v)))),
+    }
+}
+
+// The widest indented key under the section: the value column is that plus two spaces, shared by
+// every level so a nested value lines up with a top-level one.
+fn node_width(nodes: &[Node], indent: usize) -> usize {
+    nodes
+        .iter()
+        .map(|n| {
+            let key = indent + rows::width(n.key());
+            match n {
+                Node::Tree(_, children) => key.max(node_width(children, indent + 2)),
+                Node::Leaf(..) => key,
+            }
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn render_nodes(nodes: &[Node], indent: usize, w: usize, text: &mut String) {
+    for n in nodes {
+        let pad = " ".repeat(indent);
+        match n {
+            Node::Leaf(k, v) => {
+                let gap = " ".repeat(w - indent - rows::width(k));
+                text.push_str(&format!("{pad}{k}{gap}{v}\n"));
+            }
+            Node::Tree(k, children) => {
+                text.push_str(&format!("{pad}{k}\n"));
+                render_nodes(children, indent + 2, w, text);
+            }
+        }
+    }
+}
+
+// The preview as an outline: `[pane]` holds the pane's fields, with object and array fields (the
+// `tokens` map, `agent_session`, `state_labels`) as nodes whose entries indent two spaces below
+// them, recursively; `[ids]` every field whose name ends in `_id`. All values share one column, and
+// a section with nothing in it is left out.
+fn preview_text(list: &Option<Value>, id: &str, hide: &[String]) -> String {
+    let mut sections: Vec<(&'static str, Vec<Node>)> = Vec::new();
     for pane in pane_with_id(&lenient_panes(list), id) {
         let Some(fields) = pane.as_object() else {
             continue;
         };
-        let mut panes: Vec<(String, String)> = Vec::new();
-        let mut ids: Vec<(String, String)> = Vec::new();
+        let mut panes: Vec<Node> = Vec::new();
+        let mut ids: Vec<Node> = Vec::new();
         for (k, v) in fields {
-            if matches!(k.as_str(), "tokens" | "scroll" | "revision") || v.is_null() {
+            if matches!(k.as_str(), "scroll" | "revision") || v.is_null() {
                 continue;
             }
-            let entry = (clean(k), clean(&tostring(v)));
-            if k.ends_with("_id") {
-                ids.push(entry);
+            let target = if k.ends_with("_id") {
+                &mut ids
             } else {
-                panes.push(entry);
+                &mut panes
+            };
+            if let Some(n) = node(k, k, v, hide) {
+                target.push(n);
             }
         }
-        let mut tokens: Vec<(String, String)> = Vec::new();
-        match present(fields.get("tokens")) {
-            Some(Value::Object(m)) => tokens.extend(
-                m.iter()
-                    .filter(|(_, v)| !v.is_null())
-                    .map(|(k, v)| (clean(k), clean(&tostring(v)))),
-            ),
-            Some(Value::Array(a)) => tokens.extend(
-                a.iter()
-                    .enumerate()
-                    .filter(|(_, v)| !v.is_null())
-                    .map(|(i, v)| (i.to_string(), clean(&tostring(v)))),
-            ),
-            _ => {}
+        sections.push(("[pane]", panes));
+        sections.push(("[ids]", ids));
+    }
+    let w = sections
+        .iter()
+        .map(|(_, nodes)| node_width(nodes, 0))
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let mut text = String::new();
+    for (name, nodes) in sections {
+        if nodes.is_empty() {
+            continue;
         }
-        text.push_str(&section("[pane]", &panes));
-        text.push_str(&section("[tokens]", &tokens));
-        text.push_str(&section("[ids]", &ids));
+        text.push_str(name);
+        text.push('\n');
+        render_nodes(&nodes, 0, w, &mut text);
     }
     text
 }
 
 fn preview(env: &Env, id: &str) -> Res<()> {
-    out(&preview_text(&env.pane_list()?, id));
+    let cfg = env.config()?;
+    out(&preview_text(&env.pane_list()?, id, &cfg.preview_hide));
     Ok(())
 }
 
@@ -909,26 +971,36 @@ mod tests {
     }
 
     #[test]
-    fn the_preview_splits_into_pane_tokens_and_ids_sections() {
+    fn the_preview_is_an_outline_grouped_into_pane_and_ids_sections() {
         let list = Some(json!({"result": {"panes": [{
             "pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1",
             "agent": "claude", "title": "fix", "session_id": "sx",
-            "tokens": {"repo": "a", "note": "n"}, "scroll": 1
+            "agent_session": {"value": "s1", "kind": "id"},
+            "tokens": {"repo": "a", "flags": "f", "note": {"deep": "d"}, "arr": ["x", "y"]},
+            "scroll": 1
         }]}}));
         assert_eq!(
-            preview_text(&list, "w1:p1"),
+            preview_text(&list, "w1:p1", &[]),
             concat!(
                 "[pane]\n",
-                "agent  claude\n",
-                "title  fix\n",
-                "[tokens]\n",
-                "repo  a\n",
-                "note  n\n",
+                "agent          claude\n",
+                "title          fix\n",
+                "agent_session\n",
+                "  value        s1\n",
+                "  kind         id\n",
+                "tokens\n",
+                "  repo         a\n",
+                "  flags        f\n",
+                "  note\n",
+                "    deep       d\n",
+                "  arr\n",
+                "    0          x\n",
+                "    1          y\n",
                 "[ids]\n",
-                "pane_id       w1:p1\n",
-                "workspace_id  w1\n",
-                "tab_id        w1:t1\n",
-                "session_id    sx\n"
+                "pane_id        w1:p1\n",
+                "workspace_id   w1\n",
+                "tab_id         w1:t1\n",
+                "session_id     sx\n"
             )
         );
         // A pane with no tokens and no extra identifiers leaves those sections out.
@@ -936,8 +1008,45 @@ mod tests {
             {"pane_id": "w1:p1", "title": "fix"}
         ]}}));
         assert_eq!(
-            preview_text(&bare, "w1:p1"),
-            "[pane]\ntitle  fix\n[ids]\npane_id  w1:p1\n"
+            preview_text(&bare, "w1:p1", &[]),
+            "[pane]\ntitle    fix\n[ids]\npane_id  w1:p1\n"
+        );
+    }
+
+    #[test]
+    fn preview_hide_leaves_out_named_entries_and_whole_objects() {
+        let list = Some(json!({"result": {"panes": [{
+            "pane_id": "w1:p1", "workspace_id": "w1", "agent": "claude",
+            "agent_session": {"value": "s1", "kind": "id"},
+            "tokens": {"repo": "a", "flags": "f"},
+            "state_labels": {"x": "y"}
+        }]}}));
+        let hide = |h: &[&str]| h.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // A whole object, a nested entry, and an [ids] field.
+        let out = preview_text(
+            &list,
+            "w1:p1",
+            &hide(&[
+                "state_labels",
+                "tokens.flags",
+                "agent_session.kind",
+                "workspace_id",
+            ]),
+        );
+        assert!(!out.contains("state_labels"));
+        assert!(out.contains("repo") && !out.contains("flags"));
+        assert!(out.contains("agent_session") && !out.contains("kind"));
+        assert!(!out.contains("workspace_id"));
+        // Hiding every [ids] entry drops the section itself.
+        let out = preview_text(&list, "w1:p1", &hide(&["pane_id", "workspace_id"]));
+        assert!(!out.contains("[ids]"));
+        // An empty object keeps its name line.
+        let empty = Some(json!({"result": {"panes": [
+            {"pane_id": "w1:p1", "tokens": {}}
+        ]}}));
+        assert_eq!(
+            preview_text(&empty, "w1:p1", &[]),
+            "[pane]\ntokens\n[ids]\npane_id  w1:p1\n"
         );
     }
 
@@ -1035,7 +1144,7 @@ mod tests {
         assert_eq!(
             header_text(&cfg, &st("{}")),
             "sort: priority  group: none  match: fuzzy\n\
-             ctrl-s sort  ctrl-g group  ctrl-r match  alt-up/alt-down move  alt-1..5 prio  alt-0 clear\n"
+             ctrl-s sort  ctrl-g group  ctrl-r match  ctrl-o preview  alt-up/alt-down move  alt-1..5 prio  alt-0 clear\n"
         );
         assert!(
             header_text(&cfg, &st(r#"{"match":"substring"}"#))
@@ -1045,6 +1154,48 @@ mod tests {
         assert!(
             header_text(&cfg, &st(r#"{"match":"bogus"}"#)).contains("match: fuzzy"),
             "a saved value that is not a mode falls back to the config"
+        );
+    }
+
+    #[test]
+    fn act_preview_next_toggles_the_choice_saved_in_the_state() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let env = env_with("pvnext", panes, json!({}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let args = vec!["preview-next".to_string()];
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("preview"),
+            Some(&json!(false))
+        );
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("preview"),
+            Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn act_preview_next_toggles_from_the_config_when_the_saved_choice_is_missing_or_not_a_boolean()
+    {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let args = vec!["preview-next".to_string()];
+        let env = env_with("pvcfg", panes.clone(), json!({}));
+        std::fs::write(&env.config_path, r#"{"preview":false}"#).unwrap_or_else(|e| panic!("{e}"));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("preview"),
+            Some(&json!(true)),
+            "preview off configured, so the first toggle lands on true"
+        );
+        let env = env_with("pvbad", panes, json!({"preview": "bogus"}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("preview"),
+            Some(&json!(false)),
+            "a saved value that is not a boolean is ignored and the config default toggles"
         );
     }
 

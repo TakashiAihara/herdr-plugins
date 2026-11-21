@@ -153,6 +153,7 @@ pub fn validate(keys: &Keys) -> Result<Vec<(&'static str, Bind)>, String> {
         ("sort", &keys.sort),
         ("group", &keys.group),
         ("match", &keys.r#match),
+        ("preview", &keys.preview),
         ("up", &keys.up),
         ("down", &keys.down),
         ("clear", &keys.clear),
@@ -191,6 +192,7 @@ mod tests {
             sort: sort.into(),
             group: group.into(),
             r#match: "ctrl-r".into(),
+            preview: "ctrl-o".into(),
             up: "alt-up".into(),
             down: "alt-down".into(),
             clear: "alt-0".into(),
@@ -344,6 +346,29 @@ mod tests {
         let err = validate(&k).err().unwrap_or_default();
         assert!(
             err.contains("unknown key name \"ctrl-nonsense\" in keys.match"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_preview_key_gets_the_same_checks_as_the_other_keys() {
+        let mut k = keys("ctrl-s", "ctrl-g");
+        k.preview = "ctrl-s".into();
+        let err = validate(&k).err().unwrap_or_default();
+        assert!(
+            err.contains("keys.preview \"ctrl-s\" is the same key as keys.sort"),
+            "{err}"
+        );
+        k.preview = "x".into();
+        let err = validate(&k).err().unwrap_or_default();
+        assert!(
+            err.contains("keys.preview \"x\" is already used by the popup"),
+            "{err}"
+        );
+        k.preview = "ctrl-nonsense".into();
+        let err = validate(&k).err().unwrap_or_default();
+        assert!(
+            err.contains("unknown key name \"ctrl-nonsense\" in keys.preview"),
             "{err}"
         );
     }
