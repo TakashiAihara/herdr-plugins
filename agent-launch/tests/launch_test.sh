@@ -48,7 +48,7 @@ check "ui creates, runs, then focuses, in that order" "$(cut -d' ' -f1-3 "$FAKE_
   "workspace create --cwd|pane run w9:p1|workspace focus w9|"
 check "the workspace is created unfocused at the remembered cwd" "$(grep -c "^workspace create --cwd /b --label fix it's \$HOME \`x\` --no-focus$" "$FAKE_LOG")" 1
 got="$(cat "$FAKE_RUN")"
-check "prompt is one literal word" "$(eval "printf '%s|' $got")" "claude|fix it's \$HOME \`x\`|"
+check "prompt is one literal word after --" "$(eval "printf '%s|' $got")" "claude|--|fix it's \$HOME \`x\`|"
 
 # ui: a template with {repo} asks for it; empty repo drops the placeholder.
 reset; printf '%s\n' 'ccxn {repo} {prompt}' > "$HERDR_PLUGIN_CONFIG_DIR/command"

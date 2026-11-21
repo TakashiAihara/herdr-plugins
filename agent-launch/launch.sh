@@ -16,7 +16,7 @@ quote() { local s=${1//\'/\'\\\'\'}; printf "'%s'" "$s"; }
 
 # The command template: {prompt} and {repo} are replaced by what you type, each as one quoted word.
 template() {
-  local f="${HERDR_PLUGIN_CONFIG_DIR:-}/command" t="" def='claude {prompt}'
+  local f="${HERDR_PLUGIN_CONFIG_DIR:-}/command" t="" def='claude -- {prompt}'
   [[ -f "$f" ]] && IFS= read -r t < "$f"
   printf '%s' "${t:-$def}"
 }
