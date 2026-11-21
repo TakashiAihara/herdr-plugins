@@ -793,13 +793,20 @@ fn preview(env: &Env, id: &str) -> Res<()> {
 }
 
 fn open(env: &Env) -> i32 {
-    // A config that does not load still opens the popup at the default size: the popup itself
-    // shows the config error, where pressing the key otherwise would show nothing at all.
-    let (width, height) = match env.config() {
-        Ok(cfg) => (cfg.popup_width, cfg.popup_height),
+    // A config that does not load still opens the popup, at the manifest's size (no --width /
+    // --height, so Herdr uses the pane's own): the popup itself shows the config error, where
+    // pressing the key otherwise would show nothing at all. The flags are only valid while the
+    // manifest's placement is "popup".
+    let size = match env.config() {
+        Ok(cfg) => vec![
+            "--width".to_string(),
+            cfg.popup_width,
+            "--height".to_string(),
+            cfg.popup_height,
+        ],
         Err(msg) => {
             eprintln!("agent-search: {msg}");
-            ("90%".to_string(), "85%".to_string())
+            vec![]
         }
     };
     Command::new(&env.herdr)
@@ -811,11 +818,8 @@ fn open(env: &Env) -> i32 {
             &env.plugin_id,
             "--entrypoint",
             "search",
-            "--width",
-            &width,
-            "--height",
-            &height,
         ])
+        .args(&size)
         .stdout(Stdio::null())
         .status()
         .map_or(127, |s| s.code().unwrap_or(1))

@@ -697,8 +697,11 @@ echo '{"popup_width":"bogus"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a popup_width that is not a size is a config error naming the key" \
   "$(run open 2>&1 >/dev/null)" \
   "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: popup_width must be a percentage from 1% to 100% or a number of cells from 1 to 65535"
-check "and the popup still opens at the default size, to show the error" "$(cat "$FAKE_CALLS")" \
-  "plugin pane open --plugin takashiaihara.agent-search --entrypoint search --width 90% --height 85%"
+check "and the popup still opens, at the manifest's size, to show the error" "$(cat "$FAKE_CALLS")" \
+  "plugin pane open --plugin takashiaihara.agent-search --entrypoint search"
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+echo '{"prio":{"w1:p1":3}}' > "$HERDR_PLUGIN_STATE_DIR/state.json" || exit 1
+check "restore ignores a bad popup size" "$(run restore >/dev/null 2>&1; echo "rc=$?")" "rc=0"
 
 fresh
 echo '{"popup_height":0}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"

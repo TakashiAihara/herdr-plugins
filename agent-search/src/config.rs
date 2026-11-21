@@ -346,9 +346,9 @@ pub fn load(path: &str) -> Result<Config, String> {
     load_with(path, true)
 }
 
-// `restore` never binds keys: it only needs `priority_token` and the settings that build rows, so
-// a config whose `keys` are unusable or invalid still restores priorities. Its keys are replaced
-// by the defaults before extraction; every other error still fails.
+// `restore` never binds keys or opens the popup: it only needs `priority_token` and the settings
+// that build rows, so a config whose `keys` or popup size are unusable still restores priorities.
+// Those are replaced by the defaults before extraction; every other error still fails.
 pub fn load_for_restore(path: &str) -> Result<Config, String> {
     load_with(path, false)
 }
@@ -364,8 +364,11 @@ fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
         merged = merge(merged, user);
     }
     if !need_keys {
+        // The popup size, like the keys, only matters to the popup: restore takes the defaults.
         if let Value::Object(m) = &mut merged {
-            m.insert("keys".into(), defaults()["keys"].clone());
+            for key in ["keys", "popup_width", "popup_height"] {
+                m.insert(key.into(), defaults()[key].clone());
+            }
         }
     }
     if let Some(v) = merged.get("priority_max") {
