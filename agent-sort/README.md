@@ -29,6 +29,36 @@ command = "takashiaihara.agent-sort.open"
 description = "pick an agent sort"
 ```
 
+## Built-in presets
+
+Without a config file, `next` cycles these three, in this order:
+
+| Preset | Sort | What you see on top |
+|---|---|---|
+| `attention` | `attention` desc, then `state_change_seq` desc | Agents that need you: blocked first, then done (finished, not looked at yet), then working, then idle you have already seen. Within each, the one whose state changed most recently |
+| `recent` | `state_change_seq` desc | The agent whose state changed most recently (started, finished, got blocked), whatever that state is |
+| `workspace` | `workspace_order`, `tab_order`, `pane_order`, all asc | Herdr's own layout order: workspaces, then tabs, then panes as they are arranged |
+
+`0` in the popup (or clearing) drops the plugin's sort, and Herdr's own `ui.agent_panel_sort` applies again.
+
+## Fields
+
+What each built-in field sorts by (Herdr 0.9.5, `agent.view.set`):
+
+| Field | Value | `desc` puts first |
+|---|---|---|
+| `attention` | 4 blocked, 3 done (idle, not seen yet), 2 working, 1 idle and seen, 0 unknown | blocked |
+| `state_change_seq` | A counter Herdr bumps each time an agent changes state | the most recent change |
+| `status` | `blocked`, `done`, `idle`, `unknown`, `working`, compared as text | `working` (alphabetical, not by urgency; use `attention` for urgency) |
+| `seen` | whether you have looked at the agent since its last change | seen ones |
+| `agent` | the agent's kind (`claude`, `devin`, ...), compared as text | reverse alphabetical |
+| `workspace_order` / `tab_order` / `pane_order` | position in Herdr's layout | the last workspace / tab / pane (`asc` gives layout order) |
+| `token = "<name>"` | a metadata token reported on the pane, compared as text | the largest value |
+
+## Custom presets
+
+Write your own presets when the built-ins are not the order you want: for example a priority token first, then urgency, then recency. Press `e` in the popup to open the config; on first use it is a commented template holding the three built-ins, so you can copy one and change it. When you save and close the editor, the popup reloads the presets and re-applies the active one with its new definition.
+
 ## Configuration
 
 Optional. Write `config.toml` in the directory printed by:
@@ -68,7 +98,7 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - Token values compare as strings, so pad to the same number of digits whenever values can have different lengths (for 1–12 write `01`–`12`, or `"10"` sorts before `"3"`).
 - `filter` is the filter object of the socket API's `agent.view.set`, converted from TOML to JSON untouched; it must be a table.
 - Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset.
-- A `[[sort_presets]]` list replaces the built-ins whole. Without a config file the built-ins are `attention` (attention, then state_change_seq, both desc), `recent` (state_change_seq desc), `workspace` (workspace_order, tab_order, pane_order, all asc).
+- A `[[sort_presets]]` list replaces the built-ins whole; copy the ones you still want from [Built-in presets](#built-in-presets).
 
 ## Keys in the popup
 
