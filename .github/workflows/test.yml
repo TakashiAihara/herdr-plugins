@@ -22,6 +22,12 @@ jobs:
           cargo fmt --check
           cargo build --release --locked
           cargo test --locked
+      - name: Build and unit-test agent-sort
+        working-directory: agent-sort
+        run: |
+          cargo fmt --check
+          cargo build --release --locked
+          cargo test --locked
       - name: Run plugin tests
         run: |
           set -e

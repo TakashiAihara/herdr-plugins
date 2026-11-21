@@ -49,6 +49,7 @@ server_pid=$!
 for _ in $(seq 50); do [ -S "$tmp/sock" ] && break; sleep 0.1; done
 [ -S "$tmp/sock" ] || { echo "FAIL the fake socket did not start"; exit 1; }
 
+export EDITOR=false VISUAL=
 export HERDR_SOCKET_PATH="$tmp/sock" HERDR_BIN_PATH="$tmp/herdr" HERDR_PLUGIN_ID=test.agent-sort
 export HERDR_PLUGIN_CONFIG_DIR="$tmp/config" HERDR_PLUGIN_STATE_DIR="$tmp/state" FAKE_CALLS="$tmp/calls" FAKE_REQS="$tmp/reqs"
 mkdir -p "$HERDR_PLUGIN_CONFIG_DIR" "$HERDR_PLUGIN_STATE_DIR"
@@ -95,20 +96,20 @@ run next; rc=$?
 check "next without state applies the first preset and saves it" \
   "$(echo "rc=$rc"; reqs; preset_in_state)" \
   "rc=0
-agent.view.set {\"label\":\"attention\",$SRC,$ATTENTION}
+agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
 \"attention\""
 check "next tells the user which preset is active" "$(grep -c 'notification show.*attention' "$tmp/calls")" "1"
 
 fresh; run next
-check "next moves to the following preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$SRC,$RECENT}
+check "next moves to the following preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
 \"recent\""
 fresh; run next; fresh; run next
-check "next wraps around after the last preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"attention\",$SRC,$ATTENTION}
+check "next wraps around after the last preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
 \"attention\""
 
 fresh; run set workspace; rc=$?
 check "set applies the named preset" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
-agent.view.set {\"label\":\"workspace\",$SRC,$WORKSPACE}
+agent.view.set {\"label\":\"workspace\",$WORKSPACE,$SRC}
 \"workspace\""
 
 fresh; run set nope; rc=$?
@@ -132,7 +133,7 @@ check "next after clear starts again from the first preset" "$(preset_in_state)"
 
 fresh; run set recent; fresh; run restore; rc=$?
 check "restore applies the saved preset" "$(echo "rc=$rc"; reqs)" "rc=0
-agent.view.set {\"label\":\"recent\",$SRC,$RECENT}"
+agent.view.set {\"label\":\"recent\",$RECENT,$SRC}"
 check "restore does not notify on success" "$(grep -c 'notification show' "$tmp/calls")" "0"
 
 reset; run restore; rc=$?
@@ -162,9 +163,9 @@ run restore; rc=$?
 check "restore with no state applies the config default, mixing tokens and fields, order defaulting to asc, filter passed through" \
   "$(echo "rc=$rc"; reqs)" \
   "rc=0
-agent.view.set {\"filter\":{\"field\":\"status\",\"op\":\"in\",\"values\":[\"blocked\",\"done\",\"working\"]},\"label\":\"prio\",$SRC,\"sort\":[{\"field\":{\"token\":\"prio\"},\"order\":\"desc\"},{\"field\":\"attention\",\"order\":\"desc\"},{\"field\":\"state_change_seq\",\"order\":\"asc\"}]}"
+agent.view.set {\"filter\":{\"field\":\"status\",\"op\":\"in\",\"values\":[\"blocked\",\"done\",\"working\"]},\"label\":\"prio\",\"sort\":[{\"field\":{\"token\":\"prio\"},\"order\":\"desc\"},{\"field\":\"attention\",\"order\":\"desc\"},{\"field\":\"state_change_seq\",\"order\":\"asc\"}],$SRC}"
 fresh; run next
-check "next without state starts from the config default" "$(reqs)" "agent.view.set {\"label\":\"repo\",$SRC,\"sort\":[{\"field\":{\"token\":\"repo\"},\"order\":\"asc\"}]}"
+check "next without state starts from the config default" "$(reqs)" "agent.view.set {\"label\":\"repo\",\"sort\":[{\"field\":{\"token\":\"repo\"},\"order\":\"asc\"}],$SRC}"
 
 fresh; echo '{"preset":"gone"}' > "$state"; run next
 check "next from a preset the config no longer has starts from the first" "$(preset_in_state)" "\"prio\""
@@ -210,14 +211,20 @@ name = "x"
 sort = [{ field = "agent", token = "prio" }]' 'token'
 bad "a file that is not TOML is a config error" 'this is = = not toml' 'config.toml'
 
+reset; mkdir "$cfg"
+run presets; rc=$?
+check "a config that exists but cannot be read is an error, not the built-ins" "$(echo "rc=$rc"; cat "$tmp/out"; grep -c 'config.toml' "$tmp/err")" "rc=1
+1"
+rmdir "$cfg"
+
 reset
 printf '[[sort_presets]]\nname = "x"\nsort = [{ field = "agent" }]\n[keys]\nedit = "ctrl-nonsense"\n' > "$cfg"
 echo '{"preset":"x"}' > "$state"
 run restore
-check "restore ignores keys it does not use, even unusable ones" "$(reqs)" "agent.view.set {\"label\":\"x\",$SRC,\"sort\":[{\"field\":\"agent\",\"order\":\"asc\"}]}"
+check "restore ignores keys it does not use, even unusable ones" "$(reqs)" "agent.view.set {\"label\":\"x\",\"sort\":[{\"field\":\"agent\",\"order\":\"asc\"}],$SRC}"
 fresh; run set x; rc=$?
 check "set ignores unusable keys too" "$(echo "rc=$rc"; reqs)" "rc=0
-agent.view.set {\"label\":\"x\",$SRC,\"sort\":[{\"field\":\"agent\",\"order\":\"asc\"}]}"
+agent.view.set {\"label\":\"x\",\"sort\":[{\"field\":\"agent\",\"order\":\"asc\"}],$SRC}"
 
 reset
 echo '{"preset":"recent"}' > "$state"
@@ -249,6 +256,7 @@ run presets
 check "the template holds the built-in presets" "$(cat "$tmp/out")" "attention
 recent
 workspace"
+echo '# my own line' >> "$cfg"
 cp "$cfg" "$tmp/template"
 fresh; EDITOR=true VISUAL= run edit
 check "edit leaves an existing config alone" "$(cmp -s "$cfg" "$tmp/template" && echo same)" "same"
@@ -262,21 +270,21 @@ SH
 chmod +x "$tmp/editor"
 VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit runs \$VISUAL over \$EDITOR, then reapplies the active preset from the new config" "$(echo "rc=$rc"; reqs)" "rc=0
-agent.view.set {\"label\":\"attention\",$SRC,\"sort\":[{\"field\":{\"token\":\"prio\"},\"order\":\"desc\"}]}"
+agent.view.set {\"label\":\"attention\",\"sort\":[{\"field\":{\"token\":\"prio\"},\"order\":\"desc\"}],$SRC}"
 
 fresh
 cat > "$tmp/editor" <<'SH'
 #!/bin/sh
 printf '[[sort_presets]]\nname = "other"\nsort = [{ field = "agent" }]\n' > "$1"
 SH
-VISUAL="$tmp/editor" run edit; rc=$?
+VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit that drops the active preset applies nothing and says so" \
   "$(echo "rc=$rc"; reqs; grep -c 'notification show' "$tmp/calls")" "rc=0
 1"
 
 fresh
 printf '#!/bin/sh\necho "broken = = =" > "$1"\n' > "$tmp/editor"
-VISUAL="$tmp/editor" run edit; rc=$?
+VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit that leaves a broken config fails without applying" "$(echo "rc=$rc"; reqs; grep -c 'config.toml' "$tmp/err")" "rc=1
 1"
 
