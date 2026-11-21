@@ -263,34 +263,53 @@ fn object(v: Option<&Value>) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-// A pane's own priority token is the source of truth: whenever a live pane list is read (the
-// popup or an act), every agent pane's present token is copied into the saved state, so a
-// priority an agent set itself is still restored after a Herdr restart. A pane without the token
-// keeps its saved value: it cannot be told apart from a pane whose token Herdr dropped at restart.
-fn merged_priorities(rows: &[Row], st: &State) -> Option<Map<String, Value>> {
+// A pane's own priority token is the source of truth: whenever a live pane list is read (the popup
+// opening or a CLI act), a token that is an integer in 1..=max is copied into the saved state when
+// it differs from the saved value, and a token of 0 removes the saved value, so a priority an agent
+// set or cleared itself survives a Herdr restart. Any other token is shown but not copied, and a
+// pane without the token keeps its saved value: it cannot be told apart from a pane whose token
+// Herdr dropped at restart.
+fn merged_priorities(rows: &[Row], st: &State, max: u8) -> Option<Map<String, Value>> {
     let mut prio = object(st.get("prio"));
     let mut changed = false;
     for r in rows {
-        let Some(cur) = &r.prio else {
+        let Some(n) = r.prio.as_ref().and_then(Value::as_i64) else {
             continue;
         };
-        if st.lookup("prio", &r.key).as_ref() == Some(cur) {
+        if n == 0 {
+            if st.lookup("prio", &r.key).is_some() {
+                prio.remove(&r.key);
+                changed = true;
+            }
             continue;
         }
-        prio.insert(r.key.clone(), cur.clone());
+        if !(1..=i64::from(max)).contains(&n) {
+            continue;
+        }
+        let cur = Value::from(n);
+        if st.lookup("prio", &r.key).as_ref() == Some(&cur) {
+            continue;
+        }
+        prio.insert(r.key.clone(), cur);
         changed = true;
     }
     changed.then_some(prio)
 }
 
-// The popup's copy of the sync `act` does inside its own lock. Reading the list comes before the
-// lock so a slow `herdr pane list` never holds other writers up.
+// The popup's copy of the sync `act` does on the live list. The list read and the diff run without
+// the lock, so a slow `herdr pane list` never holds other writers up and an open with nothing to
+// copy creates neither the state dir nor the lock file. The diff is checked again under the lock:
+// another writer may have synced the same tokens meanwhile. Like `act`, the state is read with
+// `read_raw`, so an unreadable file fails the sync instead of being overwritten empty.
 fn sync_priorities(env: &Env, cfg: &Config, snap: &mut Snapshot) -> Res<()> {
-    snap.get(env)?;
+    let unlocked = State::load(&env.state_path);
+    let rows = snap.rows(env, cfg, &unlocked)?;
+    if merged_priorities(&rows, &unlocked, cfg.priority_max).is_none() {
+        return Ok(());
+    }
     let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
-    let st = State::load(&env.state_path);
-    let rows = snap.rows(env, cfg, &st)?;
-    let Some(prio) = merged_priorities(&rows, &st) else {
+    let st = State::parse(state::read_raw(&env.state_path)?.as_deref());
+    let Some(prio) = merged_priorities(&rows, &st, cfg.priority_max) else {
         return Ok(());
     };
     let mut new = st.0.clone();
@@ -314,8 +333,11 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
             (arg(1), arg(2), "")
         }
         "prio" => {
-            if !(arg(1).len() == 1 && arg(1).as_bytes()[0].is_ascii_digit() && arg(1) != "0") {
-                return Err("prio needs 1-9".into());
+            let in_range = arg(1)
+                .parse::<u64>()
+                .is_ok_and(|n| (1..=u64::from(cfg.priority_max)).contains(&n));
+            if !in_range {
+                return Err(format!("prio needs 1-{}", cfg.priority_max));
             }
             ("", arg(2), arg(1))
         }
@@ -331,8 +353,12 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
     let st = State::parse(before.as_deref());
     let mut new = st.0.clone();
     let rows = snap.rows(env, cfg, &st)?;
-    if let Some(prio) = merged_priorities(&rows, &st) {
-        new.insert("prio".into(), Value::Object(prio));
+    // The token merge runs only on a fresh pane list (the CLI act, which also prunes): the popup's
+    // snapshot can be minutes old, and its tokens would overwrite a priority set since it was taken.
+    if prune {
+        if let Some(prio) = merged_priorities(&rows, &st, cfg.priority_max) {
+            new.insert("prio".into(), Value::Object(prio));
+        }
     }
     // Set after the state is written, so a failed write never leaves Herdr ahead of the state.
     let mut report: Option<Option<&str>> = None;
@@ -597,9 +623,9 @@ fn preview_text(list: &Option<Value>, id: &str) -> String {
             ),
             _ => {}
         }
-        text.push_str(&section("pane", &panes));
-        text.push_str(&section("tokens", &tokens));
-        text.push_str(&section("ids", &ids));
+        text.push_str(&section("[pane]", &panes));
+        text.push_str(&section("[tokens]", &tokens));
+        text.push_str(&section("[ids]", &ids));
     }
     text
 }
@@ -730,28 +756,78 @@ mod tests {
             {"pane_id": "p1", "agent": "claude", "tokens": {"prio": "3"}},
             {"pane_id": "p2", "agent": "claude"},
             {"pane_id": "p3", "agent": "claude", "tokens": {"prio": "x"}},
-            {"pane_id": "p4", "agent": "claude", "tokens": {"prio": "9"}}
+            {"pane_id": "p4", "agent": "claude", "tokens": {"prio": "9"}},
+            {"pane_id": "p5", "agent": "claude", "tokens": {"prio": "0"}},
+            {"pane_id": "p6", "agent": "claude", "tokens": {"prio": "2.5"}}
         ]);
         // p1's agent-set priority wins over the saved one; p2 without the token keeps its saved
-        // value; p3's non-number token is not a priority and leaves the saved value alone; p4's
-        // out-of-range value is kept as written.
+        // value; p3's non-number, p4's out-of-range and p6's non-integer tokens are shown but not
+        // copied; p5's token of 0 clears its saved priority.
         let env = env_with(
             "copytoken",
             panes,
-            json!({"prio": {"p1": 1, "p2": 7, "p3": 2}}),
+            json!({"prio": {"p1": 1, "p2": 7, "p3": 2, "p5": 4}}),
         );
         let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
         let args = vec!["sort-next".to_string()];
         act(&env, &cfg, &mut Snapshot::empty(), &args, true).unwrap_or_else(|e| panic!("{e}"));
         let after = State::load(&env.state_path);
+        assert_eq!(after.get("prio"), Some(&json!({"p1": 3, "p2": 7, "p3": 2})));
+    }
+
+    #[test]
+    fn an_act_on_the_popup_snapshot_does_not_merge_pane_tokens() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude", "tokens": {"prio": "3"}}]);
+        let env = env_with("snapmerge", panes, json!({}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let args = vec!["sort-next".to_string()];
+        // prune=false is the popup path: the snapshot can be stale, so its tokens are not saved.
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(State::load(&env.state_path).get("prio"), Some(&json!({})));
+        // prune=true is the live-list path: the token is merged.
+        act(&env, &cfg, &mut Snapshot::empty(), &args, true).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
-            after.get("prio"),
-            Some(&json!({"p1": 3, "p2": 7, "p3": 2, "p4": 9}))
+            State::load(&env.state_path).get("prio"),
+            Some(&json!({"p1": 3}))
+        );
+    }
+
+    #[test]
+    fn an_act_on_one_pane_keeps_the_priorities_just_merged_from_other_panes() {
+        use std::os::unix::fs::PermissionsExt;
+        let panes = json!([
+            {"pane_id": "p1", "agent": "claude", "tokens": {"prio": "4"}},
+            {"pane_id": "p2", "agent": "claude"}
+        ]);
+        let mut env = env_with("actmerge", panes, json!({}));
+        // A herdr that accepts every report-metadata call, so act prio and act clear succeed.
+        let herdr = std::path::PathBuf::from(&env.state_dir).join("herdr");
+        std::fs::write(&herdr, "#!/bin/sh\nexit 0\n").unwrap_or_else(|e| panic!("{e}"));
+        std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("{e}"));
+        env.herdr = herdr.to_string_lossy().into_owned();
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+
+        let args: Vec<String> = ["prio", "2", "p2"].map(String::from).to_vec();
+        act(&env, &cfg, &mut Snapshot::empty(), &args, true).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("prio"),
+            Some(&json!({"p1": 4, "p2": 2})),
+            "p1's merged token and the new priority on p2 both survive"
+        );
+
+        let args: Vec<String> = ["clear", "p2"].map(String::from).to_vec();
+        act(&env, &cfg, &mut Snapshot::empty(), &args, true).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("prio"),
+            Some(&json!({"p1": 4})),
+            "clearing p2 leaves the priority merged from p1's token"
         );
     }
 
     #[test]
     fn sync_priorities_writes_only_the_priority_map_and_only_when_a_token_differs() {
+        use std::os::unix::fs::MetadataExt;
         let panes = json!([
             {"pane_id": "p1", "agent": "claude", "tokens": {"prio": "4"}},
             {"pane_id": "p2", "agent": "claude"}
@@ -767,10 +843,25 @@ mod tests {
             "p1's token is saved; p2 keeps its saved value without a token"
         );
         assert_eq!(after.get("sort"), Some(&json!("manual")));
-        let written = std::fs::read(&env.state_path).unwrap_or_default();
+        // A second sync with nothing new to copy must not rewrite the file; `state::write` would
+        // replace it, so the inode changes.
+        let inode = std::fs::metadata(&env.state_path).map(|m| m.ino()).ok();
         let mut snap = Snapshot::empty();
         sync_priorities(&env, &cfg, &mut snap).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(std::fs::read(&env.state_path).unwrap_or_default(), written);
+        assert_eq!(
+            std::fs::metadata(&env.state_path).map(|m| m.ino()).ok(),
+            inode
+        );
+    }
+
+    #[test]
+    fn sync_priorities_makes_no_lock_file_when_nothing_differs() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude", "tokens": {"prio": "2"}}]);
+        let env = env_with("syncnodiff", panes, json!({"prio": {"p1": 2}}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let mut snap = Snapshot::empty();
+        sync_priorities(&env, &cfg, &mut snap).unwrap_or_else(|e| panic!("{e}"));
+        assert!(!std::path::Path::new(&format!("{}.lock", env.state_path)).exists());
     }
 
     #[test]
@@ -779,11 +870,29 @@ mod tests {
         let env = env_with("opensync", panes, json!({}));
         let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
         let mut snap = Snapshot::empty();
-        assert!(ui::open(&env, &cfg, &mut snap).is_ok());
+        let app = ui::open(&env, &cfg, &mut snap).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(app.status, "");
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].id, "p1");
+        assert_eq!(app.rows[0].prio, Some(json!(3)));
         assert_eq!(
             State::load(&env.state_path).get("prio"),
             Some(&json!({"p1": 3}))
         );
+    }
+
+    #[test]
+    fn a_failed_sync_opens_the_popup_with_the_error_in_the_status_line() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude", "tokens": {"prio": "3"}}]);
+        let env = env_with("syncfail", panes, json!({}));
+        // A state file that exists but cannot be read: the sync fails, the popup still opens.
+        std::fs::remove_file(&env.state_path).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::create_dir(&env.state_path).unwrap_or_else(|e| panic!("{e}"));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let mut snap = Snapshot::empty();
+        let app = ui::open(&env, &cfg, &mut snap).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(app.status, format!("cannot read {}", env.state_path));
+        assert_eq!(app.rows.len(), 1);
     }
 
     #[test]
@@ -804,13 +913,13 @@ mod tests {
         assert_eq!(
             preview_text(&list, "w1:p1"),
             concat!(
-                "pane\n",
+                "[pane]\n",
                 "agent  claude\n",
                 "title  fix\n",
-                "tokens\n",
+                "[tokens]\n",
                 "repo  a\n",
                 "note  n\n",
-                "ids\n",
+                "[ids]\n",
                 "pane_id       w1:p1\n",
                 "workspace_id  w1\n",
                 "tab_id        w1:t1\n",
@@ -823,7 +932,7 @@ mod tests {
         ]}}));
         assert_eq!(
             preview_text(&bare, "w1:p1"),
-            "pane\ntitle  fix\nids\npane_id  w1:p1\n"
+            "[pane]\ntitle  fix\n[ids]\npane_id  w1:p1\n"
         );
     }
 

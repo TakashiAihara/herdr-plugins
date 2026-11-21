@@ -334,14 +334,13 @@ fn show_error(term: &mut DefaultTerminal, msg: &str) {
     }
 }
 
-// Opening the popup first copies the priority tokens agents set themselves into the state.
+// Opening the popup first copies the priority tokens agents set themselves into the state. A
+// failed sync does not stop the popup: the error waits in the status line.
 pub(crate) fn open(env: &Env, cfg: &Config, snap: &mut Snapshot) -> Res<App> {
-    sync_priorities(env, cfg, snap)?;
-    Ok(App::new(snap.rows(
-        env,
-        cfg,
-        &State::load(&env.state_path),
-    )?))
+    let failed = sync_priorities(env, cfg, snap).err();
+    let mut app = App::new(snap.rows(env, cfg, &State::load(&env.state_path))?);
+    app.status = failed.unwrap_or_default();
+    Ok(app)
 }
 
 // The popup uses this one config for the list, the keys and every act.

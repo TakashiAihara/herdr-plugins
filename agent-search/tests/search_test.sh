@@ -100,13 +100,6 @@ check "group headers have no search text" "$(pk lines | grep '^-:' | cut -f3 | t
 run act group-next
 check "group-next moves to workspace" "$(run header | head -1)" "sort: priority  group: workspace"
 run act group-next
-check "repo/workspace shows a two-level tree" \
-  "$(run header | head -1; pk lines | grep '^-:' | cut -f2 | plain | tr '\n' ';')" \
-  "sort: priority  group: repo/workspace
-── alpha (2) ──;  ── w1 (1) ──;  ── w2 (1) ──;── beta (1) ──;  ── w1 (1) ──;── gamma (1) ──;  ── w2 (1) ──;"
-check "nested agents indent under their deepest header" \
-  "$(pk lines | grep '^w1:p1' | cut -f2 | sed 's/[^ ].*$//' | tr -d '\n' | wc -c | tr -d ' ')" "8"
-run act group-next
 check "group-next wraps back to none" "$(run header | head -1)" "sort: priority  group: none"
 
 fresh
@@ -132,7 +125,9 @@ check "act clear asks herdr to clear the priority token" "$(cat "$FAKE_CALLS")" 
   "pane report-metadata w2:p2 --source takashiaihara.agent-search --clear-token prio"
 check "clear removes the priority" "$(ids)" "w1:p2 w1:p1 w2:p1 w2:p2 "
 check "clear removes the saved priority" "$(jq -c .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"w1:p2":3}'
-check "prio rejects 0" "$(run act prio 0 w1:p1 2>&1; echo "rc=$?")" "agent-search: prio needs 1-9
+check "prio rejects 0" "$(run act prio 0 w1:p1 2>&1; echo "rc=$?")" "agent-search: prio needs 1-5
+rc=1"
+check "prio rejects a number above priority_max" "$(run act prio 6 w1:p1 2>&1; echo "rc=$?")" "agent-search: prio needs 1-5
 rc=1"
 
 fresh
@@ -142,7 +137,7 @@ check "the moved pane keeps its saved priority on the next write" \
   "$(AGENT_SEARCH_LIST="$tmp/moved.json" pk act prio 2 w2:p2; jq -c '.prio' "$HERDR_PLUGIN_STATE_DIR/state.json")" \
   '{"s3":4,"w2:p2":2}'
 run act move down w1:p1
-run act prio 6 w1:p2
+run act prio 5 w1:p2
 jq '.result.panes |= map(select(.pane_id != "w1:p2"))' "$tmp/list.json" > "$tmp/closed.json"
 check "closed panes are dropped from priorities and positions on the next write" \
   "$(AGENT_SEARCH_LIST="$tmp/closed.json" pk act prio 1 w2:p2; jq -c '[.prio, (.order | keys)]' "$HERDR_PLUGIN_STATE_DIR/state.json")" \
@@ -196,7 +191,8 @@ run act prio 1 w2:p2
 check "setting a priority writes the token, which replaces the old value" "$(ids)" "w1:p1 w2:p2 w1:p2 w2:p1 "
 jq '.result.panes[3].tokens.prio = "x"' "$tmp/list.json" > "$tmp/badprio.json"
 check "a token that is not a number is no priority" \
-  "$(AGENT_SEARCH_LIST="$tmp/badprio.json" pk lines | grep -c '★')" "0"
+  "$(AGENT_SEARCH_LIST="$tmp/badprio.json" pk lines 2>/dev/null | grep -c '★'; echo "rc=${PIPESTATUS[0]}")" "0
+rc=0"
 export AGENT_SEARCH_LIST="$tmp/list.json"
 
 fresh
@@ -221,14 +217,18 @@ check "a token an agent set itself is saved on the next act, under its key" \
   "$(pk act sort-next; jq -cS .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s1":2,"s3":4}'
 check "a token that is no priority on the pane does not get saved" \
   "$(jq '.result.panes[1].tokens.prio = "x"' "$tmp/agentprio.json" > "$tmp/agentprio2.json"; AGENT_SEARCH_LIST="$tmp/agentprio2.json" pk act sort-next; jq -cS .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s1":2,"s3":4}'
+check "a token of 0 clears the pane's saved priority" \
+  "$(jq '.result.panes[0].tokens.prio = "0"' "$tmp/agentprio.json" > "$tmp/agentprio0.json"; AGENT_SEARCH_LIST="$tmp/agentprio0.json" pk act sort-next; jq -cS .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s3":4}'
 export AGENT_SEARCH_LIST="$tmp/list.json"
 
 fresh
 mkdir -p "$HERDR_PLUGIN_STATE_DIR"
 echo '{"prio":{"s1":1,"w2:p2":9}}' > "$HERDR_PLUGIN_STATE_DIR/state.json"
 jq '.result.panes[0].tokens.prio = "3" | .result.panes[2].tokens.prio = "8"' "$tmp/list.json" > "$tmp/override.json"
-check "the pane token wins over the saved priority, and out-of-range values are kept" \
-  "$(AGENT_SEARCH_LIST="$tmp/override.json" pk act sort-next; jq -cS .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s1":3,"s3":8,"w2:p2":9}'
+check "the pane token wins over the saved priority, and an out-of-range token is not copied" \
+  "$(AGENT_SEARCH_LIST="$tmp/override.json" pk act sort-next; jq -cS .prio "$HERDR_PLUGIN_STATE_DIR/state.json")" '{"s1":3,"w2:p2":9}'
+check "an out-of-range token is still shown" \
+  "$(AGENT_SEARCH_LIST="$tmp/override.json" pk lines | grep -c '★8')" "1"
 
 fresh
 run act prio 4 w2:p1
@@ -402,10 +402,15 @@ fresh
 echo '{"groups":[{"name":"g","levels":[]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "an empty levels list is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
 fresh
+echo '{"groups":[{"name":"g","levels":[["title"],[]]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an empty chain inside levels is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "$(shape_error)"
+fresh
 echo '{"groups":[{"name":"g","levels":[["tokens.repo","cwd:basename"],["workspace_id"]]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a configured levels group nests headers two spaces per level" \
   "$(pk lines | grep '^-:' | cut -f2 | plain | tr '\n' ';')" \
   "── alpha (2) ──;  ── w1 (1) ──;  ── w2 (1) ──;── beta (1) ──;  ── w1 (1) ──;── gamma (1) ──;  ── w2 (1) ──;"
+check "nested agents indent under their deepest header" \
+  "$(pk lines | grep '^w1:p1' | cut -f2 | sed 's/[^ ].*$//' | tr -d '\n' | wc -c | tr -d ' ')" "8"
 fresh
 echo '{"priority":"manual"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "the old priority setting is ignored" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
@@ -529,12 +534,12 @@ check "open launches the search pane entrypoint" "$(cat "$FAKE_CALLS")" \
   "plugin pane open --plugin takashiaihara.agent-search --entrypoint search"
 
 fresh
-check "preview splits into pane, tokens and ids sections" "$(run preview w2:p1 | grep -xcE 'pane|tokens|ids' | tr '\n' ' '; run preview w2:p1 | grep -nE '^(pane|tokens|ids)$' | cut -d: -f1,2 | sed 's/:/=/' | tr '\n' ';')" \
-  "3 1=pane;7=tokens;10=ids;"
+check "preview splits into pane, tokens and ids sections" "$(run preview w2:p1 | grep -xcE '\[pane\]|\[tokens\]|\[ids\]' | tr '\n' ' '; run preview w2:p1 | grep -nE '^\[(pane|tokens|ids)\]$' | cut -d: -f1,2 | sed 's/:/=/' | tr '\n' ';')" \
+  "3 1=[pane];7=[tokens];10=[ids];"
 check "preview token names lose the tokens. prefix" "$(run preview w2:p1 | grep -E '^(title|task)' | sed -E 's/^([^ ]+) +/\1=/' | tr '\n' ';')" \
   "title=write docs;task=urgent kaneo;"
-check "identifier fields are under ids" "$(run preview w2:p1 | awk 'f{print;exit} /^ids$/{f=1}')" "pane_id       w2:p1"
-check "a pane without tokens has no tokens section" "$(run preview w1:p2 | grep -c '^tokens$')" "0"
+check "identifier fields are under ids" "$(run preview w2:p1 | awk 'f{print;exit} /^\[ids\]$/{f=1}')" "pane_id       w2:p1"
+check "a pane without tokens has no tokens section" "$(run preview w1:p2 | grep -c '^\[tokens\]$')" "0"
 check "preview values inside a section start in one column" \
   "$(run preview w2:p1 | awk 'NF==1{s=$0;next}{match($0,/^[^ ]+ +/); if (seen[s]&&seen[s]!=RLENGTH) bad=1; seen[s]=RLENGTH}END{print bad+0}')" "0"
 check "preview lines up wide token names by display width" "$(printf '%s' '{"result":{"panes":[{"pane_id":"w1:p1","agent":"claude","title":"t","tokens":{"界界":"wide","ab":"narrow"}}]}}' > "$tmp/wide.json"; AGENT_SEARCH_LIST="$tmp/wide.json" pk preview w1:p1 | grep -E '^(界界|ab)' | python3 -c 'import sys,unicodedata as u

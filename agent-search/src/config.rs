@@ -58,8 +58,7 @@ fn defaults() -> Value {
         "groups": [
             {"name": "none", "by": []},
             {"name": "repo", "by": ["tokens.repo", "cwd:basename"]},
-            {"name": "workspace", "by": ["workspace_id"]},
-            {"name": "repo/workspace", "levels": [["tokens.repo", "cwd:basename"], ["workspace_id"]]}
+            {"name": "workspace", "by": ["workspace_id"]}
         ],
         "priority_token": "prio",
         "priority_max": 5,
@@ -121,7 +120,8 @@ fn named(v: &Value) -> Option<Vec<Named>> {
 }
 
 // A group names one fallback chain in `by`, or several in `levels` (one per header level); `by: []`
-// is the one empty case and means no grouping. Having both keys, or neither, is a config error.
+// means no grouping, but a `levels` chain may not be empty. Having both keys, or neither, is a
+// config error.
 fn groups(v: &Value) -> Option<Vec<Group>> {
     let items = v.as_array()?;
     if items.is_empty() {
@@ -143,15 +143,12 @@ fn groups(v: &Value) -> Option<Vec<Group>> {
                     vec![chain]
                 }
             }
-            (None, Some(levels)) => {
-                let chains = levels
-                    .as_array()
-                    .filter(|c| !c.is_empty())?
-                    .iter()
-                    .map(strs)
-                    .collect::<Option<Vec<_>>>()?;
-                chains
-            }
+            (None, Some(levels)) => levels
+                .as_array()
+                .filter(|c| !c.is_empty())?
+                .iter()
+                .map(non_empty_strs)
+                .collect::<Option<Vec<_>>>()?,
             _ => return None,
         };
         out.push(Group {
@@ -192,8 +189,7 @@ fn extract(v: &Value) -> Option<Config> {
         priority_max: o
             .get("priority_max")?
             .as_u64()
-            .and_then(|n| u8::try_from(n).ok())
-            .filter(|n| (1..=9).contains(n))?,
+            .and_then(|n| u8::try_from(n).ok())?,
         keys: Keys {
             sort: key(keys, "sort")?,
             group: key(keys, "group")?,
@@ -348,6 +344,8 @@ mod tests {
             r#"{"groups":[{"name":"g","by":["a"],"levels":[["b"]]}]}"#,
             r#"{"groups":[{"name":"g","by":[],"levels":[["b"]]}]}"#,
             r#"{"groups":[{"name":"g","levels":[]}]}"#,
+            r#"{"groups":[{"name":"g","levels":[[]]}]}"#,
+            r#"{"groups":[{"name":"g","levels":[["a"],[]]}]}"#,
             r#"{"groups":[{"name":"g","levels":[["a"],5]}]}"#,
             r#"{"groups":[{"name":"g","levels":"a"}]}"#,
         ] {
