@@ -39,7 +39,9 @@ while True:
     if os.path.exists(reply_file):
         body = json.loads(open(reply_file).read())
     else:
-        body = {"result": {"type": "agent_view", "active": True}}
+        # Herdr's answer: a clear that owned the view leaves nothing active.
+        cleared = rid is not None and b"agent.view.clear" in line
+        body = {"result": {"type": "agent_view", "active": not cleared}}
     body["id"] = rid
     c.sendall((json.dumps(body) + "\n").encode())
     c.close()
@@ -123,7 +125,7 @@ check "set with an unknown name fails, names it, sends nothing and keeps the sta
 
 fresh; run clear; rc=$?
 check "clear removes the plugin's view and remembers that nothing is applied" \
-  "$(echo "rc=$rc"; reqs; preset_in_state; grep -c 'notification show' "$tmp/calls")" "rc=0
+  "$(echo "rc=$rc"; reqs; preset_in_state; grep -c 'notification show.*cleared' "$tmp/calls")" "rc=0
 agent.view.clear {$SRC}
 null
 1"
@@ -170,6 +172,13 @@ check "restore with no state applies the config default, mixing tokens and field
 agent.view.set {\"filter\":{\"field\":\"status\",\"op\":\"in\",\"values\":[\"blocked\",\"done\",\"working\"]},\"label\":\"prio\",\"sort\":[{\"field\":{\"token\":\"prio\"},\"order\":\"desc\"},{\"field\":\"attention\",\"order\":\"desc\"},{\"field\":\"state_change_seq\",\"order\":\"asc\"}],$SRC}"
 fresh; run next
 check "next without state starts from the config default" "$(reqs)" "agent.view.set {\"label\":\"repo\",\"sort\":[{\"field\":{\"token\":\"repo\"},\"order\":\"asc\"}],$SRC}"
+
+fresh; echo '{"preset":"gone"}' > "$state"; run restore; rc=$?
+check "restore of a saved preset the config no longer has says so and applies the default" \
+  "$(echo "rc=$rc"; reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show.*error.*gone' "$tmp/calls"; preset_in_state)" "rc=0
+\"label\":\"prio\"
+1
+\"gone\""
 
 fresh; echo '{"preset":"gone"}' > "$state"; run next
 check "next from a preset the config no longer has starts from the first" "$(reqs | grep -o '"label":"[a-z]*"'; preset_in_state)" "\"label\":\"prio\"
