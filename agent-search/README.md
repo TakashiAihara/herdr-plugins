@@ -42,26 +42,28 @@ description = "search agents"
 
 The popup is 90% of the screen wide and 85% high, set in the plugin manifest; Herdr has no per-user override for a plugin's popup size.
 
-The right side previews the selected pane as an outline in up to three sections, in this order: `[ids]` holds every field whose name ends in `_id` (`pane_id`, `workspace_id`, `tab_id`, `terminal_id`, and any other identifier Herdr reports) under its Herdr name; `[metadata]` every other field but `tokens` (`agent`, `agent_status`, `cwd`, `title`, `state_labels`, `agent_session`, ...); `[tokens]` each token on its own line, named without the `tokens.` prefix. A scalar field is one `key  value` line; a field holding a JSON object or array (`agent_session`, `state_labels`, a token that is itself an object) is its name on one line with each entry indented two spaces below it, recursively, an array's index as the key. Every value starts in one column, and a section with nothing in it is left out. For example:
+The right side previews the selected pane as an outline in up to three sections, in this order: `[ids]` holds every field whose name ends in `_id` (`pane_id`, `workspace_id`, `tab_id`, `terminal_id`, and any other identifier Herdr reports) under its Herdr name; `[metadata]` every other field but `tokens` (`agent`, `agent_status`, `cwd`, `title`, `state_labels`, `agent_session`, ...); `[tokens]` each token on its own line, named without the `tokens.` prefix. A scalar field is one `key  value` line; a field holding a JSON object or array (`agent_session`, `state_labels`, a token that is itself an object) is its name on one line with each entry indented two spaces below it, recursively, an array's index as the key. Within a section every value starts in one column — two spaces past the section's widest key at any depth — so a long key in one section does not push another section's values right, and a section with nothing in it is left out. Fields keep the order Herdr reports them (alphabetical), like this:
 
 ```text
 [ids]
-pane_id        w2:p1
-workspace_id   w2
-tab_id         w2:t1
+pane_id       w2:p1
+tab_id        w2:t1
+terminal_id   t9
+workspace_id  w2
 [metadata]
 agent          devin
-agent_status   working
 agent_session
+  kind         id
   value        s3
-title          write docs
+agent_status   working
 cwd            /src/alpha
+title          write docs
 [tokens]
-repo           alpha
-task           urgent kaneo
+repo  alpha
+task  urgent kaneo
 ```
 
-`ctrl-o` hides the preview so the list takes the full width; the choice is saved in the state like the sort and match mode, so it wins over the configured `preview` until toggled again. `ctrl-w` toggles wrapping, saved in the state the same way and winning over `preview_wrap` until toggled again. With wrapping off (the default), a line wider than the pane is cut at its right edge. With wrapping on, a long `key  value` line continues on the next lines starting at its value column, and a long outline parent (a key with no value of its own) continues at its own indent; wrapping counts terminal cells, so a wide character is never split down the middle. `preview_hide` is a list of field paths left out of the preview — a nested entry by its path (`tokens.flags`, `agent_session.kind`) or a whole object (`state_labels`) — and only affects the preview, never the search or the list. For example, to hide the statusline helper tokens:
+`ctrl-o` hides the preview so the list takes the full width; the choice is saved in the state like the sort and match mode, so it wins over the configured `preview` until toggled again. `ctrl-w` toggles wrapping, saved in the state the same way and winning over `preview_wrap` until toggled again. With wrapping off (the default), a line wider than the pane is cut at its right edge. With wrapping on, a long `key  value` line continues on the next lines starting at its value column, and a long outline parent (a key with no value of its own) continues at its indent plus 2, where its children sit, so it does not read as a sibling key. When the value column would leave fewer than 10 cells on a continuation line, the continuation hangs at the key's indent plus 2 instead, or at column 0 when even that is too narrow. Wrapping counts terminal cells, so a wide character is never split down the middle; one too wide for even a fresh continuation line is cut rather than left overflowing the pane. `preview_hide` is a list of field paths left out of the preview — a nested entry by its path (`tokens.flags`, `agent_session.kind`) or a whole object (`state_labels`) — and only affects the preview, never the search or the list. For example, to hide the statusline helper tokens:
 
 ```json
 {"preview_hide": ["tokens.last", "tokens.mid", "tokens.flags", "tokens.prtitle"]}
@@ -75,7 +77,7 @@ The filter runs with `nucleo-matcher`, the same kind of matching as fzf, in one 
 
 `ctrl-r` toggles the mode, and the toggled mode is saved in the state like the sort and grouping: it wins over the configured `match` until toggled again.
 
-`search` and `columns` are independent lists: a field can be searchable without being shown in the list. The default `search` includes `agent_session.value`, the agent's stored native session id, so a session id finds its pane in any environment even when no token carries it.
+`search` and `columns` are independent lists: a field can be searchable without being shown in the list. The default `search` includes `agent_session.value`, the agent's stored native session id, so a session id finds its pane in any environment even when no token carries it. Search the id whole, or in `substring` mode / with a `'exact` quote: in fuzzy mode even a long prefix is only a subsequence match and can select other panes as well. A `search` field that cannot be read on a pane — a path through a value of another type, for example — counts as empty for that pane instead of failing the list; the same path in `sorts`, `groups` or `columns` stays an error.
 
 ## Priority
 

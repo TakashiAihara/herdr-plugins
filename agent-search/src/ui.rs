@@ -297,10 +297,25 @@ pub fn dispatch(app: &mut App, op: Op, run: impl FnOnce(Vec<String>) -> Res<Vec<
     }
 }
 
-// Splits one logical preview row into lines of at most `width` display cells. The first line
-// starts at column 0; continuations hang at `hang` columns. A character wider than the space
-// left on a line moves whole to the next one, never split. When the hang alone fills the
-// width there is no room for a continuation, so the line is left whole and cut instead.
+// The column a wrapped continuation of one preview row hangs at in a pane `width` cells
+// wide: the row's own `hang` while it leaves at least 10 cells for the continuation, else
+// the key's indent + 2, else column 0 — a continuation never gets less room than that.
+fn hang_for(text: &str, hang: usize, width: usize) -> usize {
+    let mut h = hang;
+    if width.saturating_sub(h) < 10 {
+        h = text.chars().take_while(|c| *c == ' ').count() + 2;
+    }
+    if width.saturating_sub(h) < 10 {
+        h = 0;
+    }
+    h
+}
+
+// Splits one logical preview row into lines of at most `width` display cells. The first
+// line starts at column 0; continuations hang at `hang` columns. A character wider than
+// the space left on a line moves whole to the next one; one that does not fit on a fresh
+// continuation either is cut, never split or left overflowing the pane. When the hang
+// alone fills the width there is no room for a continuation, so the line is left whole.
 fn wrap_cells(text: &str, hang: usize, width: usize) -> Vec<String> {
     if hang >= width {
         return vec![text.to_string()];
@@ -316,8 +331,10 @@ fn wrap_cells(text: &str, hang: usize, width: usize) -> Vec<String> {
             used = hang;
             prefix = hang;
         }
-        cur.push(c);
-        used += w;
+        if used + w <= width {
+            cur.push(c);
+            used += w;
+        }
     }
     lines.push(cur);
     lines
@@ -388,7 +405,8 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &[PreviewLine])
         let mut text = String::new();
         for l in preview {
             if app.preview_wrap {
-                for w in wrap_cells(&l.text, l.hang, width) {
+                let hang = hang_for(&l.text, l.hang, width);
+                for w in wrap_cells(&l.text, hang, width) {
                     text.push_str(&w);
                     text.push('\n');
                 }
@@ -398,7 +416,7 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &[PreviewLine])
             }
         }
         frame.render_widget(
-            Paragraph::new(text.replace('\t', "  ")).block(Block::bordered().title("preview")),
+            Paragraph::new(text).block(Block::bordered().title("preview")),
             area,
         );
     }
@@ -684,20 +702,6 @@ mod tests {
         assert_eq!(shown(&app), ["▾ alpha (1)", "a2", "▾ beta (1)", "b1"]);
         app.backspace();
         assert_eq!(shown(&app).len(), 7);
-    }
-
-    #[test]
-    fn a_query_that_is_a_session_id_finds_only_the_pane_carrying_it() {
-        // The session id sits in the row's search text (agent_session.value is a default
-        // search field) while no token holds it.
-        let mut app = App::new(vec![
-            row("a1", None, "fix login /src alpha s3 urgent"),
-            row("a2", None, "write docs /src alpha s9 review"),
-        ]);
-        for c in "s3".chars() {
-            app.type_char(c);
-        }
-        assert_eq!(shown(&app), ["a1"]);
     }
 
     #[test]
@@ -1193,6 +1197,34 @@ mod tests {
         assert_eq!(wrap_cells("key  value", 8, 8), ["key  value"]);
     }
 
+    #[test]
+    fn wrap_cells_cuts_a_character_that_fits_nowhere() {
+        // width - hang = 1: a fresh continuation holds one cell, so each wide character is
+        // cut rather than overflow. The second one must not break again — that would emit
+        // a continuation holding only the hang.
+        assert_eq!(wrap_cells("abcde日本f", 4, 5), ["abcde", "    f"]);
+        // With two cells a continuation holds one wide character per line, still whole.
+        assert_eq!(
+            wrap_cells("abcde日本f", 4, 6),
+            ["abcde", "    日", "    本", "    f"]
+        );
+    }
+
+    #[test]
+    fn hang_for_gives_up_the_value_column_when_it_leaves_too_little_room() {
+        // The row's own hang while it leaves 10 cells of continuation or more.
+        assert_eq!(hang_for("agent          claude", 15, 30), 15);
+        // Fewer than 10: the key's indent + 2 — column 2 for a top-level key.
+        assert_eq!(hang_for("agent          claude", 25, 30), 2);
+        // A nested key's fallback is its own indent + 2.
+        assert_eq!(hang_for("  value        s1", 20, 28), 4);
+        // Still fewer than 10 there: continuations start at column 0.
+        assert_eq!(hang_for("  value        s1", 20, 12), 0);
+        // An outline parent's hang is its indent + 2 already; the same rule applies.
+        assert_eq!(hang_for("agent_session", 2, 30), 2);
+        assert_eq!(hang_for("agent_session", 2, 8), 0);
+    }
+
     fn preview_screen(width: u16, app: &App, preview: &[PreviewLine]) -> Vec<String> {
         let mut term = Terminal::new(TestBackend::new(width, 8)).unwrap_or_else(|e| panic!("{e}"));
         term.draw(|f| draw(f, app, "h\nk\n", preview))
@@ -1229,8 +1261,30 @@ mod tests {
     }
 
     #[test]
+    fn a_value_column_too_far_right_falls_back_to_the_keys_indent() {
+        let mut app = grouped();
+        app.preview_wrap = true;
+        // At width 60 the preview's inner width is 22 cells; hang 20 leaves 2, under the
+        // 10 a continuation needs, so it hangs at the key's indent + 2 = column 2.
+        let preview = [PreviewLine {
+            text: "ab                  abcdefghijklmnopqrst".into(),
+            hang: 20,
+        }];
+        let lines = preview_screen(60, &app, &preview);
+        let cont = lines
+            .iter()
+            .find(|l| l.contains("cdefghijklmnopqrst"))
+            .unwrap_or_else(|| panic!("{lines:?}"));
+        assert!(cont.contains("│  cdefghijklmnopqrst"), "{cont}");
+    }
+
+    #[test]
     fn the_wrap_toggle_needs_no_pane() {
         let mut app = grouped();
+        for c in "zzzz".chars() {
+            app.type_char(c);
+        }
+        assert!(app.items.is_empty());
         let mut ran = false;
         dispatch(&mut app, Op::WrapNext, |args| {
             ran = true;

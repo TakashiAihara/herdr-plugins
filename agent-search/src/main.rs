@@ -674,8 +674,8 @@ fn node_width(nodes: &[Node], indent: usize) -> usize {
 }
 
 // One row of the preview: the logical line and the column a wrapped continuation hangs at —
-// the shared value column for a `key  value` line, the key's own indent for a bare outline
-// parent.
+// the section's value column for a `key  value` line, the key's indent + 2 for a bare
+// outline parent (its children sit there, so a continuation does not read as a sibling).
 pub struct PreviewLine {
     pub text: String,
     pub hang: usize,
@@ -695,7 +695,7 @@ fn render_nodes(nodes: &[Node], indent: usize, w: usize, out: &mut Vec<PreviewLi
             Node::Tree(k, children) => {
                 out.push(PreviewLine {
                     text: format!("{pad}{k}"),
-                    hang: indent,
+                    hang: indent + 2,
                 });
                 render_nodes(children, indent + 2, w, out);
             }
@@ -706,13 +706,14 @@ fn render_nodes(nodes: &[Node], indent: usize, w: usize, out: &mut Vec<PreviewLi
 // The preview as an outline in up to three sections: `[ids]` the pane's `*_id` fields under
 // their Herdr names, `[metadata]` every other field but `tokens` (object and array fields as
 // nodes whose entries indent two spaces below them, recursively), `[tokens]` each token as its
-// own line named without the `tokens.` prefix. All values share one column, and a section with
-// nothing in it is left out.
+// own line named without the `tokens.` prefix. Each section lines its values up on a column of
+// their own — two spaces past the section's widest key at any depth — and a section with
+// nothing in it is left out. A pane id listed twice shows only its first entry.
 pub fn preview_lines(list: &Option<Value>, id: &str, hide: &[String]) -> Vec<PreviewLine> {
     let mut ids: Vec<Node> = Vec::new();
     let mut meta: Vec<Node> = Vec::new();
     let mut toks: Vec<Node> = Vec::new();
-    for pane in pane_with_id(&lenient_panes(list), id) {
+    for pane in pane_with_id(&lenient_panes(list), id).into_iter().take(1) {
         let Some(fields) = pane.as_object() else {
             continue;
         };
@@ -742,12 +743,6 @@ pub fn preview_lines(list: &Option<Value>, id: &str, hide: &[String]) -> Vec<Pre
         }
     }
     let sections = [("[ids]", ids), ("[metadata]", meta), ("[tokens]", toks)];
-    let w = sections
-        .iter()
-        .map(|(_, nodes)| node_width(nodes, 0))
-        .max()
-        .unwrap_or(0)
-        + 2;
     let mut lines = Vec::new();
     for (name, nodes) in &sections {
         if nodes.is_empty() {
@@ -757,6 +752,8 @@ pub fn preview_lines(list: &Option<Value>, id: &str, hide: &[String]) -> Vec<Pre
             text: (*name).to_string(),
             hang: 0,
         });
+        // A short section is not pushed right by a long key in another one.
+        let w = node_width(nodes, 0) + 2;
         render_nodes(nodes, 0, w, &mut lines);
     }
     lines
@@ -1077,6 +1074,33 @@ mod tests {
     }
 
     #[test]
+    fn a_query_that_is_a_session_id_finds_its_pane_through_the_default_search_fields() {
+        // The whole path: the default config's search fields, rows::build and the popup's
+        // matching. No token holds the session id, so it can only match via
+        // agent_session.value in the default `search` list.
+        let panes = json!([
+            {"pane_id": "p1", "agent": "claude", "title": "fix", "agent_session": {"value": "sess-42"}},
+            {"pane_id": "p2", "agent": "claude", "title": "zz", "tokens": {"repo": "qq"}}
+        ]);
+        let env = env_with("sessfind", panes, json!({}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let mut snap = Snapshot::empty();
+        let mut app = ui::open(&env, &cfg, &mut snap).unwrap_or_else(|e| panic!("{e}"));
+        for c in "sess-42".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(app.selected_id().as_deref(), Some("p1"));
+        assert_eq!(
+            app.items
+                .iter()
+                .filter(|i| matches!(i, ui::Item::Pane(_)))
+                .count(),
+            1,
+            "only the pane carrying the session id matches"
+        );
+    }
+
+    #[test]
     fn a_failed_sync_opens_the_popup_with_the_error_in_the_status_line() {
         let panes = json!([{"pane_id": "p1", "agent": "claude", "tokens": {"prio": "3"}}]);
         let env = env_with("syncfail", panes, json!({}));
@@ -1111,10 +1135,10 @@ mod tests {
             preview_text(&list, "w1:p1", &[]),
             concat!(
                 "[ids]\n",
-                "pane_id        w1:p1\n",
-                "workspace_id   w1\n",
-                "tab_id         w1:t1\n",
-                "session_id     sx\n",
+                "pane_id       w1:p1\n",
+                "workspace_id  w1\n",
+                "tab_id        w1:t1\n",
+                "session_id    sx\n",
                 "[metadata]\n",
                 "agent          claude\n",
                 "title          fix\n",
@@ -1122,41 +1146,42 @@ mod tests {
                 "  value        s1\n",
                 "  kind         id\n",
                 "[tokens]\n",
-                "repo           a\n",
-                "flags          f\n",
+                "repo    a\n",
+                "flags   f\n",
                 "note\n",
-                "  deep         d\n",
+                "  deep  d\n",
                 "arr\n",
-                "  0            x\n",
-                "  1            y\n"
+                "  0     x\n",
+                "  1     y\n"
             )
         );
-        // The wrap metadata: a `key  value` line hangs at the shared value column, a bare
-        // outline parent at its own indent.
+        // The wrap metadata: a `key  value` line hangs at its section's value column, a bare
+        // outline parent at its indent + 2.
         let lines = preview_lines(&list, "w1:p1", &[]);
         let at = |text: &str| lines.iter().find(|l| l.text == text).map(|l| l.hang);
+        assert_eq!(at("[ids]"), Some(0));
         assert_eq!(at("agent          claude"), Some(15));
-        assert_eq!(at("agent_session"), Some(0));
+        assert_eq!(at("agent_session"), Some(2));
         assert_eq!(at("  value        s1"), Some(15));
-        assert_eq!(at("note"), Some(0));
-        assert_eq!(at("  deep         d"), Some(15));
+        assert_eq!(at("note"), Some(2));
+        assert_eq!(at("  deep  d"), Some(8));
         // A pane with no tokens and no extra identifiers leaves those sections out.
         let bare = Some(json!({"result": {"panes": [
             {"pane_id": "w1:p1", "title": "fix"}
         ]}}));
         assert_eq!(
             preview_text(&bare, "w1:p1", &[]),
-            "[ids]\npane_id  w1:p1\n[metadata]\ntitle    fix\n"
+            "[ids]\npane_id  w1:p1\n[metadata]\ntitle  fix\n"
         );
     }
 
     #[test]
-    fn a_nested_value_starts_in_the_same_column_as_a_top_level_value() {
-        // The nested key plus its indent is wider than any top-level key, so the shared value
-        // column is set by the nested level.
+    fn a_nested_value_starts_in_the_same_column_as_a_top_level_value_within_its_section() {
+        // Inside [metadata] the nested key plus its indent is the widest, so it sets the
+        // section's value column and both values line up on it.
         let list = Some(json!({"result": {"panes": [{
             "pane_id": "w1:p1", "agent": "claude",
-            "tokens": {"grp": {"a_rather_long_token_name": "deep"}}
+            "agent_session": {"a_rather_long_session_key": "deep"}
         }]}}));
         let out = preview_text(&list, "w1:p1", &[]);
         let col = |prefix: &str, value: &str| {
@@ -1166,7 +1191,19 @@ mod tests {
         };
         let top = col("agent ", "claude");
         assert!(top.is_some(), "{out}");
-        assert_eq!(top, col("a_rather_long_token_name", "deep"), "{out}");
+        assert_eq!(top, col("a_rather_long_session_key", "deep"), "{out}");
+    }
+
+    #[test]
+    fn a_pane_id_listed_twice_in_the_pane_list_is_previewed_once() {
+        let list = Some(json!({"result": {"panes": [
+            {"pane_id": "w1:p1", "agent": "claude", "title": "first"},
+            {"pane_id": "w1:p1", "agent": "claude", "title": "second", "tokens": {"repo": "x"}}
+        ]}}));
+        let out = preview_text(&list, "w1:p1", &[]);
+        assert!(out.contains("first"), "{out}");
+        assert!(!out.contains("second"), "{out}");
+        assert_eq!(out.matches("pane_id").count(), 1, "{out}");
     }
 
     #[test]
