@@ -66,6 +66,7 @@ pub struct Keys {
     pub group: String,
     pub r#match: String,
     pub preview: String,
+    pub wrap: String,
     pub up: String,
     pub down: String,
     pub clear: String,
@@ -80,6 +81,7 @@ pub struct Config {
     pub priority_max: u8,
     pub r#match: Match,
     pub preview: bool,
+    pub preview_wrap: bool,
     pub preview_hide: Vec<String>,
     pub keys: Keys,
 }
@@ -101,12 +103,20 @@ impl Config {
             .and_then(Value::as_bool)
             .unwrap_or(self.preview)
     }
+
+    // Whether long preview lines wrap with a hanging indent: the state's saved choice when it
+    // is a boolean, else the config's `preview_wrap`.
+    pub fn wrap_on(&self, st: &State) -> bool {
+        st.get("preview_wrap")
+            .and_then(Value::as_bool)
+            .unwrap_or(self.preview_wrap)
+    }
 }
 
 fn defaults() -> Value {
     json!({
         "columns": ["prio", "agent_status", "title"],
-        "search": ["title", "cwd", "agent", "agent_status", "terminal_title_stripped", "tokens.*"],
+        "search": ["title", "cwd", "agent", "agent_status", "terminal_title_stripped", "agent_session.value", "tokens.*"],
         "sorts": [
             {"name": "priority", "by": ["prio:desc", "manual"]},
             {"name": "manual", "by": ["manual"]},
@@ -121,8 +131,9 @@ fn defaults() -> Value {
         "priority_max": 5,
         "match": "fuzzy",
         "preview": true,
+        "preview_wrap": false,
         "preview_hide": [],
-        "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
+        "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "wrap": "ctrl-w", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
     })
 }
 
@@ -252,12 +263,14 @@ fn extract(v: &Value) -> Option<Config> {
             .and_then(|n| u8::try_from(n).ok())?,
         r#match: Match::from_name(o.get("match")?.as_str()?)?,
         preview: o.get("preview")?.as_bool()?,
+        preview_wrap: o.get("preview_wrap")?.as_bool()?,
         preview_hide: strs(o.get("preview_hide")?)?,
         keys: Keys {
             sort: key(keys, "sort")?,
             group: key(keys, "group")?,
             r#match: key(keys, "match")?,
             preview: key(keys, "preview")?,
+            wrap: key(keys, "wrap")?,
             up: key(keys, "up")?,
             down: key(keys, "down")?,
             clear: key(keys, "clear")?,
@@ -308,6 +321,11 @@ fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
             return Err(format!("{path}: preview must be true or false"));
         }
     }
+    if let Some(v) = merged.get("preview_wrap") {
+        if !v.is_boolean() {
+            return Err(format!("{path}: preview_wrap must be true or false"));
+        }
+    }
     if let Some(v) = merged.get("preview_hide") {
         let ok = v
             .as_array()
@@ -321,7 +339,7 @@ fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
     let cfg = extract(&merged).ok_or_else(|| {
         let fields = "columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)";
         if need_keys {
-            format!("{path}: {fields}, and keys sort/group/match/preview/up/down/clear non-empty strings")
+            format!("{path}: {fields}, and keys sort/group/match/preview/wrap/up/down/clear non-empty strings")
         } else {
             format!("{path}: {fields}")
         }
@@ -485,6 +503,71 @@ mod tests {
             load_json(r#"{"preview":false}"#).map(|c| c.preview),
             Ok(false)
         );
+    }
+
+    #[test]
+    fn a_preview_wrap_other_than_true_or_false_is_a_config_error_naming_the_key() {
+        for bad in ["\"yes\"", "5", "null", "[]"] {
+            let err = load_json(&format!("{{\"preview_wrap\":{bad}}}"))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                err.contains("preview_wrap must be true or false"),
+                "{bad}: {err}"
+            );
+        }
+        assert_eq!(load_json("{}").map(|c| c.preview_wrap), Ok(false));
+        assert_eq!(
+            load_json(r#"{"preview_wrap":true}"#).map(|c| c.preview_wrap),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn the_saved_wrap_choice_wins_over_the_config_and_a_non_boolean_is_ignored() {
+        let cfg = load_json("{}").unwrap_or_else(|e| panic!("{e}"));
+        let on = load_json(r#"{"preview_wrap":true}"#).unwrap_or_else(|e| panic!("{e}"));
+        let st = |s: &str| State::parse(Some(s.as_bytes()));
+        assert!(cfg.wrap_on(&st(r#"{"preview_wrap":true}"#)));
+        assert!(!cfg.wrap_on(&st(r#"{"preview_wrap":"bogus"}"#)));
+        assert!(!cfg.wrap_on(&st("{}")));
+        assert!(!on.wrap_on(&st(r#"{"preview_wrap":false}"#)));
+        assert!(on.wrap_on(&st(r#"{"preview_wrap":"bogus"}"#)));
+        assert!(on.wrap_on(&st("{}")));
+    }
+
+    #[test]
+    fn the_default_search_fields_hold_the_session_id_after_the_terminal_title_only() {
+        let cfg = load_json("{}").unwrap_or_else(|e| panic!("{e}"));
+        let i = cfg
+            .search
+            .iter()
+            .position(|s| s == "terminal_title_stripped")
+            .unwrap_or(usize::MAX);
+        assert_eq!(
+            cfg.search.get(i + 1).map(String::as_str),
+            Some("agent_session.value")
+        );
+        // Searchable does not mean shown: the session id stays out of the columns.
+        assert_eq!(
+            cfg.columns,
+            ["prio", "agent_status", "title"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn the_wrap_key_merges_key_by_key_and_is_validated_like_the_others() {
+        let cfg = load_json(r#"{"keys":{"wrap":"ctrl-t"}}"#).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.keys.wrap, "ctrl-t");
+        assert_eq!(cfg.keys.sort, "ctrl-s");
+        let err = load_json(r#"{"keys":{"wrap":"ctrl-s"}}"#)
+            .err()
+            .unwrap_or_default();
+        assert!(
+            err.contains("keys.wrap \"ctrl-s\" is the same key as keys.sort"),
+            "{err}"
+        );
+        assert!(load_json(r#"{"keys":{"wrap":""}}"#).is_err());
     }
 
     #[test]
