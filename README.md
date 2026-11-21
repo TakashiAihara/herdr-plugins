@@ -12,6 +12,7 @@ They come from running many Claude Code sessions side by side in Herdr: each plu
 | Plugin | What it does | Herdr | Platforms |
 |---|---|---|---|
 | [claude-dev-channels-accept](claude-dev-channels-accept/) | Answers Claude Code's development-channels warning so `claude --dangerously-load-development-channels` starts without a wrapper (`expect` and the like) | 0.9.3+ | Linux, macOS |
+| [agent-sort](agent-sort/) | Switches the sort of Herdr's Agents view between presets from a config file, mixing your own pane tokens with Herdr's built-in fields, from a key or a popup (prebuilt binary, no runtime dependencies) | 0.9.5+ | Linux, macOS |
 | [agent-search](agent-search/) | A popup that jumps to an agent, searching every pane field and token, and sorting, grouping, prioritizing and reordering the list (prebuilt binary, no runtime dependencies) | 0.9.5+ | Linux, macOS |
 
 Each plugin's README covers what it matches, when it acts, and where it deliberately leaves things to you.
@@ -59,6 +60,7 @@ Run every plugin's tests, as CI does on Ubuntu and macOS (build the Rust plugins
 
 ```bash
 cargo build --release --manifest-path agent-search/Cargo.toml
+cargo build --release --manifest-path agent-sort/Cargo.toml
 for t in */tests/*_test.sh; do bash "$t"; done
 ```
 
