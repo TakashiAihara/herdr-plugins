@@ -23,7 +23,7 @@ description = "launch an agent"
 ## What it does
 
 1. The key remembers the directory of the focused pane and opens a small popup.
-2. You type the task and press `Enter` (an empty line, `Ctrl-D` or `Ctrl-C` closes it without doing anything).
+2. You type the task and press `Enter`. Before that, an empty line, `Ctrl-D` or `Ctrl-C` closes the popup without doing anything.
 3. The plugin creates a workspace in that directory, labelled with the first 24 characters of the task, focuses it, and runs the command in its pane.
 
 By default the command is `claude {prompt}`: Claude Code starts with your task as its first prompt.
@@ -42,6 +42,7 @@ printf '%s\n' 'claude --model opus {prompt}' > "$(herdr plugin config-dir takash
 
 ## Limits
 
+- A directory whose path Herdr has to escape in JSON (one with `"` or `\`) is refused with an error.
 - The workspace starts in the focused pane's directory as Herdr reports it (`cwd`), not the foreground program's.
 - A failure (no focused pane, `workspace create` returning nothing) stops before anything runs; in the popup the message stays until you press `Enter`, and it shows up in `herdr plugin log list --plugin takashiaihara.agent-launch`.
 - It reads Herdr's JSON with a pattern for the 0.9.5 field order. If that changes, the plugin stops with an error rather than guessing.

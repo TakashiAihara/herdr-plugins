@@ -15,7 +15,7 @@ case "$1 $2" in
   "plugin pane") printf '%s\n' "$@" > "$FAKE_OPEN" ;;
   "workspace create") [ -n "${FAKE_WS_FAIL:-}" ] && exit 1
     printf '{"result":{"workspace":{"workspace_id":"w9"},"root_pane":{"cwd":"/x","focused":true,"pane_id":"w9:p1","revision":0}}}' ;;
-  "pane run") printf '%s' "$4" > "$FAKE_RUN" ;;
+  "pane run") printf '%s' "$4" > "$FAKE_RUN"; [ -z "${FAKE_RUN_FAIL:-}" ] ;;
 esac
 FAKE
 chmod +x "$tmp/herdr"
@@ -43,7 +43,7 @@ check "open without a focused pane opens nothing" "$([ -e "$FAKE_OPEN" ] && echo
 # ui: the default command gets the prompt as one quoted word, run in a workspace at the cwd.
 reset; printf '%s\n' "fix it's \$HOME \`x\`" | AGENT_LAUNCH_CWD=/b MODE= bash "$script" ui >/dev/null; rc=$?
 check "ui exits 0" "$rc" 0
-check "ui creates the workspace at the remembered cwd" "$(grep -c '^workspace create --cwd /b --label fix it' "$FAKE_LOG")" 1
+check "ui creates and focuses the workspace at the remembered cwd" "$(grep -c "^workspace create --cwd /b --label fix it's \$HOME \`x\` --focus$" "$FAKE_LOG")" 1
 check "ui runs the command in the new root pane" "$(grep -c '^pane run w9:p1 ' "$FAKE_LOG")" 1
 got="$(cat "$FAKE_RUN")"
 check "prompt is one literal word" "$(eval "printf '%s|' $got")" "claude|fix it's \$HOME \`x\`|"
@@ -65,5 +65,31 @@ check "empty prompt creates nothing" "$([ -e "$FAKE_LOG" ] && echo called || ech
 reset; printf '%s\n\n' "do x" | FAKE_WS_FAIL=1 AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null 2>&1; rc=$?
 check "failed workspace create exits 1" "$rc" 1
 check "failed workspace create runs nothing" "$([ -e "$FAKE_RUN" ] && echo ran || echo none)" none
+
+# ui: & and placeholders typed in the answers stay literal (single pass, no Bash 5.2 & rewrite).
+reset; printf '%s\n' 'ccxn {repo} {prompt}' > "$HERDR_PLUGIN_CONFIG_DIR/command"
+printf '%s\n%s\n' "o/{prompt}" "fix A&B in {repo}" | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null
+check "answers are not substituted again" "$(cat "$FAKE_RUN")" "ccxn 'o/{prompt}' 'fix A&B in {repo}'"
+
+# ui: the label is the first 24 characters of the task.
+reset; printf '%s\n' "abcdefghijklmnopqrstuvwxyz0123" | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null
+check "label is cut at 24 characters" "$(grep -c '^workspace create --cwd /b --label abcdefghijklmnopqrstuvwx --focus$' "$FAKE_LOG")" 1
+
+# ui: a whitespace-only task starts nothing.
+reset; printf '   \n' | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null; rc=$?
+check "blank task creates nothing" "$rc:$([ -e "$FAKE_LOG" ] && echo called || echo none)" "0:none"
+
+# ui: without the remembered directory it refuses instead of picking one.
+reset; printf '%s\n\n' "do x" | env -u AGENT_LAUNCH_CWD bash "$script" ui >/dev/null 2>&1; rc=$?
+check "missing cwd fails and creates nothing" "$rc:$([ -e "$FAKE_LOG" ] && echo called || echo none)" "1:none"
+
+# ui: a failed pane run fails.
+reset; printf '%s\n\n' "do x" | FAKE_RUN_FAIL=1 AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null 2>&1; rc=$?
+check "failed pane run exits 1" "$rc" 1
+
+# open: a cwd Herdr had to escape is refused.
+printf '{"result":{"panes":[{"cwd":"/a\\\\b","focused":true,"pane_id":"p1"}]}}' > "$FAKE_LIST"
+reset; bash "$script" open 2>/dev/null; rc=$?
+check "escaped cwd fails and opens nothing" "$rc:$([ -e "$FAKE_OPEN" ] && echo opened || echo none)" "1:none"
 
 exit $fail

@@ -21,6 +21,22 @@ template() {
   printf '%s' "${t:-$def}"
 }
 
+# One left-to-right pass over the template: text that came from a value is never scanned again,
+# and no ${var//pat/repl} is used, whose replacement Bash 5.2 rewrites ('&' is the match).
+render() {
+  local t=$1 out="" a b
+  while :; do
+    a=${t%%\{prompt\}*}; b=${t%%\{repo\}*}
+    if (( ${#a} < ${#t} && ${#a} <= ${#b} )); then
+      out+="$a$(quote "$prompt")"; t=${t:${#a}+8}
+    elif (( ${#b} < ${#t} )); then
+      out+=$b; [[ -n "$repo" ]] && out+=$(quote "$repo"); t=${t:${#b}+6}
+    else
+      printf '%s' "$out$t"; return
+    fi
+  done
+}
+
 MODE="${1:-}"
 case "$MODE" in
   open)
@@ -28,13 +44,16 @@ case "$MODE" in
     # (claude, or ccxn without a repo) runs in that repo. Fields of one pane are flat until
     # agent_session/scroll/tokens, and cwd is immediately followed by focused (herdr 0.9.5).
     list="$("$herdr" pane list)" || die "herdr pane list failed"
-    re='"cwd":"([^"]*)","focused":true'
+    # A cwd with a JSON escape (\" or \\) does not match and stops here rather than being misread.
+    re='"cwd":"([^"\\]*)","focused":true'
     [[ "$list" =~ $re ]] || die "no focused pane in herdr pane list"
     exec "$herdr" plugin pane open --plugin "${HERDR_PLUGIN_ID:-takashiaihara.agent-launch}" \
       --entrypoint prompt --env "AGENT_LAUNCH_CWD=${BASH_REMATCH[1]}" >/dev/null
     ;;
   ui)
-    cwd="${AGENT_LAUNCH_CWD:-$HOME}"
+    # open always sets it; without it the agent would start in some other directory.
+    cwd="${AGENT_LAUNCH_CWD:-}"
+    [[ -n "$cwd" ]] || die "AGENT_LAUNCH_CWD is not set (open the popup with the plugin action)"
     t="$(template)"
     echo "in: $cwd"
     echo "run: $t"
@@ -43,10 +62,9 @@ case "$MODE" in
       read -r -e -p "repo (empty = this directory)> " repo || exit 0
     fi
     read -r -e -p "prompt> " prompt || exit 0
+    # read already drops surrounding blanks, so a blank line is empty here.
     [[ -n "$prompt" ]] || exit 0
-
-    cmd="${t//\{prompt\}/$(quote "$prompt")}"
-    if [[ -n "$repo" ]]; then cmd="${cmd//\{repo\}/$(quote "$repo")}"; else cmd="${cmd//\{repo\}/}"; fi
+    cmd="$(render "$t")"
 
     # A failed create prints nothing, which the root-pane check below reports.
     out="$("$herdr" workspace create --cwd "$cwd" --label "${prompt:0:24}" --focus)"
