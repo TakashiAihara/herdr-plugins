@@ -13,13 +13,14 @@ printf '%s\n' "$*" >> "$FAKE_LOG"
 case "$1 $2" in
   "pane list") cat "$FAKE_LIST" ;;
   "plugin pane") printf '%s\n' "$@" > "$FAKE_OPEN" ;;
-  "workspace create") [ -n "${FAKE_WS_FAIL:-}" ] && exit 1
+  "workspace create") printf '%s\n' "$@" > "$FAKE_WS"; [ -n "${FAKE_WS_FAIL:-}" ] && exit 1
     printf '{"result":{"root_pane":{"cwd":"/x}y","focused":false,"pane_id":"w9:p1","revision":0,"scroll":{"viewport_rows":74},"tab_id":"w9:t1","workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"workspace":{"label":"a}b","workspace_id":"w9"}}}' ;;
   "pane run") printf '%s' "$4" > "$FAKE_RUN"; [ -z "${FAKE_RUN_FAIL:-}" ] ;;
 esac
 FAKE
 chmod +x "$tmp/herdr"
 
+export FAKE_WS="$tmp/ws"
 export HERDR_BIN_PATH="$tmp/herdr" FAKE_LOG="$tmp/log" FAKE_LIST="$tmp/list" FAKE_OPEN="$tmp/open" FAKE_RUN="$tmp/run"
 export HERDR_PLUGIN_CONFIG_DIR="$tmp/cfg"
 mkdir -p "$HERDR_PLUGIN_CONFIG_DIR"
@@ -32,8 +33,8 @@ reset() { rm -f "$FAKE_LOG" "$FAKE_OPEN" "$FAKE_RUN" "$HERDR_PLUGIN_CONFIG_DIR/c
 printf '{"result":{"panes":[{"agent":"claude","cwd":"/a","focused":false,"pane_id":"p1"},{"cwd":"/b c","focused":true,"pane_id":"p2"}]}}' > "$FAKE_LIST"
 reset; bash "$script" open; rc=$?
 check "open exits 0" "$rc" 0
-check "open opens the prompt popup with the focused pane's cwd" "$(tr '\n' ' ' < "$FAKE_OPEN")" \
-  "plugin pane open --plugin takashiaihara.agent-launch --entrypoint prompt --env AGENT_LAUNCH_CWD=/b c "
+check "open opens the prompt popup with the focused pane's cwd" "$(tr '\n' '|' < "$FAKE_OPEN")" \
+  "plugin|pane|open|--plugin|takashiaihara.agent-launch|--entrypoint|prompt|--env|AGENT_LAUNCH_CWD=/b c|"
 
 printf '{"result":{"panes":[{"cwd":"/a","focused":false,"pane_id":"p1"}]}}' > "$FAKE_LIST"
 reset; bash "$script" open 2>/dev/null; rc=$?
@@ -103,5 +104,15 @@ check "two focused panes fail and open nothing" "$rc:$([ -e "$FAKE_OPEN" ] && ec
 reset; printf '%s\n' '{repo}' > "$HERDR_PLUGIN_CONFIG_DIR/command"
 printf '\n%s\n\n' "do x" | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null 2>&1; rc=$?
 check "empty command fails and creates nothing" "$rc:$([ -e "$FAKE_LOG" ] && echo called || echo none)" "1:none"
+
+# ui: cwd and label reach workspace create as one argument each.
+reset; printf '%s\n' "fix the build" | AGENT_LAUNCH_CWD="/b c" bash "$script" ui >/dev/null
+check "cwd and label are single arguments" "$(tr '\n' '|' < "$FAKE_WS")" "workspace|create|--cwd|/b c|--label|fix the build|--no-focus|"
+
+# ui: {prompt} before {repo}, and a repo holding a single quote.
+reset; printf '%s\n' 'go {prompt} --in {repo}' > "$HERDR_PLUGIN_CONFIG_DIR/command"
+printf '%s\n%s\n' "o/it's" "do x" | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null
+got="$(cat "$FAKE_RUN")"
+check "placeholders in either order, repo quoted" "$(eval "printf '%s|' $got")" "go|do x|--in|o/it's|"
 
 exit $fail
