@@ -86,6 +86,8 @@ pub struct Config {
     pub preview_wrap: bool,
     pub preview_hide: Vec<String>,
     pub status_colors: Vec<(Status, Color)>,
+    pub popup_width: String,
+    pub popup_height: String,
     pub keys: Keys,
 }
 
@@ -146,6 +148,8 @@ fn defaults() -> Value {
         "preview_wrap": false,
         "preview_hide": [],
         "status_colors": {},
+        "popup_width": "90%",
+        "popup_height": "85%",
         "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "wrap": "ctrl-w", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
     })
 }
@@ -281,6 +285,30 @@ fn token_name(v: &Value) -> Option<String> {
         .map(String::from)
 }
 
+// A popup size for `herdr plugin pane open --width/--height`: a percentage of the screen
+// ("1%".."100%") or a positive number of cells (a u16, the range Herdr's parser takes), as a
+// JSON number or a numeric string. The result is the string the flag takes.
+fn popup_size(v: &Value) -> Option<String> {
+    let cells = |n: u64| {
+        u16::try_from(n)
+            .ok()
+            .filter(|n| *n > 0)
+            .map(|n| n.to_string())
+    };
+    match v {
+        Value::String(s) => {
+            if let Some(pct) = s.strip_suffix('%') {
+                let n = pct.parse::<u64>().ok().filter(|n| (1..=100).contains(n))?;
+                Some(format!("{n}%"))
+            } else {
+                cells(s.parse::<u64>().ok()?)
+            }
+        }
+        Value::Number(n) => cells(n.as_u64()?),
+        _ => None,
+    }
+}
+
 fn extract(v: &Value) -> Option<Config> {
     let o = v.as_object()?;
     let keys = o.get("keys")?.as_object()?;
@@ -299,6 +327,8 @@ fn extract(v: &Value) -> Option<Config> {
         preview_wrap: o.get("preview_wrap")?.as_bool()?,
         preview_hide: strs(o.get("preview_hide")?)?,
         status_colors: status_colors(o.get("status_colors")?).ok()?,
+        popup_width: popup_size(o.get("popup_width")?)?,
+        popup_height: popup_size(o.get("popup_height")?)?,
         keys: Keys {
             sort: key(keys, "sort")?,
             group: key(keys, "group")?,
@@ -316,9 +346,9 @@ pub fn load(path: &str) -> Result<Config, String> {
     load_with(path, true)
 }
 
-// `restore` never binds keys: it only needs `priority_token` and the settings that build rows, so
-// a config whose `keys` are unusable or invalid still restores priorities. Its keys are replaced
-// by the defaults before extraction; every other error still fails.
+// `restore` never binds keys or opens the popup: it only needs `priority_token` and the settings
+// that build rows, so a config whose `keys` or popup size are unusable still restores priorities.
+// Those are replaced by the defaults before extraction; every other error still fails.
 pub fn load_for_restore(path: &str) -> Result<Config, String> {
     load_with(path, false)
 }
@@ -334,8 +364,11 @@ fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
         merged = merge(merged, user);
     }
     if !need_keys {
+        // The popup size, like the keys, only matters to the popup: restore takes the defaults.
         if let Value::Object(m) = &mut merged {
-            m.insert("keys".into(), defaults()["keys"].clone());
+            for key in ["keys", "popup_width", "popup_height"] {
+                m.insert(key.into(), defaults()[key].clone());
+            }
         }
     }
     if let Some(v) = merged.get("priority_max") {
@@ -372,6 +405,15 @@ fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
     }
     if let Some(v) = merged.get("status_colors") {
         status_colors(v).map_err(|e| format!("{path}: {e}"))?;
+    }
+    for key in ["popup_width", "popup_height"] {
+        if let Some(v) = merged.get(key) {
+            if popup_size(v).is_none() {
+                return Err(format!(
+                    "{path}: {key} must be a percentage from 1% to 100% or a number of cells from 1 to 65535"
+                ));
+            }
+        }
     }
     let cfg = extract(&merged).ok_or_else(|| {
         let fields = "columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)";
@@ -744,6 +786,54 @@ mod tests {
             r#"{"columns":["title."]}"#,
         ] {
             assert!(load_json_with(bad, load_for_restore).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_popup_size_that_is_not_a_percentage_or_cell_count_is_a_config_error_naming_the_key() {
+        for key in ["popup_width", "popup_height"] {
+            for bad in [
+                "\"abc\"", "\"0%\"", "\"101%\"", "\"5.5%\"", "\"\"", "\" 40\"", "\"40 \"",
+                "\"40x\"", "0", "\"0\"", "-1", "5.5", "65536", "true", "null", "[]", "{}",
+            ] {
+                let err = load_json(&format!("{{\"{key}\":{bad}}}"))
+                    .err()
+                    .unwrap_or_default();
+                assert!(
+                    err.contains(&format!("{key} must be a percentage")),
+                    "{key}={bad}: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn popup_sizes_default_to_the_manifest_values_and_take_a_percentage_or_cell_count() {
+        let cfg = load_json("{}").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.popup_width, "90%");
+        assert_eq!(cfg.popup_height, "85%");
+        // A percentage is a string; a cell count is a JSON number or a numeric string.
+        for (json, width, height) in [
+            (r#"{"popup_width":"100%","popup_height":40}"#, "100%", "40"),
+            (r#"{"popup_width":"50","popup_height":"25"}"#, "50", "25"),
+            (r#"{"popup_width":1,"popup_height":65535}"#, "1", "65535"),
+            (
+                r#"{"popup_width":"1%","popup_height":"100%"}"#,
+                "1%",
+                "100%",
+            ),
+            (
+                r#"{"popup_width":"050%","popup_height":"+40"}"#,
+                "50%",
+                "40",
+            ),
+        ] {
+            let cfg = load_json(json).unwrap_or_else(|e| panic!("{json}: {e}"));
+            assert_eq!(
+                (cfg.popup_width.as_str(), cfg.popup_height.as_str()),
+                (width, height),
+                "{json}"
+            );
         }
     }
 }

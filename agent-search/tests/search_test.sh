@@ -677,8 +677,37 @@ check "a group header focuses nothing and succeeds" "$(run focus -:alpha 2>&1; e
 
 fresh
 run open
-check "open launches the search pane entrypoint" "$(cat "$FAKE_CALLS")" \
+check "open launches the search pane entrypoint with the default popup size" "$(cat "$FAKE_CALLS")" \
+  "plugin pane open --plugin takashiaihara.agent-search --entrypoint search --width 90% --height 85%"
+
+fresh
+echo '{"popup_width":"100%","popup_height":40}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+run open
+check "open passes the configured popup size" "$(cat "$FAKE_CALLS")" \
+  "plugin pane open --plugin takashiaihara.agent-search --entrypoint search --width 100% --height 40"
+
+fresh
+echo '{"popup_width":"60"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+run open
+check "a numeric string is a cell count and an unset key keeps its default" "$(cat "$FAKE_CALLS")" \
+  "plugin pane open --plugin takashiaihara.agent-search --entrypoint search --width 60 --height 85%"
+
+fresh
+echo '{"popup_width":"bogus"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a popup_width that is not a size is a config error naming the key" \
+  "$(run open 2>&1 >/dev/null)" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: popup_width must be a percentage from 1% to 100% or a number of cells from 1 to 65535"
+check "and the popup still opens, at the manifest's size, to show the error" "$(cat "$FAKE_CALLS")" \
   "plugin pane open --plugin takashiaihara.agent-search --entrypoint search"
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+echo '{"prio":{"w1:p1":3}}' > "$HERDR_PLUGIN_STATE_DIR/state.json" || exit 1
+check "restore ignores a bad popup size" "$(run restore >/dev/null 2>&1; echo "rc=$?")" "rc=0"
+
+fresh
+echo '{"popup_height":0}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a popup_height of 0 is a config error naming the key" \
+  "$(run open 2>&1 >/dev/null)" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: popup_height must be a percentage from 1% to 100% or a number of cells from 1 to 65535"
 
 fresh
 check "preview is an outline in ids, metadata and tokens sections" "$(run preview w2:p1 | grep -xcE '\[ids\]|\[metadata\]|\[tokens\]' | tr '\n' ' '; run preview w2:p1 | grep -nE '^\[(ids|metadata|tokens)\]$' | cut -d: -f1,2 | sed 's/:/=/' | tr '\n' ';')" \
