@@ -42,7 +42,7 @@ description = "search agents"
 
 The popup is 90% of the screen wide and 85% high, set in the plugin manifest; Herdr has no per-user override for a plugin's popup size.
 
-The right side previews the selected pane as an outline in up to three sections, in this order: `[ids]` holds every field whose name ends in `_id` (`pane_id`, `workspace_id`, `tab_id`, `terminal_id`, and any other identifier Herdr reports) under its Herdr name; `[metadata]` every other field but `tokens` (`agent`, `agent_status`, `cwd`, `title`, `state_labels`, `agent_session`, ...); `[tokens]` each token on its own line, named without the `tokens.` prefix. A scalar field is one `key  value` line; a field holding a JSON object or array (`agent_session`, `state_labels`, a token that is itself an object) is its name on one line with each entry indented two spaces below it, recursively, an array's index as the key. Within a section every value starts in one column — two spaces past the section's widest key at any depth — so a long key in one section does not push another section's values right, and a section with nothing in it is left out. Fields keep the order Herdr reports them, like this:
+The right side previews the selected pane as an outline in up to three sections, in this order: `[ids]` holds every field whose name ends in `_id` (`pane_id`, `workspace_id`, `tab_id`, `terminal_id`, and any other identifier Herdr reports) under its Herdr name; `[metadata]` every other field but `tokens` (`agent`, `agent_status`, `cwd`, `title`, `state_labels`, `agent_session`, ...); `[tokens]` each token on its own line, named without the `tokens.` prefix. A scalar field is one `key  value` line; a field holding a JSON object or array (`agent_session`, `state_labels`, a token that is itself an object) is its name on one line with each entry indented two spaces below it, recursively, an array's index as the key. Within a section every value starts in one column — two spaces past the section's widest key at any depth — so a long key in one section does not push another section's values right, and a section with nothing in it is left out. A blank line separates the sections. Fields keep the order Herdr reports them, like this:
 
 ```text
 [ids]
@@ -50,6 +50,7 @@ pane_id       w2:p1
 tab_id        w2:t1
 terminal_id   t9
 workspace_id  w2
+
 [metadata]
 agent          devin
 agent_session
@@ -58,6 +59,7 @@ agent_session
 agent_status   working
 cwd            /src/alpha
 title          write docs
+
 [tokens]
 repo  alpha
 task  urgent kaneo

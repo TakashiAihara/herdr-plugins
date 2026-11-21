@@ -753,6 +753,14 @@ pub fn preview_lines(list: &Option<Value>, id: &str, hide: &[String]) -> Vec<Pre
         if nodes.is_empty() {
             continue;
         }
+        // A blank line before every section but the first, so each heading stands apart.
+        if !lines.is_empty() {
+            lines.push(PreviewLine {
+                text: String::new(),
+                hang: 0,
+                split: None,
+            });
+        }
         lines.push(PreviewLine {
             text: (*name).to_string(),
             hang: 0,
@@ -1145,12 +1153,14 @@ mod tests {
                 "workspace_id  w1\n",
                 "tab_id        w1:t1\n",
                 "session_id    sx\n",
+                "\n",
                 "[metadata]\n",
                 "agent          claude\n",
                 "title          fix\n",
                 "agent_session\n",
                 "  value        s1\n",
                 "  kind         id\n",
+                "\n",
                 "[tokens]\n",
                 "repo    a\n",
                 "flags   f\n",
@@ -1177,7 +1187,7 @@ mod tests {
         ]}}));
         assert_eq!(
             preview_text(&bare, "w1:p1", &[]),
-            "[ids]\npane_id  w1:p1\n[metadata]\ntitle  fix\n"
+            "[ids]\npane_id  w1:p1\n\n[metadata]\ntitle  fix\n"
         );
     }
 
