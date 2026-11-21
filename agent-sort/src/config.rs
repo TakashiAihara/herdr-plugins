@@ -2,6 +2,11 @@ use serde_json::Value;
 use std::fs;
 use std::io::ErrorKind;
 
+// Herdr's agent.view.set limits (agent_view.rs MAX_LABEL_CHARS and MAX_SORT_FIELDS), checked at
+// load so a too-big config is a config error, not a rejected request at apply time.
+const MAX_NAME_CHARS: usize = 32;
+const MAX_SORT_ENTRIES: usize = 8;
+
 // The built-in sort fields agent.view.set accepts; `{"token": "<name>"}` sorts by a pane metadata
 // token instead.
 pub const FIELDS: [&str; 8] = [
@@ -235,12 +240,24 @@ fn preset(path: &str, i: usize, v: &toml::Value) -> Result<Preset, String> {
         }
         None => return Err(format!("{path}: sort preset #{i} has no name")),
     };
+    if name.chars().count() > MAX_NAME_CHARS {
+        return Err(format!(
+            "{path}: preset name {name:?} is longer than {MAX_NAME_CHARS} characters"
+        ));
+    }
 
     let sort = match t.get("sort") {
-        Some(toml::Value::Array(a)) if !a.is_empty() => a
-            .iter()
-            .map(|e| sort_entry(path, &name, e))
-            .collect::<Result<Vec<_>, _>>()?,
+        Some(toml::Value::Array(a)) if !a.is_empty() => {
+            if a.len() > MAX_SORT_ENTRIES {
+                return Err(format!(
+                    "{path}: preset {name:?} has {} sort entries (at most {MAX_SORT_ENTRIES})",
+                    a.len()
+                ));
+            }
+            a.iter()
+                .map(|e| sort_entry(path, &name, e))
+                .collect::<Result<Vec<_>, _>>()?
+        }
         Some(v) => {
             return Err(format!(
                 "{path}: preset {name:?} needs a non-empty sort, got {}",
@@ -250,11 +267,18 @@ fn preset(path: &str, i: usize, v: &toml::Value) -> Result<Preset, String> {
         None => return Err(format!("{path}: preset {name:?} has no sort")),
     };
 
-    Ok(Preset {
-        name,
-        sort,
-        filter: t.get("filter").map(to_json),
-    })
+    let filter = match t.get("filter") {
+        None => None,
+        Some(v @ toml::Value::Table(_)) => Some(to_json(v)),
+        Some(v) => {
+            return Err(format!(
+                "{path}: filter of preset {name:?} must be a table, got {}",
+                repr(v)
+            ))
+        }
+    };
+
+    Ok(Preset { name, sort, filter })
 }
 
 fn sort_entry(path: &str, preset: &str, v: &toml::Value) -> Result<SortEntry, String> {
@@ -537,6 +561,22 @@ sort = [{ token = "repo" }]
             ),
             ("sort_presets = []", "sort_presets must not be empty"),
             ("bogus = 1", "unknown key \"bogus\""),
+            (
+                "[[sort_presets]]\nname = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nsort = [{ field = \"agent\" }]",
+                "preset name \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" is longer than 32",
+            ),
+            (
+                "[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }]",
+                "preset \"x\" has 9 sort entries (at most 8)",
+            ),
+            (
+                "[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]\nfilter = \"nope\"",
+                "filter of preset \"x\" must be a table, got \"nope\"",
+            ),
+            (
+                "[[sort_presets]]\nname = \"x\"\nsort = [{ token = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }]",
+                "invalid token \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            ),
         ] {
             let e = err(text);
             assert!(
@@ -552,9 +592,26 @@ sort = [{ token = "repo" }]
             "[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]",
             "[[sort_presets]]\nname = \"x\"\nsort = [{ token = \"a0_-Z\" }]",
             "[keys]\nedit = \"ctrl-nonsense\"\n[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]",
+            "[[sort_presets]]\nname = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nsort = [{ field = \"agent\" }]",
+            "[[sort_presets]]\nname = \"x\"\nsort = [{ token = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }]",
+            "[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }, { field = \"agent\" }]",
         ] {
             parse("config.toml", text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
         }
+    }
+
+    #[test]
+    fn a_token_name_has_at_most_32_characters() {
+        let ok = format!(
+            "[[sort_presets]]\nname = \"x\"\nsort = [{{ token = \"{}\" }}]",
+            "a".repeat(32)
+        );
+        parse("config.toml", &ok).unwrap_or_else(|e| panic!("{e}"));
+        let bad = format!(
+            "[[sort_presets]]\nname = \"x\"\nsort = [{{ token = \"{}\" }}]",
+            "a".repeat(33)
+        );
+        assert!(err(&bad).contains("invalid token"), "{}", err(&bad));
     }
 
     #[test]

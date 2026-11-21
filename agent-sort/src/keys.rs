@@ -111,9 +111,10 @@ pub fn parse_key(name: &str) -> Option<Bind> {
 // Ctrl with one of these chars is the same byte a terminal sends for another key: ^M is Enter's
 // byte, ^I is Tab's, ^H is Backspace's, ^J is the byte Enter sends when the line discipline maps
 // it, ^[ is Esc's and ^@ is Ctrl-Space's. A bind named for the char either never fires, because
-// the terminal reports the other key, or it steals that key's presses.
+// the terminal reports the other key, or it steals that key's presses. The shifted spelling of a
+// control letter (`ctrl-M`, parsed as CONTROL|SHIFT|M) sends the same byte, so it is caught too.
 fn ctrl_byte(b: Bind) -> Option<&'static str> {
-    if b.mods != KeyModifiers::CONTROL {
+    if b.mods != KeyModifiers::CONTROL && b.mods != (KeyModifiers::CONTROL | KeyModifiers::SHIFT) {
         return None;
     }
     let KeyCode::Char(c) = b.code else {
@@ -314,9 +315,15 @@ mod tests {
         );
         for (name, other) in [
             ("ctrl-m", "enter"),
+            ("ctrl-j", "enter"),
             ("ctrl-i", "tab"),
             ("ctrl-h", "backspace"),
             ("ctrl-[", "esc"),
+            ("ctrl-@", "ctrl-space"),
+            ("ctrl-M", "enter"),
+            ("ctrl-J", "enter"),
+            ("ctrl-I", "tab"),
+            ("ctrl-H", "backspace"),
         ] {
             let err = resolve_keys(&format!("[keys]\nedit = \"{name}\""));
             assert!(

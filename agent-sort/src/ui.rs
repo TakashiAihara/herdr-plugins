@@ -54,7 +54,9 @@ pub struct App {
     pub presets: Vec<Preset>,
     pub current: Option<String>,
     pub cur: usize,
-    // The last failure or edit result, shown under the help line until the next key.
+    // Kept between frames so a list longer than the screen does not lose its scroll position.
+    pub list: ListState,
+    // The last failure or edit result, shown under the help line until the next action.
     pub status: String,
     pub help: String,
 }
@@ -65,10 +67,13 @@ impl App {
             .as_ref()
             .and_then(|n| presets.iter().position(|p| &p.name == n))
             .unwrap_or(0);
+        let mut list = ListState::default();
+        list.select((!presets.is_empty()).then_some(cur));
         App {
             presets,
             current,
             cur,
+            list,
             status,
             help,
         }
@@ -80,6 +85,7 @@ impl App {
         }
         let last = self.presets.len() - 1;
         self.cur = (self.cur as isize + delta).clamp(0, last as isize) as usize;
+        self.list.select(Some(self.cur));
     }
 }
 
@@ -104,17 +110,17 @@ fn help_line(sets: &[KeySet]) -> String {
 struct Loaded {
     app: App,
     binds: Binds,
+    // The [keys] resolution error when the binds are all defaults; an edit reload joins it back
+    // into the status line so it is not lost under the edit result.
+    key_err: Option<String>,
 }
 
 // The resolved key sets, or all defaults when the [keys] table cannot be used; the error goes to
 // the status line and the popup keeps working.
-fn key_sets(env: &Env, cfg: &crate::config::Config, status: &mut String) -> Vec<KeySet> {
+fn key_sets(cfg: &crate::config::Config) -> (Vec<KeySet>, Option<String>) {
     match keys::resolve(cfg.keys_raw()) {
-        Ok(sets) => sets,
-        Err(e) => {
-            *status = format!("{}: {e}", env.config_path);
-            keys::resolve(None).unwrap_or_default()
-        }
+        Ok(sets) => (sets, None),
+        Err(e) => (keys::resolve(None).unwrap_or_default(), Some(e)),
     }
 }
 
@@ -133,15 +139,19 @@ fn load(env: &Env) -> Loaded {
                     help_line(&sets),
                 ),
                 binds: Binds::new(&sets),
+                key_err: None,
             };
         }
     };
-    let mut status = String::new();
-    let sets = key_sets(env, &cfg, &mut status);
+    let (sets, key_err) = key_sets(&cfg);
+    let status = key_err
+        .as_ref()
+        .map_or(String::new(), |e| format!("{}: {e}", env.config_path));
     let current = current(&cfg, &state::read(&env.state_path)).map(String::from);
     Loaded {
         binds: Binds::new(&sets),
         app: App::new(cfg.presets, current, status, help_line(&sets)),
+        key_err,
     }
 }
 
@@ -149,7 +159,6 @@ pub fn handle_key(app: &mut App, binds: &Binds, key: KeyEvent) -> Action {
     if key.kind == KeyEventKind::Release {
         return Action::None;
     }
-    app.status.clear();
     let pressed = keys::normalize(key.code, key.modifiers);
     let Some((_, op)) = binds.0.iter().find(|(b, _)| *b == pressed) else {
         return Action::None;
@@ -157,30 +166,81 @@ pub fn handle_key(app: &mut App, binds: &Binds, key: KeyEvent) -> Action {
     match op {
         Op::Up => {
             app.move_cursor(-1);
+            app.status.clear();
             Action::None
         }
         Op::Down => {
             app.move_cursor(1);
+            app.status.clear();
             Action::None
         }
-        // From a broken config there is nothing to apply or clear; only edit and quit work.
+        // From a broken config there is nothing to apply or clear; only edit and quit work. A
+        // bound key that does nothing leaves the status line alone.
         Op::Select if app.presets.is_empty() => Action::None,
         Op::Clear if app.presets.is_empty() => Action::None,
-        Op::Select => Action::Apply(app.cur),
-        Op::Clear => Action::Clear,
-        Op::Edit => Action::Edit,
-        Op::Quit => Action::Quit,
+        Op::Select => {
+            app.status.clear();
+            Action::Apply(app.cur)
+        }
+        Op::Clear => {
+            app.status.clear();
+            Action::Clear
+        }
+        Op::Edit => {
+            app.status.clear();
+            Action::Edit
+        }
+        Op::Quit => {
+            app.status.clear();
+            Action::Quit
+        }
     }
 }
 
-fn draw(frame: &mut Frame, app: &App) {
+// Rows the status needs once Paragraph::wrap folds it to `width` columns, so a long config error
+// and its edit hint stay readable instead of truncating. Words are packed greedily; a word longer
+// than the width is broken across lines the way the widget breaks it.
+fn wrapped_height(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    let mut lines = 0;
+    for logical in text.split('\n') {
+        let mut col = 0usize;
+        for word in logical.split_whitespace() {
+            let w = word.chars().count();
+            if col > 0 && col + 1 + w <= width {
+                col += 1 + w;
+            } else {
+                if col > 0 {
+                    lines += 1;
+                }
+                if w <= width {
+                    col = w;
+                } else {
+                    lines += w / width;
+                    col = w % width;
+                }
+            }
+        }
+        lines += 1;
+    }
+    lines
+}
+
+fn draw(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    // The list needs its row plus the description and help lines; the status takes the rest, up
+    // to what the wrapped text needs.
+    let status_rows = wrapped_height(&app.status, area.width as usize)
+        .min(area.height.saturating_sub(3) as usize);
     let [list_area, desc_area, help_area, status_area] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(status_rows as u16),
     ])
-    .areas(frame.area());
+    .areas(area);
 
     let items: Vec<ListItem> = app
         .presets
@@ -197,12 +257,7 @@ fn draw(frame: &mut Frame, app: &App) {
         .block(Block::bordered().title("agent sort"))
         .highlight_symbol("> ")
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
-    let selected = (!app.presets.is_empty()).then_some(app.cur);
-    frame.render_stateful_widget(
-        list,
-        list_area,
-        &mut ListState::default().with_selected(selected),
-    );
+    frame.render_stateful_widget(list, list_area, &mut app.list);
 
     let desc = app
         .presets
@@ -217,7 +272,9 @@ fn draw(frame: &mut Frame, app: &App) {
         help_area,
     );
     frame.render_widget(
-        Paragraph::new(app.status.as_str()).style(Style::new().fg(Color::Red)),
+        Paragraph::new(app.status.as_str())
+            .style(Style::new().fg(Color::Red))
+            .wrap(Wrap { trim: false }),
         status_area,
     );
 }
@@ -249,7 +306,7 @@ fn show_error(term: &mut DefaultTerminal, msg: &str) {
 fn session(env: &Env, term: &mut DefaultTerminal) -> Res<()> {
     let mut loaded = load(env);
     loop {
-        term.draw(|f| draw(f, &loaded.app))
+        term.draw(|f| draw(f, &mut loaded.app))
             .map_err(|e| format!("cannot draw the screen: {e}"))?;
         let Event::Key(key) =
             event::read().map_err(|e| format!("cannot read the keyboard: {e}"))?
@@ -266,8 +323,11 @@ fn session(env: &Env, term: &mut DefaultTerminal) -> Res<()> {
                     Err(e) => loaded.app.status = e,
                 }
             }
-            Action::Clear => match crate::clear(env) {
-                Ok(()) => return Ok(()),
+            Action::Clear => match crate::clear_view(env) {
+                Ok(crate::ClearOutcome::Cleared) => return Ok(()),
+                Ok(crate::ClearOutcome::Kept(source)) => {
+                    loaded.app.status = crate::clear_message(&crate::ClearOutcome::Kept(source));
+                }
                 Err(e) => loaded.app.status = e,
             },
             Action::Edit => {
@@ -285,7 +345,15 @@ fn session(env: &Env, term: &mut DefaultTerminal) -> Res<()> {
                     }
                 };
                 loaded = load(env);
-                loaded.app.status = status;
+                // The edit result joins what is still wrong: a key error, or the edit hint while
+                // the config is still broken.
+                let mut parts = vec![status];
+                if let Some(e) = loaded.key_err.clone() {
+                    parts.push(format!("keys: {e}"));
+                } else if !loaded.app.status.is_empty() {
+                    parts.push("press e to edit".into());
+                }
+                loaded.app.status = parts.join("; ");
             }
         }
     }
@@ -328,7 +396,7 @@ mod tests {
             ],
             Some("recent".into()),
             String::new(),
-            "up/k down/j move".into(),
+            help_line(&keys::resolve(None).unwrap_or_else(|e| panic!("{e}"))),
         )
     }
 
@@ -344,6 +412,7 @@ mod tests {
     fn the_cursor_starts_on_the_current_preset_and_moves_within_the_list() {
         let mut app = app();
         assert_eq!(app.cur, 1, "cursor on current \"recent\"");
+        assert_eq!(app.list.selected(), Some(1));
         let binds = binds();
         handle_key(&mut app, &binds, key(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.cur, 2);
@@ -363,6 +432,45 @@ mod tests {
         assert_eq!(app.cur, 0);
         handle_key(&mut app, &binds, key(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(app.cur, 0);
+        assert_eq!(
+            app.list.selected(),
+            Some(0),
+            "the list state tracks the cursor"
+        );
+    }
+
+    #[test]
+    fn the_cursor_falls_back_to_the_first_row_when_the_current_preset_is_gone() {
+        let app = App::new(
+            vec![preset("a", false), preset("b", false)],
+            Some("gone".into()),
+            String::new(),
+            String::new(),
+        );
+        assert_eq!(app.cur, 0);
+        assert_eq!(app.list.selected(), Some(0));
+    }
+
+    #[test]
+    fn a_key_that_does_nothing_keeps_the_status_an_action_clears_it() {
+        let mut app = app();
+        app.status = "boom".into();
+        let binds = binds();
+        handle_key(
+            &mut app,
+            &binds,
+            key(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.status, "boom", "an unbound key keeps the status");
+        handle_key(&mut app, &binds, key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(app.status.is_empty(), "a move clears the status");
+
+        let mut empty = App::new(vec![], None, "bad config".into(), String::new());
+        handle_key(&mut empty, &binds, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            empty.status, "bad config",
+            "select on an empty list does nothing and keeps the status"
+        );
     }
 
     #[test]
@@ -443,8 +551,9 @@ mod tests {
     fn the_screen_shows_the_list_preview_help_and_status() {
         let mut app = app();
         app.status = "cannot apply".into();
-        let mut term = Terminal::new(TestBackend::new(50, 10)).unwrap_or_else(|e| panic!("{e}"));
-        term.draw(|f| draw(f, &app))
+        let help = app.help.clone();
+        let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap_or_else(|e| panic!("{e}"));
+        term.draw(|f| draw(f, &mut app))
             .unwrap_or_else(|e| panic!("{e}"));
         let buf = term.backend().buffer();
         let screen: Vec<String> = (0..buf.area.height)
@@ -454,23 +563,84 @@ mod tests {
         assert!(all.contains("attention"), "{all}");
         assert!(all.contains("recent (current)"), "{all}");
         assert!(all.contains("sort: attention desc"), "{all}");
-        assert!(all.contains("up/k down/j move"), "{all}");
+        assert!(all.contains(&help), "{all}");
         assert!(all.contains("cannot apply"), "{all}");
     }
 
     #[test]
-    fn a_key_error_falls_back_to_all_default_binds() {
-        let raw = toml::from_str::<toml::Table>("[keys]\nselect = \"ctrl-nonsense\"")
-            .unwrap_or_else(|e| panic!("{e}"));
-        let sets = keys::resolve(raw.get("keys")).err();
-        assert!(sets.is_some());
+    fn the_help_line_names_the_default_binds() {
         let sets = keys::resolve(None).unwrap_or_else(|e| panic!("{e}"));
-        let binds = Binds::new(&sets);
+        let help = help_line(&sets);
+        for name in [
+            "up", "k", "down", "j", "enter", "e", "0", "esc", "q", "ctrl-c",
+        ] {
+            assert!(help.contains(name), "{name} not in {help}");
+        }
+        assert_eq!(app().help, help);
+    }
+
+    #[test]
+    fn a_long_status_wraps_over_as_many_rows_as_it_needs() {
         let mut app = app();
+        app.status =
+            "/cfg/config.toml: unknown key \"bogus\" in keys.edit (press e to edit)".into();
+        let mut term = Terminal::new(TestBackend::new(30, 8)).unwrap_or_else(|e| panic!("{e}"));
+        term.draw(|f| draw(f, &mut app))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let buf = term.backend().buffer();
+        let screen: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let all = screen.join("\n");
+        // Wrapping splits phrases across rows; compare on collapsed whitespace.
+        let flat = all.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(all.contains("bogus"), "{all}");
+        assert!(flat.contains("press e to edit"), "{all}");
+    }
+
+    #[test]
+    fn wrapped_height_counts_word_wrapped_lines() {
+        assert_eq!(wrapped_height("one", 10), 1);
+        assert_eq!(wrapped_height("aa bb cc", 5), 2);
         assert_eq!(
-            handle_key(&mut app, &binds, key(KeyCode::Enter, KeyModifiers::NONE)),
-            Action::Apply(1),
+            wrapped_height("a bbbbbb c", 5),
+            3,
+            "a word wider than the line breaks"
+        );
+        assert_eq!(wrapped_height("aaa\nbbb", 10), 2);
+        assert_eq!(wrapped_height("anything", 0), 0);
+    }
+
+    #[test]
+    fn a_key_error_falls_back_to_all_default_binds() {
+        let dir = crate::testutil::unique_dir("ui-keys");
+        let cfg_dir = dir.join("cfg");
+        std::fs::create_dir_all(&cfg_dir).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            cfg_dir.join("config.toml"),
+            "[keys]\nselect = \"ctrl-nonsense\"\n[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let env = Env::test(
+            &cfg_dir.to_string_lossy(),
+            &dir.join("state").to_string_lossy(),
+        );
+        let loaded = load(&env);
+        assert!(
+            loaded.key_err.is_some_and(|e| e.contains("ctrl-nonsense")),
+            "the key error is kept for the status join"
+        );
+        assert!(loaded.app.status.contains("config.toml"));
+        let mut app = loaded.app;
+        assert_eq!(
+            handle_key(
+                &mut app,
+                &loaded.binds,
+                key(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            Action::Apply(0),
             "the default select still applies after a key error"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -85,6 +85,19 @@ impl Env {
         }
     }
 
+    #[cfg(test)]
+    pub fn test(config_dir: &str, state_dir: &str) -> Env {
+        Env {
+            herdr: "true".into(),
+            config_path: format!("{config_dir}/config.toml"),
+            config_dir: config_dir.into(),
+            state_path: format!("{state_dir}/state.json"),
+            state_dir: state_dir.into(),
+            socket: String::new(),
+            plugin_id: "test.agent-sort".into(),
+        }
+    }
+
     fn config(&self) -> Res<Config> {
         config::load(&self.config_path)
     }
@@ -124,14 +137,10 @@ impl Env {
     }
 
     // `herdr notification show`; output is captured, never inherited, and a failure changes
-    // nothing: a notification is nice to have, not part of the result.
+    // nothing: a notification is nice to have, not part of the result. Herdr sanitizes and trims
+    // the title itself, so it goes as is.
     fn notify(&self, title: &str, body: Option<&str>) {
-        let title: String = title
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .take(79)
-            .collect();
-        let mut args = vec!["notification".into(), "show".into(), title];
+        let mut args = vec!["notification".into(), "show".into(), title.to_string()];
         if let Some(b) = body {
             args.push("--body".into());
             args.push(b.into());
@@ -196,7 +205,8 @@ fn presets(env: &Env) -> Res<()> {
 }
 
 // The preset `next` applies: the one after the current, wrapping; the first when the current is
-// unset or no longer in the config.
+// none or missing from the config. The current preset is the state's name, else the config's
+// default.
 fn next_preset<'a>(cfg: &'a Config, saved: &Saved) -> &'a Preset {
     let i = match current(cfg, saved).and_then(|n| cfg.index(n)) {
         Some(i) => (i + 1) % cfg.presets.len(),
@@ -219,20 +229,81 @@ fn set(env: &Env, name: &str) -> Res<()> {
     apply(env, preset)
 }
 
+// What the Agents view looks like after `agent.view.clear` with our source.
+pub enum ClearOutcome {
+    // Nothing is overriding the view anymore.
+    Cleared,
+    // Our clear did not own the active view, so another source's view is still on: it names the
+    // remaining view's source.
+    Kept(String),
+}
+
+// What the clear result says: `active` and `source` describe the override left after our clear,
+// so `active` means another source holds the view (Herdr never reports our source there: a clear
+// that owned the view removes it).
+fn clear_outcome(resp: &Value) -> ClearOutcome {
+    let result = resp.get("result").unwrap_or(&Value::Null);
+    if result.get("active").and_then(Value::as_bool) == Some(true) {
+        let source = result
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("another source");
+        ClearOutcome::Kept(source.to_string())
+    } else {
+        ClearOutcome::Cleared
+    }
+}
+
+// The one-line outcome the notification and the popup's status line share.
+fn clear_message(outcome: &ClearOutcome) -> String {
+    match outcome {
+        ClearOutcome::Cleared => "Agents sort cleared".into(),
+        ClearOutcome::Kept(source) => format!("Agents view is set by {source}; left as is"),
+    }
+}
+
+// Sends the clear, then saves `{"preset":null}`: our preset is not applied in either outcome.
+fn clear_view(env: &Env) -> Res<ClearOutcome> {
+    let resp = env.call(&request::clear(&env.plugin_id))?;
+    state::write(&env.state_dir, &env.state_path, None)?;
+    Ok(clear_outcome(&resp))
+}
+
 fn clear(env: &Env) -> Res<()> {
-    env.call(&request::clear(&env.plugin_id))
-        .map_err(|e| notified(env, e))?;
-    state::write(&env.state_dir, &env.state_path, None).map_err(|e| notified(env, e))?;
-    env.notify_ok("Agents sort cleared");
+    let outcome = clear_view(env).map_err(|e| notified(env, e))?;
+    env.notify_ok(&clear_message(&outcome));
     Ok(())
 }
 
+// What restore does: the preset to apply (if any), and the "no longer in the config" notification
+// body when the state's name is gone from the config.
+fn restore_plan<'a>(cfg: &'a Config, saved: &Saved) -> (Option<&'a Preset>, Option<String>) {
+    let mut name = match saved {
+        Saved::Named(n) => Some(n.clone()),
+        Saved::Cleared => return (None, None),
+        Saved::Unset => cfg.default.clone(),
+    };
+    let mut warn = None;
+    if let Some(n) = &name {
+        if cfg.preset(n).is_none() {
+            warn = Some(format!("the saved preset {n:?} is no longer in the config"));
+            name = cfg.default.clone();
+        }
+    }
+    (name.as_deref().and_then(|n| cfg.preset(n)), warn)
+}
+
 // The startup hook: re-apply what the state (or the config default) says, without touching the
-// state and without a notification.
+// state. Success is silent; failures notify. A saved preset the config no longer has gets an
+// error notification, then the config default is applied when there is one.
 fn restore(env: &Env) -> Res<()> {
     let cfg = env.config().map_err(|e| notified(env, e))?;
     let saved = state::read(&env.state_path);
-    let Some(preset) = current(&cfg, &saved).and_then(|n| cfg.preset(n)) else {
+    let (preset, warn) = restore_plan(&cfg, &saved);
+    if let Some(w) = warn {
+        env.notify_error(&w);
+    }
+    let Some(preset) = preset else {
         return Ok(());
     };
     env.call(&request::set(&env.plugin_id, preset))
@@ -410,6 +481,58 @@ mod tests {
     fn next_starts_from_the_config_default_when_the_state_is_unset() {
         let c = cfg(&["prio", "repo"], Some("prio"));
         assert_eq!(next_preset(&c, &Saved::Unset).name, "repo");
+    }
+
+    #[test]
+    fn restore_reapplies_warns_on_a_gone_preset_and_falls_back_to_the_default() {
+        let c = cfg(&["a", "b"], Some("b"));
+        let (p, w) = restore_plan(&c, &Saved::Named("a".into()));
+        assert_eq!(p.map(|p| p.name.as_str()), Some("a"));
+        assert_eq!(w, None);
+        let (p, w) = restore_plan(&c, &Saved::Named("gone".into()));
+        assert_eq!(
+            p.map(|p| p.name.as_str()),
+            Some("b"),
+            "the config default applies"
+        );
+        assert_eq!(
+            w.as_deref(),
+            Some("the saved preset \"gone\" is no longer in the config")
+        );
+        let no_default = cfg(&["a"], None);
+        let (p, w) = restore_plan(&no_default, &Saved::Named("gone".into()));
+        assert_eq!(p.map(|p| p.name.as_str()), None, "nothing to fall back to");
+        assert!(w.is_some());
+        let (p, w) = restore_plan(&c, &Saved::Cleared);
+        assert_eq!((p.is_none(), w.is_none()), (true, true));
+        let (p, w) = restore_plan(&c, &Saved::Unset);
+        assert_eq!((p.map(|p| p.name.as_str()), w.is_none()), (Some("b"), true));
+        let (p, w) = restore_plan(&no_default, &Saved::Unset);
+        assert_eq!((p.is_none(), w.is_none()), (true, true));
+    }
+
+    #[test]
+    fn a_clear_result_reads_the_view_left_afterwards() {
+        let cleared = clear_outcome(&serde_json::json!({
+            "result": {"type": "agent_view", "active": false}
+        }));
+        assert_eq!(clear_message(&cleared), "Agents sort cleared");
+        let kept = clear_outcome(&serde_json::json!({
+            "result": {"type": "agent_view", "active": true, "source": "plugin:other.thing", "label": "x"}
+        }));
+        assert_eq!(
+            clear_message(&kept),
+            "Agents view is set by plugin:other.thing; left as is"
+        );
+        let kept_unnamed = clear_outcome(&serde_json::json!({
+            "result": {"type": "agent_view", "active": true}
+        }));
+        assert_eq!(
+            clear_message(&kept_unnamed),
+            "Agents view is set by another source; left as is"
+        );
+        let no_result = clear_outcome(&serde_json::json!({"id": "agent-sort"}));
+        assert_eq!(clear_message(&no_result), "Agents sort cleared");
     }
 
     #[test]
