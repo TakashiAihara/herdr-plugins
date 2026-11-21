@@ -16,6 +16,9 @@ cat > "$tmp/bin/cargo" <<'FAKE'
 echo "cargo $* in $(pwd) target=${CARGO_TARGET_DIR:-}" >> "$FAKE_CARGO_LOG"
 td=
 while [ $# -gt 0 ]; do [ "$1" = --target-dir ] && td=$2; shift; done
+# Like cargo: without --target-dir the build goes to CARGO_TARGET_DIR, so a script that drops the
+# flag shows up as files under it.
+[ -z "$td" ] && td=${CARGO_TARGET_DIR:-}
 [ -n "$td" ] && mkdir -p "$td/release" && echo built > "$td/release/agent-sort"
 exit 0
 FAKE

@@ -70,8 +70,11 @@ reqs() {
 import json, sys
 for line in open(sys.argv[1]):
     if line.strip():
-        r = json.loads(line)
-        print(r["method"], json.dumps(r["params"], sort_keys=True, separators=(",", ":")))
+        try:
+            r = json.loads(line)
+            print(r["method"], json.dumps(r["params"], sort_keys=True, separators=(",", ":")))
+        except Exception:
+            print("UNPARSABLE", line.strip())
 ' "$tmp/reqs"
 }
 preset_in_state() { python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("preset", "missing")))' "$state" 2>/dev/null || echo "no state"; }
@@ -129,7 +132,8 @@ fresh; run restore; rc=$?
 check "restore after clear sends nothing" "$(echo "rc=$rc"; reqs)" "rc=0"
 
 fresh; run next
-check "next after clear starts again from the first preset" "$(preset_in_state)" "\"attention\""
+check "next after clear starts again from the first preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
+\"attention\""
 
 fresh; run set recent; fresh; run restore; rc=$?
 check "restore applies the saved preset" "$(echo "rc=$rc"; reqs)" "rc=0
@@ -168,7 +172,8 @@ fresh; run next
 check "next without state starts from the config default" "$(reqs)" "agent.view.set {\"label\":\"repo\",\"sort\":[{\"field\":{\"token\":\"repo\"},\"order\":\"asc\"}],$SRC}"
 
 fresh; echo '{"preset":"gone"}' > "$state"; run next
-check "next from a preset the config no longer has starts from the first" "$(preset_in_state)" "\"prio\""
+check "next from a preset the config no longer has starts from the first" "$(reqs | grep -o '"label":"[a-z]*"'; preset_in_state)" "\"label\":\"prio\"
+\"prio\""
 
 bad() { # bad <description> <config> <text the error must contain>
   reset; echo '{"preset":"x"}' > "$state"; printf '%s\n' "$2" > "$cfg"
@@ -279,7 +284,12 @@ printf '[[sort_presets]]\nname = "other"\nsort = [{ field = "agent" }]\n' > "$1"
 SH
 VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit that drops the active preset applies nothing and says so" \
-  "$(echo "rc=$rc"; reqs; grep -c 'notification show' "$tmp/calls")" "rc=0
+  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*attention.*gone' "$tmp/calls")" "rc=0
+1"
+
+fresh
+VISUAL=false run edit; rc=$?
+check "an editor that fails is an error and applies nothing" "$(echo "rc=$rc"; reqs; grep -c 'editor' "$tmp/err")" "rc=1
 1"
 
 fresh

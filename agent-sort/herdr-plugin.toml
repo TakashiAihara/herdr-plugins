@@ -22,8 +22,8 @@ command = ["target/release/agent-sort", "open"]
 id = "picker"
 title = "Agent sort"
 placement = "popup"
-width = 60
-height = 20
+width = "80%"
+height = "60%"
 command = ["target/release/agent-sort", "ui"]
 
 # A view set through agent.view.set lasts only until the server exits; apply the saved preset again.
