@@ -24,7 +24,7 @@ description = "launch an agent"
 
 1. The key remembers the directory of the focused pane and opens a small popup.
 2. You type the task and press `Enter`. Before that, an empty line, `Ctrl-D` or `Ctrl-C` closes the popup without doing anything.
-3. The plugin creates a workspace in that directory, labelled with the first 24 characters of the task, focuses it, and runs the command in its pane.
+3. The plugin creates a workspace in that directory, labelled with the first 24 characters of the task, runs the command in its pane, and then focuses it.
 
 By default the command is `claude {prompt}`: Claude Code starts with your task as its first prompt.
 

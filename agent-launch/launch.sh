@@ -68,11 +68,17 @@ case "$MODE" in
     [[ -n "$prompt" ]] || exit 0
     cmd="$(render "$t")"
 
-    # A failed create prints nothing, which the root-pane check below reports.
-    out="$("$herdr" workspace create --cwd "$cwd" --label "${prompt:0:24}" --focus)"
+    [[ -n "${cmd//[[:space:]]/}" ]] || die "the command template renders to nothing: $t"
+
+    # Focus moves last: this popup may close once it loses focus, and the command must be sent by then.
+    out="$("$herdr" workspace create --cwd "$cwd" --label "${prompt:0:24}" --no-focus)"
+    re='"workspace":\{[^}]*"workspace_id":"([^"]+)"'
+    [[ "$out" =~ $re ]] || die "herdr workspace create returned no workspace: $out"
+    ws="${BASH_REMATCH[1]}"
     re='"root_pane":\{[^}]*"pane_id":"([^"]+)"'
     [[ "$out" =~ $re ]] || die "herdr workspace create returned no root pane: $out"
     "$herdr" pane run "${BASH_REMATCH[1]}" "$cmd" >/dev/null || die "herdr pane run failed"
+    "$herdr" workspace focus "$ws" >/dev/null || die "herdr workspace focus failed"
     ;;
   *) die "usage: launch.sh open|ui" ;;
 esac

@@ -14,7 +14,7 @@ case "$1 $2" in
   "pane list") cat "$FAKE_LIST" ;;
   "plugin pane") printf '%s\n' "$@" > "$FAKE_OPEN" ;;
   "workspace create") [ -n "${FAKE_WS_FAIL:-}" ] && exit 1
-    printf '{"result":{"workspace":{"workspace_id":"w9"},"root_pane":{"cwd":"/x","focused":true,"pane_id":"w9:p1","revision":0}}}' ;;
+    printf '{"result":{"root_pane":{"cwd":"/x","focused":false,"pane_id":"w9:p1","revision":0,"scroll":{"viewport_rows":74},"tab_id":"w9:t1","workspace_id":"w9"},"workspace":{"workspace_id":"w9"}}}' ;;
   "pane run") printf '%s' "$4" > "$FAKE_RUN"; [ -z "${FAKE_RUN_FAIL:-}" ] ;;
 esac
 FAKE
@@ -43,8 +43,9 @@ check "open without a focused pane opens nothing" "$([ -e "$FAKE_OPEN" ] && echo
 # ui: the default command gets the prompt as one quoted word, run in a workspace at the cwd.
 reset; printf '%s\n' "fix it's \$HOME \`x\`" | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null; rc=$?
 check "ui exits 0" "$rc" 0
-check "ui creates and focuses the workspace at the remembered cwd" "$(grep -c "^workspace create --cwd /b --label fix it's \$HOME \`x\` --focus$" "$FAKE_LOG")" 1
-check "ui runs the command in the new root pane" "$(grep -c '^pane run w9:p1 ' "$FAKE_LOG")" 1
+check "ui creates, runs, then focuses, in that order" "$(cut -d' ' -f1-3 "$FAKE_LOG" | tr '\n' '|')" \
+  "workspace create --cwd|pane run w9:p1|workspace focus w9|"
+check "the workspace is created unfocused at the remembered cwd" "$(grep -c "^workspace create --cwd /b --label fix it's \$HOME \`x\` --no-focus$" "$FAKE_LOG")" 1
 got="$(cat "$FAKE_RUN")"
 check "prompt is one literal word" "$(eval "printf '%s|' $got")" "claude|fix it's \$HOME \`x\`|"
 
@@ -73,7 +74,7 @@ check "answers are not substituted again" "$(cat "$FAKE_RUN")" "ccxn 'o/{prompt}
 
 # ui: the label is the first 24 characters of the task.
 reset; printf '%s\n' "abcdefghijklmnopqrstuvwxyz0123" | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null
-check "label is cut at 24 characters" "$(grep -c '^workspace create --cwd /b --label abcdefghijklmnopqrstuvwx --focus$' "$FAKE_LOG")" 1
+check "label is cut at 24 characters" "$(grep -c '^workspace create --cwd /b --label abcdefghijklmnopqrstuvwx --no-focus$' "$FAKE_LOG")" 1
 
 # ui: a whitespace-only task starts nothing.
 reset; printf '   \n' | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null; rc=$?
@@ -96,5 +97,10 @@ check "escaped cwd fails and opens nothing" "$rc:$([ -e "$FAKE_OPEN" ] && echo o
 printf '{"result":{"panes":[{"cwd":"/a","focused":true,"pane_id":"p1"},{"cwd":"/b","focused":true,"pane_id":"p2"}]}}' > "$FAKE_LIST"
 reset; bash "$script" open 2>/dev/null; rc=$?
 check "two focused panes fail and open nothing" "$rc:$([ -e "$FAKE_OPEN" ] && echo opened || echo none)" "1:none"
+
+# ui: a template that renders to nothing creates nothing.
+reset; printf '%s\n' '{repo}' > "$HERDR_PLUGIN_CONFIG_DIR/command"
+printf '\n%s\n\n' "do x" | AGENT_LAUNCH_CWD=/b bash "$script" ui >/dev/null 2>&1; rc=$?
+check "empty command fails and creates nothing" "$rc:$([ -e "$FAKE_LOG" ] && echo called || echo none)" "1:none"
 
 exit $fail
