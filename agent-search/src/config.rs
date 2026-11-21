@@ -1,3 +1,4 @@
+use crate::state::State;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
@@ -28,9 +29,42 @@ impl HasName for Group {
     }
 }
 
+// How the popup's filter matches a query word: fuzzy, letters in order with gaps allowed, or
+// substring, the word appearing contiguously.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Match {
+    Fuzzy,
+    Substring,
+}
+
+impl Match {
+    pub fn name(self) -> &'static str {
+        match self {
+            Match::Fuzzy => "fuzzy",
+            Match::Substring => "substring",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Match> {
+        match name {
+            "fuzzy" => Some(Match::Fuzzy),
+            "substring" => Some(Match::Substring),
+            _ => None,
+        }
+    }
+
+    pub fn other(self) -> Match {
+        match self {
+            Match::Fuzzy => Match::Substring,
+            Match::Substring => Match::Fuzzy,
+        }
+    }
+}
+
 pub struct Keys {
     pub sort: String,
     pub group: String,
+    pub r#match: String,
     pub up: String,
     pub down: String,
     pub clear: String,
@@ -43,7 +77,19 @@ pub struct Config {
     pub groups: Vec<Group>,
     pub priority_token: String,
     pub priority_max: u8,
+    pub r#match: Match,
     pub keys: Keys,
+}
+
+impl Config {
+    // The mode in effect: the state's saved mode when it names one, else the config's. A saved
+    // value that is not a mode name is ignored.
+    pub fn mode(&self, st: &State) -> Match {
+        st.get("match")
+            .and_then(Value::as_str)
+            .and_then(Match::from_name)
+            .unwrap_or(self.r#match)
+    }
 }
 
 fn defaults() -> Value {
@@ -62,7 +108,8 @@ fn defaults() -> Value {
         ],
         "priority_token": "prio",
         "priority_max": 5,
-        "keys": {"sort": "ctrl-s", "group": "ctrl-g", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
+        "match": "fuzzy",
+        "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
     })
 }
 
@@ -190,9 +237,11 @@ fn extract(v: &Value) -> Option<Config> {
             .get("priority_max")?
             .as_u64()
             .and_then(|n| u8::try_from(n).ok())?,
+        r#match: Match::from_name(o.get("match")?.as_str()?)?,
         keys: Keys {
             sort: key(keys, "sort")?,
             group: key(keys, "group")?,
+            r#match: key(keys, "match")?,
             up: key(keys, "up")?,
             down: key(keys, "down")?,
             clear: key(keys, "clear")?,
@@ -233,10 +282,15 @@ fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
             ));
         }
     }
+    if let Some(v) = merged.get("match") {
+        if !matches!(v.as_str(), Some("fuzzy" | "substring")) {
+            return Err(format!("{path}: match must be \"fuzzy\" or \"substring\""));
+        }
+    }
     let cfg = extract(&merged).ok_or_else(|| {
         let fields = "columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)";
         if need_keys {
-            format!("{path}: {fields}, and keys sort/group/up/down/clear non-empty strings")
+            format!("{path}: {fields}, and keys sort/group/match/up/down/clear non-empty strings")
         } else {
             format!("{path}: {fields}")
         }
@@ -335,6 +389,53 @@ mod tests {
             load_json("{}").map(|c| c.priority_max).unwrap_or_default(),
             5
         );
+    }
+
+    #[test]
+    fn a_match_other_than_fuzzy_or_substring_is_a_config_error_naming_the_key() {
+        for bad in ["\"regexp\"", "5", "null", "\"\"", "\"Fuzzy\""] {
+            let err = load_json(&format!("{{\"match\":{bad}}}"))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                err.contains("match must be \"fuzzy\" or \"substring\""),
+                "{bad}: {err}"
+            );
+        }
+        for (good, mode) in [("fuzzy", Match::Fuzzy), ("substring", Match::Substring)] {
+            let cfg = load_json(&format!("{{\"match\":\"{good}\"}}"))
+                .unwrap_or_else(|e| panic!("{good}: {e}"));
+            assert_eq!(cfg.r#match, mode);
+        }
+        assert_eq!(load_json("{}").map(|c| c.r#match), Ok(Match::Fuzzy));
+    }
+
+    #[test]
+    fn the_saved_mode_wins_over_the_config_and_an_unknown_one_is_ignored() {
+        let cfg = load_json("{}").unwrap_or_else(|e| panic!("{e}"));
+        let sub = load_json(r#"{"match":"substring"}"#).unwrap_or_else(|e| panic!("{e}"));
+        let st = |s: &str| State::parse(Some(s.as_bytes()));
+        assert_eq!(cfg.mode(&st(r#"{"match":"substring"}"#)), Match::Substring);
+        assert_eq!(cfg.mode(&st(r#"{"match":"bogus"}"#)), Match::Fuzzy);
+        assert_eq!(cfg.mode(&st(r#"{"match":5}"#)), Match::Fuzzy);
+        assert_eq!(sub.mode(&st(r#"{"match":"fuzzy"}"#)), Match::Fuzzy);
+        assert_eq!(sub.mode(&st(r#"{"match":"bogus"}"#)), Match::Substring);
+        assert_eq!(sub.mode(&st("{}")), Match::Substring);
+    }
+
+    #[test]
+    fn the_match_key_merges_key_by_key_and_is_validated_like_the_others() {
+        let cfg = load_json(r#"{"keys":{"match":"ctrl-t"}}"#).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.keys.r#match, "ctrl-t");
+        assert_eq!(cfg.keys.sort, "ctrl-s");
+        let err = load_json(r#"{"keys":{"match":"ctrl-s"}}"#)
+            .err()
+            .unwrap_or_default();
+        assert!(
+            err.contains("keys.match \"ctrl-s\" is the same key as keys.sort"),
+            "{err}"
+        );
+        assert!(load_json(r#"{"keys":{"match":""}}"#).is_err());
     }
 
     #[test]

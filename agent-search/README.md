@@ -1,6 +1,6 @@
 # agent-search
 
-A popup for jumping to an agent, built for sessions with many of them. It lists the panes Herdr's Agents view lists, searches every field Herdr reports for them (title, cwd, agent, status, and every metadata token, shown or not), and lets you sort, group, prioritize and reorder the list. The sort, grouping and manual order stay between openings.
+A popup for jumping to an agent, built for sessions with many of them. It lists the panes Herdr's Agents view lists, searches every field Herdr reports for them (title, cwd, agent, status, and every metadata token, shown or not), and lets you sort, group, prioritize and reorder the list. The sort, grouping, match mode and manual order stay between openings.
 
 ## Requirements
 
@@ -33,6 +33,7 @@ description = "search agents"
 | `Esc`, `Ctrl-C` | close |
 | `ctrl-s` | next sort |
 | `ctrl-g` | next grouping |
+| `ctrl-r` | toggle match mode: fuzzy ↔ substring |
 | `alt-up` / `alt-down` | move the agent up or down (manual order) |
 | `alt-1` … `alt-5` | set the agent's priority (up to `priority_max`) |
 | `alt-0` | clear the agent's priority |
@@ -43,7 +44,9 @@ The right side previews the selected pane in up to three sections: `[pane]` for 
 
 ## Search
 
-The filter is fuzzy matching with `nucleo-matcher`, the same kind as fzf. The fields listed in `search` are joined into one string per agent; every space-separated word of the query must appear in it with its letters in order, not necessarily next to each other. Matching is smart case: an all-lowercase query ignores case, a capital letter makes it case-sensitive. The fzf pattern syntax works too: `'exact` for a literal substring, `^prefix`, `suffix$`, and `!not` to exclude. Matches keep the current sort order; searching never reorders by score.
+The filter runs with `nucleo-matcher`, the same kind of matching as fzf, in one of two modes shown in the header. In `fuzzy` mode (the default), every space-separated word of the query must appear in the row's search text with its letters in order, not necessarily next to each other, so `agsr` matches `agent-search`. In `substring` mode every word must appear as a contiguous substring, so `agsr` does not match `agent-search` but `agent` does. Matching is smart case in both modes: an all-lowercase word ignores case, a capital letter makes it case-sensitive. The fzf pattern syntax works in both modes: `'exact` for a literal substring, `^prefix`, `suffix$`, and `!not` to exclude. Matches keep the current sort order; searching never reorders by score.
+
+`ctrl-r` toggles the mode, and the toggled mode is saved in the state like the sort and grouping: it wins over the configured `match` until toggled again.
 
 ## Priority
 
@@ -87,12 +90,14 @@ The defaults:
   ],
   "priority_token": "prio",
   "priority_max": 5,
-  "keys": {"sort": "ctrl-s", "group": "ctrl-g", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
+  "match": "fuzzy",
+  "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
 }
 ```
 
 - `sorts` and `groups` are cycled in the order listed; the first one is used until you switch. A sort's `by` is a list of tie-breakers. A group's `by` is a fallback chain: the first field with a value names the group, and agents with none go to `(none)`. Groups are ordered by their highest-ranked agent, so a group holding a high-priority agent comes first.
 - `priority_max` is an integer from 1 to 9 (default 5): the popup binds `alt-1` through `alt-<priority_max>` and the higher digits do nothing, though `alt-1` … `alt-9` stay reserved for priorities in `keys` validation either way. A value outside 1..9 or not an integer is a config error naming `priority_max`.
+- `match` is `"fuzzy"` (the default) or `"substring"`, the mode the popup's filter starts in; anything else is a config error naming `match`.
 - For nested headers a group gives `levels` instead of `by`: a list of fallback chains, one per level, no chain empty. A group needs exactly one of `by` or `levels` (`by: []` means no grouping). Headers nest two spaces per level, count the agents under them, and a header with no matching agents is hidden. For example, repo over branch:
 
 ```json
@@ -120,11 +125,11 @@ The defaults:
 }
 ```
 
-A config that is not a JSON object, or has a key of the wrong shape (an empty list, duplicate sort or group names, a group without exactly one of `by` and `levels` or with an empty `levels` chain, an empty key name, an invalid token name, a `priority_max` that is not an integer from 1 to 9), stops the popup with a message instead of falling back to the defaults.
+A config that is not a JSON object, or has a key of the wrong shape (an empty list, duplicate sort or group names, a group without exactly one of `by` and `levels` or with an empty `levels` chain, an empty key name, an invalid token name, a `priority_max` that is not an integer from 1 to 9, a `match` that is not `"fuzzy"` or `"substring"`), stops the popup with a message instead of falling back to the defaults.
 
 ## State
 
-Each Herdr session has its own state file in the plugin state directory: `state-<tag>.json`, where `<tag>` is the first 12 hex characters of the SHA-256 of the session's `HERDR_SOCKET_PATH`, so a write, prune or lock in one session never touches another's; without `HERDR_SOCKET_PATH` the file is `state.json`. It holds the current sort and grouping, the manual order, and the saved priorities: the ones the popup set plus every in-range priority token the popup or a CLI act saw on a live pane. An agent is keyed by its agent session id when it has one, so its manual order survives a Herdr restart that renumbers panes; other panes are keyed by pane id. Entries of panes that are gone from `herdr pane list` are dropped on every change made outside the popup, where gone means no pane in the list at all, agent or not, has that key. An empty pane list never prunes, since no panes at all is not evidence that every saved pane is gone. The popup works on a snapshot, so it never drops anything. Concurrent writers of one file are serialized by an exclusive lock on its `.lock` sibling, which the operating system releases when its holder exits.
+Each Herdr session has its own state file in the plugin state directory: `state-<tag>.json`, where `<tag>` is the first 12 hex characters of the SHA-256 of the session's `HERDR_SOCKET_PATH`, so a write, prune or lock in one session never touches another's; without `HERDR_SOCKET_PATH` the file is `state.json`. It holds the current sort, grouping and match mode, the manual order, and the saved priorities: the ones the popup set plus every in-range priority token the popup or a CLI act saw on a live pane. An agent is keyed by its agent session id when it has one, so its manual order survives a Herdr restart that renumbers panes; other panes are keyed by pane id. Entries of panes that are gone from `herdr pane list` are dropped on every change made outside the popup, where gone means no pane in the list at all, agent or not, has that key. An empty pane list never prunes, since no panes at all is not evidence that every saved pane is gone. The popup works on a snapshot, so it never drops anything. Concurrent writers of one file are serialized by an exclusive lock on its `.lock` sibling, which the operating system releases when its holder exits.
 
 ## Limits
 

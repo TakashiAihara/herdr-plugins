@@ -425,7 +425,7 @@ pub fn lines(rows: &[Row]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Group, Keys, Named};
+    use crate::config::{Group, Keys, Match, Named};
 
     fn cfg(group: Group) -> Config {
         Config {
@@ -438,9 +438,11 @@ mod tests {
             groups: vec![group],
             priority_token: "prio".into(),
             priority_max: 5,
+            r#match: Match::Fuzzy,
             keys: Keys {
                 sort: "ctrl-s".into(),
                 group: "ctrl-g".into(),
+                r#match: "ctrl-r".into(),
                 up: "alt-up".into(),
                 down: "alt-down".into(),
                 clear: "alt-0".into(),

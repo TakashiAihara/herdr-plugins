@@ -86,21 +86,67 @@ check "default order follows the pane list" "$(ids)" "w1:p1 w1:p2 w2:p1 w2:p2 "
 check "search text holds every token value" \
   "$(pk lines | grep '^w2:p1' | cut -f3 | plain)" "write docs /src/alpha devin working alpha urgent kaneo"
 check "search text holds the cwd" "$(pk lines | grep '^w1:p2' | cut -f3 | grep -c '/src/beta/')" "1"
-check "header names the first sort and group, then the keys" "$(run header)" "sort: priority  group: none
-ctrl-s sort  ctrl-g group  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
+check "header names the first sort and group, then the keys" "$(run header)" "sort: priority  group: none  match: fuzzy
+ctrl-s sort  ctrl-g group  ctrl-r match  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
 
 fresh
 run act group-next
-check "group-next moves to repo" "$(run header | head -1)" "sort: priority  group: repo"
+check "group-next moves to repo" "$(run header | head -1)" "sort: priority  group: repo  match: fuzzy"
 check "groups by repo, falls back to the cwd basename, in first-seen order" "$(ids)" \
   "-:0 w1:p1 w2:p1 -:1 w1:p2 -:2 w2:p2 "
 check "group headers show the name and count" \
   "$(pk lines | grep '^-:' | cut -f2 | plain | tr '\n' ';')" "── alpha (2) ──;── beta (1) ──;── gamma (1) ──;"
 check "group headers have no search text" "$(pk lines | grep '^-:' | cut -f3 | tr -d '\n')" ""
 run act group-next
-check "group-next moves to workspace" "$(run header | head -1)" "sort: priority  group: workspace"
+check "group-next moves to workspace" "$(run header | head -1)" "sort: priority  group: workspace  match: fuzzy"
 run act group-next
-check "group-next wraps back to none" "$(run header | head -1)" "sort: priority  group: none"
+check "group-next wraps back to none" "$(run header | head -1)" "sort: priority  group: none  match: fuzzy"
+
+fresh
+run act match-next
+check "match-next toggles the mode and saves it in the state" \
+  "$(run header | head -1; jq -c .match "$HERDR_PLUGIN_STATE_DIR/state.json")" \
+  'sort: priority  group: none  match: substring
+"substring"'
+run act match-next
+check "match-next toggles back to fuzzy" \
+  "$(run header | head -1; jq -c .match "$HERDR_PLUGIN_STATE_DIR/state.json")" \
+  'sort: priority  group: none  match: fuzzy
+"fuzzy"'
+
+fresh
+echo '{"match":"substring"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "the configured mode is used until toggled" "$(run header | head -1)" \
+  "sort: priority  group: none  match: substring"
+run act match-next
+check "the saved mode wins over the config default" "$(run header | head -1)" \
+  "sort: priority  group: none  match: fuzzy"
+
+fresh
+mkdir -p "$HERDR_PLUGIN_STATE_DIR"
+echo '{"match":"bogus"}' > "$HERDR_PLUGIN_STATE_DIR/state.json"
+check "a saved mode that is not fuzzy or substring is ignored" "$(run header | head -1)" \
+  "sort: priority  group: none  match: fuzzy"
+
+fresh
+echo '{"match":"regexp"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a match that is not fuzzy or substring is a config error naming the key" \
+  "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: match must be \"fuzzy\" or \"substring\"
+rc=1"
+
+fresh
+echo '{"keys":{"match":"ctrl-t"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "the match key merges key by key" "$(run header | sed -n 2p)" \
+  "ctrl-s sort  ctrl-g group  ctrl-t match  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
+echo '{"keys":{"match":"ctrl-s"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a match key duplicating another key is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.match \"ctrl-s\" is the same key as keys.sort
+rc=1"
+echo '{"keys":{"match":"x"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "a match key that steals a typed character is a config error" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: keys.match \"x\" is already used by the popup (alt-1..alt-9, esc, enter, backspace, up, down, ctrl-p, ctrl-n, ctrl-c, or a character typed into the search)
+rc=1"
 
 fresh
 jq '.result.panes[3].tokens.repo = "delta"' "$tmp/list.json" > "$tmp/delta.json"
@@ -165,13 +211,13 @@ check "move up at the top changes nothing" "$(ids)" "w1:p2 w2:p1 w1:p1 w2:p2 "
 run act move down w2:p2
 check "move down at the bottom changes nothing" "$(ids)" "w1:p2 w2:p1 w1:p1 w2:p2 "
 run act sort-next
-check "manual sort keeps the moved order" "$(run header | head -1)$(ids)" "sort: manual  group: nonew1:p2 w2:p1 w1:p1 w2:p2 "
+check "manual sort keeps the moved order" "$(run header | head -1)$(ids)" "sort: manual  group: none  match: fuzzyw1:p2 w2:p1 w1:p1 w2:p2 "
 run act sort-next
 check "status sort orders by agent_status" "$(ids)" "w1:p1 w2:p2 w1:p2 w2:p1 "
 run act move down w1:p1
 run act sort-next
 check "a move under another sort only trades the two panes' manual positions" "$(run header | head -1)$(ids)" \
-  "sort: priority  group: nonew1:p2 w2:p1 w2:p2 w1:p1 "
+  "sort: priority  group: none  match: fuzzyw1:p2 w2:p1 w2:p2 w1:p1 "
 
 fresh
 run act group-next
@@ -302,7 +348,7 @@ rc=1"
 fresh
 echo '{"groups":[{"name":"ws","by":["workspace_id"]}],"sorts":[{"name":"title","by":["title:desc"]}]}' \
   > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
-check "configured sorts and groups replace the defaults" "$(run header | head -1)" "sort: title  group: ws"
+check "configured sorts and groups replace the defaults" "$(run header | head -1)" "sort: title  group: ws  match: fuzzy"
 check "descending text sort inside configured groups" "$(ids)" "-:0 w2:p1 w2:p2 -:1 w1:p2 w1:p1 "
 
 fresh
@@ -345,10 +391,10 @@ check "panes without the sort value go last" "$(ids)" "w1:p1 w2:p1 w2:p2 w1:p2 "
 fresh
 echo '{"keys":{"sort":"ctrl-x"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "a partial keys object keeps the other default keys" "$(run header | sed -n 2p)" \
-  "ctrl-x sort  ctrl-g group  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
+  "ctrl-x sort  ctrl-g group  ctrl-r match  alt-up/alt-down move  alt-1..5 prio  alt-0 clear"
 
 shape_error() {
-  printf '%s\n%s' "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -), and keys sort/group/up/down/clear non-empty strings" "rc=1"
+  printf '%s\n%s' "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -), and keys sort/group/match/up/down/clear non-empty strings" "rc=1"
 }
 fresh
 echo '{"sorts":[]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
@@ -388,7 +434,7 @@ done
 fresh
 echo '{"priority_max":9}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "priority_max 9 is accepted and the header shows the full range" "$(run header | sed -n 2p)" \
-  "ctrl-s sort  ctrl-g group  alt-up/alt-down move  alt-1..9 prio  alt-0 clear"
+  "ctrl-s sort  ctrl-g group  ctrl-r match  alt-up/alt-down move  alt-1..9 prio  alt-0 clear"
 fresh
 echo '{"priority_max":1}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "priority_max 1 is accepted" "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
@@ -431,7 +477,7 @@ run act move down w1:p1
 run act sort-next
 run act sort-next
 check "renumbering breaks manual ties by list order, not by the sort on screen" "$(run header | head -1)$(ids)" \
-  "sort: manual  group: nonew2:p2 w1:p2 w1:p1 w2:p1 "
+  "sort: manual  group: none  match: fuzzyw2:p2 w1:p2 w1:p1 w2:p1 "
 
 fresh
 mkdir -p "$HERDR_PLUGIN_STATE_DIR"

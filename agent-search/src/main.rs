@@ -232,10 +232,11 @@ fn lines(env: &Env) -> Res<()> {
 fn header_text(cfg: &Config, st: &State) -> String {
     let sort = &cfg.sorts[pick(&cfg.sorts, st.get("sort"))].name;
     let group = &cfg.groups[pick(&cfg.groups, st.get("group"))].name;
+    let mode = cfg.mode(st).name();
     let k = &cfg.keys;
     format!(
-        "sort: {sort}  group: {group}\n{} sort  {} group  {}/{} move  alt-1..{} prio  {} clear\n",
-        k.sort, k.group, k.up, k.down, cfg.priority_max, k.clear
+        "sort: {sort}  group: {group}  match: {mode}\n{} sort  {} group  {} match  {}/{} move  alt-1..{} prio  {} clear\n",
+        k.sort, k.group, k.r#match, k.up, k.down, cfg.priority_max, k.clear
     )
 }
 
@@ -325,7 +326,7 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
     let op = arg(0);
 
     let (dir, id, n) = match op {
-        "sort-next" | "group-next" => ("", "", ""),
+        "sort-next" | "group-next" | "match-next" => ("", "", ""),
         "move" => {
             if arg(1) != "up" && arg(1) != "down" {
                 return Err("move needs up or down".into());
@@ -380,6 +381,10 @@ fn act(env: &Env, cfg: &Config, snap: &mut Snapshot, args: &[String], prune: boo
             // Rows must build under the new selection before it is saved: a sort or group whose
             // fields fail on this list would otherwise be saved and break every later command.
             snap.rows(env, cfg, &State(new.clone()))?;
+        }
+        "match-next" => {
+            let next = cfg.mode(&st).other();
+            new.insert("match".into(), Value::String(next.name().into()));
         }
         "move" => {
             let i = rows.iter().position(|r| r.id == id);
@@ -977,6 +982,70 @@ mod tests {
         let err = restore(&env).err().unwrap_or_default();
         assert_eq!(err, LIST_ERR);
         drop(held);
+    }
+
+    #[test]
+    fn act_match_next_toggles_the_mode_saved_in_the_state() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let env = env_with("matchnext", panes, json!({}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let args = vec!["match-next".to_string()];
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("match"),
+            Some(&json!("substring"))
+        );
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("match"),
+            Some(&json!("fuzzy"))
+        );
+    }
+
+    #[test]
+    fn act_match_next_toggles_from_the_config_when_the_saved_mode_is_missing_or_unknown() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let args = vec!["match-next".to_string()];
+        let env = env_with("matchcfg", panes.clone(), json!({}));
+        std::fs::write(&env.config_path, r#"{"match":"substring"}"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("match"),
+            Some(&json!("fuzzy")),
+            "substring configured, so the first toggle lands on fuzzy"
+        );
+        let env = env_with("matchbad", panes, json!({"match": "bogus"}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        act(&env, &cfg, &mut Snapshot::empty(), &args, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            State::load(&env.state_path).get("match"),
+            Some(&json!("substring")),
+            "a saved value that is not a mode is ignored and the config default toggles"
+        );
+    }
+
+    #[test]
+    fn the_header_names_the_current_mode_next_to_sort_and_group() {
+        let panes = json!([{"pane_id": "p1", "agent": "claude"}]);
+        let env = env_with("header", panes, json!({}));
+        let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
+        let st = |s: &str| State::parse(Some(s.as_bytes()));
+        assert_eq!(
+            header_text(&cfg, &st("{}")),
+            "sort: priority  group: none  match: fuzzy\n\
+             ctrl-s sort  ctrl-g group  ctrl-r match  alt-up/alt-down move  alt-1..5 prio  alt-0 clear\n"
+        );
+        assert!(
+            header_text(&cfg, &st(r#"{"match":"substring"}"#))
+                .starts_with("sort: priority  group: none  match: substring\n"),
+            "the saved mode is shown"
+        );
+        assert!(
+            header_text(&cfg, &st(r#"{"match":"bogus"}"#)).contains("match: fuzzy"),
+            "a saved value that is not a mode falls back to the config"
+        );
     }
 
     #[test]
