@@ -17,8 +17,8 @@ command = ["target/release/agent-search", "open"]
 id = "search"
 title = "Agent search"
 placement = "popup"
-width = "80%"
-height = "70%"
+width = "90%"
+height = "85%"
 command = ["target/release/agent-search", "ui"]
 
 [[startup]]

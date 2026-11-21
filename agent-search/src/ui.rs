@@ -1,9 +1,9 @@
-use crate::config::{Config, Keys};
+use crate::config::{Config, Keys, Match};
 use crate::keys::{self, Bind};
 use crate::rows::{self, Row};
 use crate::state::State;
-use crate::{act, focus_in, header_text, preview_text, Env, Res, Snapshot};
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use crate::{act, focus_in, header_text, preview_text, sync_priorities, Env, Res, Snapshot};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
@@ -18,6 +18,8 @@ pub const REORDER_HINT: &str = "clear the search to reorder";
 pub enum Op {
     SortNext,
     GroupNext,
+    MatchNext,
+    PreviewNext,
     Up,
     Down,
     Clear,
@@ -35,13 +37,23 @@ pub enum Action {
 pub struct Binds(Vec<(Bind, Op)>);
 
 impl Binds {
-    pub fn new(k: &Keys) -> Res<Binds> {
+    // Only alt-1..alt-<max> set a priority; the rest of the digits do nothing (they stay reserved
+    // in key validation either way).
+    pub fn new(k: &Keys, max: u8) -> Res<Binds> {
         let mut list = Vec::new();
-        let ops = [Op::SortNext, Op::GroupNext, Op::Up, Op::Down, Op::Clear];
+        let ops = [
+            Op::SortNext,
+            Op::GroupNext,
+            Op::MatchNext,
+            Op::PreviewNext,
+            Op::Up,
+            Op::Down,
+            Op::Clear,
+        ];
         for ((_, bind), op) in keys::validate(k)?.into_iter().zip(ops) {
             list.push((bind, op));
         }
-        for n in 1..=9u8 {
+        for n in 1..=max {
             let code = KeyCode::Char(char::from(b'0' + n));
             list.push((
                 Bind {
@@ -65,16 +77,34 @@ pub struct App {
     pub query: String,
     pub items: Vec<Item>,
     pub cur: usize,
+    pub mode: Match,
+    // Whether the preview pane is shown; false gives the list the full width.
+    pub show_preview: bool,
     // The last failure of an action, shown under the list until the next key.
     pub status: String,
 }
 
+// The same word syntax as fuzzy mode (', ^, $ and ! keep their meaning) but a plain word must
+// appear as a contiguous substring instead of matching with gaps.
+fn substring_pattern(query: &str) -> Pattern {
+    let mut pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    for atom in &mut pattern.atoms {
+        if atom.kind == AtomKind::Fuzzy {
+            atom.kind = AtomKind::Substring;
+        }
+    }
+    pattern
+}
+
 // Rows whose search text matches every word of the query, in the order they have.
-fn matching(rows: &[Row], query: &str) -> Vec<usize> {
+fn matching(rows: &[Row], query: &str, mode: Match) -> Vec<usize> {
     if query.trim().is_empty() {
         return (0..rows.len()).collect();
     }
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let pattern = match mode {
+        Match::Fuzzy => Pattern::parse(query, CaseMatching::Smart, Normalization::Smart),
+        Match::Substring => substring_pattern(query),
+    };
     let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
     let mut buf = Vec::new();
     (0..rows.len())
@@ -93,6 +123,8 @@ impl App {
             query: String::new(),
             items: vec![],
             cur: 0,
+            mode: Match::Fuzzy,
+            show_preview: true,
             status: String::new(),
         };
         app.refresh(None);
@@ -111,22 +143,33 @@ impl App {
     }
 
     // Rebuilds the visible items; the cursor stays on pane `keep` when it is still shown, else goes to
-    // the first pane.
+    // the first pane. A header opens wherever the group path diverges from the previous row's, never
+    // selectable and never matching the search, so a header with no matching agents is not shown.
     fn refresh(&mut self, keep: Option<String>) {
-        let hits = matching(&self.rows, &self.query);
-        let count = |g: &str| {
+        let hits = matching(&self.rows, &self.query, self.mode);
+        let count = |prefix: &[String]| {
             hits.iter()
-                .filter(|&&i| self.rows[i].group.as_deref() == Some(g))
+                .filter(|&&i| self.rows[i].groups.starts_with(prefix))
                 .count()
         };
         let mut items = Vec::new();
-        let mut prev: Option<&str> = None;
+        let mut prev: &[String] = &[];
         for &i in &hits {
-            let group = self.rows[i].group.as_deref();
-            if let Some(g) = group.filter(|g| prev != Some(*g)) {
-                items.push(Item::Header(format!("── {g} ({}) ──", count(g))));
+            let groups = &self.rows[i].groups;
+            let common = groups
+                .iter()
+                .zip(prev.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            for d in common..groups.len() {
+                items.push(Item::Header(format!(
+                    "{}▾ {} ({})",
+                    "  ".repeat(d),
+                    groups[d],
+                    count(&groups[..=d])
+                )));
             }
-            prev = group;
+            prev = groups.as_slice();
             items.push(Item::Pane(i));
         }
         self.cur = keep
@@ -144,6 +187,15 @@ impl App {
         let keep = self.selected_id();
         self.rows = rows;
         self.refresh(keep);
+    }
+
+    // A new mode refilters the query as it is; the cursor stays on the selected pane.
+    pub fn set_mode(&mut self, mode: Match) {
+        if mode != self.mode {
+            self.mode = mode;
+            let keep = self.selected_id();
+            self.refresh(keep);
+        }
     }
 
     pub fn type_char(&mut self, c: char) {
@@ -207,6 +259,8 @@ fn op_args(op: Op, id: &str) -> Vec<String> {
     match op {
         Op::SortNext => vec!["sort-next".into()],
         Op::GroupNext => vec!["group-next".into()],
+        Op::MatchNext => vec!["match-next".into()],
+        Op::PreviewNext => vec!["preview-next".into()],
         Op::Up => vec!["move".into(), "up".into(), id.into()],
         Op::Down => vec!["move".into(), "down".into(), id.into()],
         Op::Clear => vec!["clear".into(), id.into()],
@@ -222,7 +276,7 @@ pub fn dispatch(app: &mut App, op: Op, run: impl FnOnce(Vec<String>) -> Res<Vec<
         app.status = REORDER_HINT.to_string();
         return;
     }
-    let needs_pane = !matches!(op, Op::SortNext | Op::GroupNext);
+    let needs_pane = matches!(op, Op::Up | Op::Down | Op::Clear | Op::Prio(_));
     let id = match app.selected_id() {
         Some(id) => id,
         None if needs_pane => return,
@@ -242,8 +296,14 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    let [list_area, preview_area] =
-        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(body);
+    let (list_area, preview_area) = if app.show_preview {
+        let [list, preview] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(body);
+        (list, Some(preview))
+    } else {
+        (body, None)
+    };
 
     frame.render_widget(
         Paragraph::new(header.trim_end()).style(Style::new().add_modifier(Modifier::DIM)),
@@ -267,7 +327,11 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
                 h.clone(),
                 Style::new().add_modifier(Modifier::BOLD),
             ))),
-            Item::Pane(i) => ListItem::new(rows::display(&app.rows[*i], &widths)),
+            Item::Pane(i) => ListItem::new(format!(
+                "{}{}",
+                "  ".repeat(app.rows[*i].groups.len()),
+                rows::display(&app.rows[*i], &widths)
+            )),
         })
         .collect();
     let selected = app.selected_id().map(|_| app.cur);
@@ -281,12 +345,14 @@ pub fn draw(frame: &mut Frame, app: &App, header: &str, preview: &str) {
         &mut ListState::default().with_selected(selected),
     );
 
-    frame.render_widget(
-        Paragraph::new(preview.replace('\t', "  "))
-            .block(Block::bordered().title("preview"))
-            .wrap(Wrap { trim: false }),
-        preview_area,
-    );
+    if let Some(area) = preview_area {
+        frame.render_widget(
+            Paragraph::new(preview.replace('\t', "  "))
+                .block(Block::bordered().title("preview"))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
     frame.render_widget(
         Paragraph::new(app.status.as_str()).style(Style::new().fg(Color::Red)),
         status,
@@ -317,17 +383,40 @@ fn show_error(term: &mut DefaultTerminal, msg: &str) {
     }
 }
 
+// The mode and preview choice the saved state dictates, applied at open and on every reload of
+// the list so a choice saved from outside the popup shows up on the next key.
+pub(crate) fn apply_state(app: &mut App, cfg: &Config, st: &State) {
+    app.set_mode(cfg.mode(st));
+    app.show_preview = cfg.preview_on(st);
+}
+
+// Opening the popup first copies the priority tokens agents set themselves into the state. A
+// failed sync does not stop the popup: the error waits in the status line.
+pub(crate) fn open(env: &Env, cfg: &Config, snap: &mut Snapshot) -> Res<App> {
+    let failed = sync_priorities(env, cfg, snap).err();
+    let st = State::load(&env.state_path);
+    let mut app = App::new(snap.rows(env, cfg, &st)?);
+    apply_state(&mut app, cfg, &st);
+    app.status = failed.unwrap_or_default();
+    Ok(app)
+}
+
 // The popup uses this one config for the list, the keys and every act.
 fn session(env: &Env, cfg: &Config, term: &mut DefaultTerminal) -> Res<()> {
-    let binds = Binds::new(&cfg.keys)?;
+    let binds = Binds::new(&cfg.keys, cfg.priority_max)?;
     let mut snap = Snapshot::empty();
-    let mut app = App::new(snap.rows(env, cfg, &State::load(&env.state_path))?);
+    let mut app = open(env, cfg, &mut snap)?;
     loop {
         let st = State::load(&env.state_path);
+        apply_state(&mut app, cfg, &st);
         let list = snap.get(env)?;
-        let preview = app
-            .selected_id()
-            .map_or(String::new(), |id| preview_text(list, &id));
+        let preview = if app.show_preview {
+            app.selected_id().map_or(String::new(), |id| {
+                preview_text(list, &id, &cfg.preview_hide)
+            })
+        } else {
+            String::new()
+        };
         let header = header_text(cfg, &st);
         term.draw(|f| draw(f, &app, &header, &preview))
             .map_err(|e| format!("cannot draw the screen: {e}"))?;
@@ -372,10 +461,18 @@ mod tests {
             key: id.into(),
             manual: Value::Null,
             idx: 0,
+            prio: None,
             has_token: false,
-            group: group.map(String::from),
+            groups: group.map(|g| vec![g.to_string()]).unwrap_or_default(),
             cols: vec![format!("title {id}")],
             search: search.into(),
+        }
+    }
+
+    fn row_path(id: &str, groups: &[&str], search: &str) -> Row {
+        Row {
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            ..row(id, None, search)
         }
     }
 
@@ -385,6 +482,16 @@ mod tests {
             row("a2", Some("alpha"), "write docs alpha"),
             row("b1", Some("beta"), "review beta"),
             row("c1", Some("gamma"), "deploy gamma"),
+        ])
+    }
+
+    fn nested() -> App {
+        App::new(vec![
+            row_path("a1", &["alpha"], "fix login alpha"),
+            row_path("a2", &["alpha"], "write docs alpha"),
+            row_path("b1", &["beta", "w1"], "review beta"),
+            row_path("b2", &["beta", "w2"], "deploy beta"),
+            row_path("c1", &["beta", "w2"], "build beta"),
         ])
     }
 
@@ -407,16 +514,26 @@ mod tests {
         let keys = |sort: &str| Keys {
             sort: sort.into(),
             group: "ctrl-g".into(),
+            r#match: "ctrl-r".into(),
+            preview: "ctrl-o".into(),
             up: "alt-up".into(),
             down: "alt-down".into(),
             clear: "alt-0".into(),
         };
-        let binds = Binds::new(&keys("ctrl-s")).unwrap_or_else(|e| panic!("{e}"));
+        let binds = Binds::new(&keys("ctrl-s"), 9).unwrap_or_else(|e| panic!("{e}"));
         let mut app = grouped();
         let press = |app: &mut App, c, m| handle_key(app, &binds, key(c, m));
         assert_eq!(
             press(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL),
             Action::Op(Op::SortNext)
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL),
+            Action::Op(Op::MatchNext)
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL),
+            Action::Op(Op::PreviewNext)
         );
         assert_eq!(
             press(&mut app, KeyCode::Down, KeyModifiers::ALT),
@@ -430,7 +547,29 @@ mod tests {
             press(&mut app, KeyCode::Char('7'), KeyModifiers::ALT),
             Action::Op(Op::Prio(7))
         );
-        assert!(Binds::new(&keys("ctrl-nonsense")).is_err());
+        assert!(Binds::new(&keys("ctrl-nonsense"), 9).is_err());
+    }
+
+    #[test]
+    fn alt_digits_above_the_priority_max_do_nothing() {
+        let binds = Binds::new(&default_keys("ctrl-s"), 5).unwrap_or_else(|e| panic!("{e}"));
+        let mut app = grouped();
+        assert_eq!(
+            handle_key(&mut app, &binds, key(KeyCode::Char('5'), KeyModifiers::ALT)),
+            Action::Op(Op::Prio(5))
+        );
+        for digit in '6'..='9' {
+            assert_eq!(
+                handle_key(
+                    &mut app,
+                    &binds,
+                    key(KeyCode::Char(digit), KeyModifiers::ALT)
+                ),
+                Action::None,
+                "alt-{digit}"
+            );
+            assert!(app.query.is_empty(), "alt-{digit} must not type");
+        }
     }
 
     #[test]
@@ -438,15 +577,42 @@ mod tests {
         assert_eq!(
             shown(&grouped()),
             [
-                "── alpha (2) ──",
+                "▾ alpha (2)",
                 "a1",
                 "a2",
-                "── beta (1) ──",
+                "▾ beta (1)",
                 "b1",
-                "── gamma (1) ──",
+                "▾ gamma (1)",
                 "c1"
             ]
         );
+    }
+
+    #[test]
+    fn nested_groups_show_a_header_per_level_counting_the_matches_under_it() {
+        assert_eq!(
+            shown(&nested()),
+            [
+                "▾ alpha (2)",
+                "a1",
+                "a2",
+                "▾ beta (3)",
+                "  ▾ w1 (1)",
+                "b1",
+                "  ▾ w2 (2)",
+                "b2",
+                "c1"
+            ]
+        );
+        let mut app = nested();
+        for c in "deploy".chars() {
+            app.type_char(c);
+        }
+        // Only the headers over matching agents are shown, with their count of matches.
+        assert_eq!(shown(&app), ["▾ beta (1)", "  ▾ w2 (1)", "b2"]);
+        app.query.clear();
+        app.refresh(None);
+        assert_eq!(shown(&app).len(), 9);
     }
 
     #[test]
@@ -455,18 +621,176 @@ mod tests {
         for c in "alpha".chars() {
             app.type_char(c);
         }
-        assert_eq!(shown(&app), ["── alpha (2) ──", "a1", "a2"]);
+        assert_eq!(shown(&app), ["▾ alpha (2)", "a1", "a2"]);
         app.query.clear();
         for c in "w".chars() {
             app.type_char(c);
         }
         // "w" is in "write docs alpha", "review beta" and "fix login..." has none; order stays a2, b1.
-        assert_eq!(
-            shown(&app),
-            ["── alpha (1) ──", "a2", "── beta (1) ──", "b1"]
-        );
+        assert_eq!(shown(&app), ["▾ alpha (1)", "a2", "▾ beta (1)", "b1"]);
         app.backspace();
         assert_eq!(shown(&app).len(), 7);
+    }
+
+    #[test]
+    fn substring_mode_needs_each_word_contiguous_where_fuzzy_allows_gaps() {
+        let rows = || {
+            vec![
+                row("a1", None, "agent-search"),
+                row("a2", None, "agents"),
+                row("a3", None, "argstar"),
+            ]
+        };
+        let mut app = App::new(rows());
+        for c in "agsr".chars() {
+            app.type_char(c);
+        }
+        // "agsr" is a fuzzy match in "agent-search" and "argstar" but a substring of neither.
+        assert_eq!(shown(&app), ["a1", "a3"]);
+        app.set_mode(Match::Substring);
+        assert!(app.items.is_empty());
+        let mut app = App::new(rows());
+        app.set_mode(Match::Substring);
+        for c in "agent".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(shown(&app), ["a1", "a2"]);
+    }
+
+    #[test]
+    fn in_substring_mode_every_word_must_appear() {
+        let mut app = grouped();
+        app.set_mode(Match::Substring);
+        for c in "fix alpha".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(shown(&app), ["▾ alpha (1)", "a1"]);
+        app.query.clear();
+        for c in "alpha beta".chars() {
+            app.type_char(c);
+        }
+        assert!(
+            app.items.is_empty(),
+            "no row holds both words as substrings"
+        );
+    }
+
+    #[test]
+    fn the_fzf_prefixes_keep_their_meaning_in_substring_mode() {
+        let make = || {
+            let mut app = grouped();
+            app.set_mode(Match::Substring);
+            app
+        };
+        let mut app = make();
+        for c in "'alpha".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(shown(&app), ["▾ alpha (2)", "a1", "a2"]);
+        let mut app = make();
+        for c in "^fix".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(shown(&app), ["▾ alpha (1)", "a1"]);
+        let mut app = make();
+        for c in "alpha$".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(shown(&app), ["▾ alpha (2)", "a1", "a2"]);
+        let mut app = make();
+        for c in "!alpha".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(shown(&app), ["▾ beta (1)", "b1", "▾ gamma (1)", "c1"]);
+    }
+
+    #[test]
+    fn substring_mode_turns_only_plain_words_into_substrings() {
+        let fresh = || {
+            let mut app = App::new(vec![
+                row("a1", None, "word first"),
+                row("a2", None, "last word"),
+                row("a3", None, "a word inside"),
+            ]);
+            app.set_mode(Match::Substring);
+            app
+        };
+        let mut app = fresh();
+        for c in "^word".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(
+            shown(&app),
+            ["a1"],
+            "^ keeps anchoring at the start: a mid-string word must not match"
+        );
+        let mut app = fresh();
+        for c in "word$".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(
+            shown(&app),
+            ["a2"],
+            "$ keeps anchoring at the end: a mid-string word must not match"
+        );
+    }
+
+    #[test]
+    fn substring_mode_keeps_smart_case() {
+        let make = || {
+            let mut app = App::new(vec![
+                row("a1", None, "Login page"),
+                row("a2", None, "login page"),
+            ]);
+            app.set_mode(Match::Substring);
+            app
+        };
+        let mut app = make();
+        for c in "login".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(
+            shown(&app),
+            ["a1", "a2"],
+            "a word without capitals ignores case"
+        );
+        let mut app = make();
+        for c in "Login".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(
+            shown(&app),
+            ["a1"],
+            "a capital makes the word case-sensitive"
+        );
+    }
+
+    #[test]
+    fn the_match_toggle_needs_no_pane_and_keeps_the_query() {
+        let mut app = grouped();
+        for c in "zzzz".chars() {
+            app.type_char(c);
+        }
+        let mut ran = false;
+        dispatch(&mut app, Op::MatchNext, |args| {
+            ran = true;
+            assert_eq!(args, ["match-next"]);
+            Ok(vec![])
+        });
+        assert!(ran);
+        assert_eq!(app.query, "zzzz");
+    }
+
+    #[test]
+    fn the_preview_toggle_needs_no_pane() {
+        let mut app = grouped();
+        let mut ran = false;
+        dispatch(&mut app, Op::PreviewNext, |args| {
+            ran = true;
+            assert_eq!(args, ["preview-next"]);
+            Ok(vec![])
+        });
+        assert!(ran);
     }
 
     #[test]
@@ -477,13 +801,18 @@ mod tests {
         }
         assert!(app.items.is_empty());
         assert_eq!(app.selected_id(), None);
-        let binds = Binds::new(&Keys {
-            sort: "ctrl-s".into(),
-            group: "ctrl-g".into(),
-            up: "alt-up".into(),
-            down: "alt-down".into(),
-            clear: "alt-0".into(),
-        })
+        let binds = Binds::new(
+            &Keys {
+                sort: "ctrl-s".into(),
+                group: "ctrl-g".into(),
+                r#match: "ctrl-r".into(),
+                preview: "ctrl-o".into(),
+                up: "alt-up".into(),
+                down: "alt-down".into(),
+                clear: "alt-0".into(),
+            },
+            5,
+        )
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             handle_key(&mut app, &binds, key(KeyCode::Enter, KeyModifiers::NONE)),
@@ -537,13 +866,18 @@ mod tests {
 
     #[test]
     fn plain_keys_edit_the_query_and_enter_focuses() {
-        let binds = Binds::new(&Keys {
-            sort: "ctrl-s".into(),
-            group: "ctrl-g".into(),
-            up: "alt-up".into(),
-            down: "alt-down".into(),
-            clear: "alt-0".into(),
-        })
+        let binds = Binds::new(
+            &Keys {
+                sort: "ctrl-s".into(),
+                group: "ctrl-g".into(),
+                r#match: "ctrl-r".into(),
+                preview: "ctrl-o".into(),
+                up: "alt-up".into(),
+                down: "alt-down".into(),
+                clear: "alt-0".into(),
+            },
+            5,
+        )
         .unwrap_or_else(|e| panic!("{e}"));
         let mut app = grouped();
         handle_key(
@@ -603,8 +937,11 @@ mod tests {
         assert!(screen[1].starts_with("ctrl-s sort"));
         assert!(screen[2].starts_with("> "));
         let all = screen.join("\n");
-        assert!(all.contains("── alpha (2) ──"));
-        assert!(all.contains("> title a2"));
+        assert!(all.contains("▾ alpha (2)"));
+        assert!(
+            all.contains(">   title a2"),
+            "agent rows indent under their header"
+        );
         assert!(all.contains("title  fix login"));
     }
 
@@ -612,6 +949,8 @@ mod tests {
         Keys {
             sort: sort.into(),
             group: "ctrl-g".into(),
+            r#match: "ctrl-r".into(),
+            preview: "ctrl-o".into(),
             up: "alt-up".into(),
             down: "alt-down".into(),
             clear: "alt-0".into(),
@@ -630,7 +969,7 @@ mod tests {
         assert_eq!(app.selected_id().as_deref(), Some("a2"));
         assert_eq!(shown(&app).len(), 7);
 
-        let binds = Binds::new(&default_keys("ctrl-s")).unwrap_or_else(|e| panic!("{e}"));
+        let binds = Binds::new(&default_keys("ctrl-s"), 5).unwrap_or_else(|e| panic!("{e}"));
         handle_key(&mut app, &binds, key(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.status, "", "the next key clears the status");
 
@@ -674,7 +1013,7 @@ mod tests {
     fn a_capital_letter_bind_is_distinct_from_the_lowercase_letter() {
         let mut keys = default_keys("ctrl-s");
         keys.group = "alt-A".into();
-        let binds = Binds::new(&keys).unwrap_or_else(|e| panic!("{e}"));
+        let binds = Binds::new(&keys, 5).unwrap_or_else(|e| panic!("{e}"));
         let mut app = grouped();
         assert_eq!(
             handle_key(
@@ -723,6 +1062,18 @@ mod tests {
             .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
             .collect();
         (lines, pos)
+    }
+
+    #[test]
+    fn a_hidden_preview_gives_the_list_the_full_width() {
+        let mut app = grouped();
+        let (shown, _) = screen(60, &app);
+        assert!(shown.join("\n").contains("preview"));
+        assert_eq!(shown[4].matches('│').count(), 4);
+        app.show_preview = false;
+        let (hidden, _) = screen(60, &app);
+        assert!(!hidden.join("\n").contains("preview"));
+        assert_eq!(hidden[4].matches('│').count(), 2);
     }
 
     #[test]
