@@ -1,4 +1,6 @@
 use crate::state::State;
+use crate::status::{parse_color, Status};
+use ratatui::style::Color;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
@@ -83,6 +85,7 @@ pub struct Config {
     pub preview: bool,
     pub preview_wrap: bool,
     pub preview_hide: Vec<String>,
+    pub status_colors: Vec<(Status, Color)>,
     pub keys: Keys,
 }
 
@@ -111,6 +114,15 @@ impl Config {
             .and_then(Value::as_bool)
             .unwrap_or(self.preview_wrap)
     }
+
+    // The color a status glyph gets: the status_colors override when configured, else the
+    // status's default.
+    pub fn status_color(&self, status: Status) -> Color {
+        self.status_colors
+            .iter()
+            .find(|(s, _)| *s == status)
+            .map_or_else(|| status.color(), |(_, c)| *c)
+    }
 }
 
 fn defaults() -> Value {
@@ -133,6 +145,7 @@ fn defaults() -> Value {
         "preview": true,
         "preview_wrap": false,
         "preview_hide": [],
+        "status_colors": {},
         "keys": {"sort": "ctrl-s", "group": "ctrl-g", "match": "ctrl-r", "preview": "ctrl-o", "wrap": "ctrl-w", "up": "alt-up", "down": "alt-down", "clear": "alt-0"}
     })
 }
@@ -237,6 +250,26 @@ fn key(keys: &serde_json::Map<String, Value>, name: &str) -> Option<String> {
         .map(String::from)
 }
 
+// status_colors maps a status name to the color its glyph gets. load_with reports the
+// offending key in detail; extract reaches this only after that check passed, so a failure
+// here only ever becomes extract's generic shape error.
+fn status_colors(v: &Value) -> Result<Vec<(Status, Color)>, String> {
+    let o = v
+        .as_object()
+        .ok_or_else(|| "status_colors must be an object".to_string())?;
+    let mut out = Vec::new();
+    for (name, val) in o {
+        let status = Status::from_name(name)
+            .ok_or_else(|| format!("unknown status {name:?} in status_colors"))?;
+        let color = val
+            .as_str()
+            .and_then(parse_color)
+            .ok_or_else(|| format!("invalid color {val} for status_colors.{name}"))?;
+        out.push((status, color));
+    }
+    Ok(out)
+}
+
 // A Herdr token name: 1-32 ASCII letters, digits, `_` or `-`.
 fn token_name(v: &Value) -> Option<String> {
     v.as_str()
@@ -265,6 +298,7 @@ fn extract(v: &Value) -> Option<Config> {
         preview: o.get("preview")?.as_bool()?,
         preview_wrap: o.get("preview_wrap")?.as_bool()?,
         preview_hide: strs(o.get("preview_hide")?)?,
+        status_colors: status_colors(o.get("status_colors")?).ok()?,
         keys: Keys {
             sort: key(keys, "sort")?,
             group: key(keys, "group")?,
@@ -335,6 +369,9 @@ fn load_with(path: &str, need_keys: bool) -> Result<Config, String> {
                 "{path}: preview_hide must be a list of non-empty strings"
             ));
         }
+    }
+    if let Some(v) = merged.get("status_colors") {
+        status_colors(v).map_err(|e| format!("{path}: {e}"))?;
     }
     let cfg = extract(&merged).ok_or_else(|| {
         let fields = "columns and search must be non-empty lists of fields, sorts and groups non-empty lists of {name, by} (or {name, levels} for groups) with unique names, priority_token a Herdr token name (1-32 letters, digits, _ or -)";
@@ -585,6 +622,45 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(cfg.preview_hide, ["tokens.flags", "state_labels"]);
         assert_eq!(load_json("{}").map(|c| c.preview_hide), Ok(vec![]));
+    }
+
+    #[test]
+    fn status_colors_maps_status_names_to_their_glyph_color() {
+        let cfg = load_json(
+            r##"{"status_colors":{"working":"#ff0000","idle":"light blue","done":"magenta"}}"##,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.status_color(Status::Working), Color::Rgb(255, 0, 0));
+        assert_eq!(cfg.status_color(Status::Idle), Color::LightBlue);
+        // "magenta" differs from done's default cyan, so this fails if the override is dropped.
+        assert_eq!(cfg.status_color(Status::Done), Color::Magenta);
+        // A status without an entry keeps its default color.
+        assert_eq!(cfg.status_color(Status::Blocked), Color::Red);
+        assert_eq!(load_json("{}").map(|c| c.status_colors), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_status_colors_entry_that_is_not_a_status_or_a_color_is_a_config_error() {
+        for bad in [
+            r#"{"status_colors":{"bogus":"red"}}"#,
+            r#"{"status_colors":{"working":"not-a-color"}}"#,
+            r#"{"status_colors":{"working":5}}"#,
+            r#"{"status_colors":{"working":"10"}}"#,
+            r#"{"status_colors":"red"}"#,
+            r#"{"status_colors":["red"]}"#,
+        ] {
+            let err = load_json(bad).err().unwrap_or_default();
+            assert!(err.contains("status_colors"), "{bad}: {err}");
+        }
+        // The error names the offending key.
+        let err = load_json(r#"{"status_colors":{"bogus":"red"}}"#)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("bogus"), "{err}");
+        let err = load_json(r#"{"status_colors":{"working":"not-a-color"}}"#)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("working"), "{err}");
     }
 
     #[test]

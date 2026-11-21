@@ -35,6 +35,7 @@ mod config;
 mod keys;
 mod rows;
 mod state;
+mod status;
 mod ui;
 
 use config::{pick, Config};
@@ -53,6 +54,7 @@ struct Env {
     state_path: String,
     list: Option<String>,
     plugin_id: String,
+    status_indicators: status::Indicator,
 }
 
 // Like bash `${VAR:-}`: an empty variable counts as unset.
@@ -80,6 +82,7 @@ impl Env {
             list: var("AGENT_SEARCH_LIST"),
             plugin_id: var("HERDR_PLUGIN_ID")
                 .unwrap_or_else(|| "takashiaihara.agent-search".into()),
+            status_indicators: status::indicators(),
         }
     }
 
@@ -152,7 +155,7 @@ impl Snapshot {
     }
 
     fn rows(&mut self, env: &Env, cfg: &Config, st: &State) -> Res<Vec<Row>> {
-        rows::build(self.get(env)?.as_ref(), cfg, st)
+        rows::build(self.get(env)?.as_ref(), cfg, st, env.status_indicators)
     }
 
     // None when the list is empty: no panes at all is not evidence that every saved pane is gone.
@@ -532,15 +535,16 @@ fn restore(env: &Env) -> Res<()> {
         let _lock = state::Lock::acquire(&env.state_dir, &env.state_path)?;
         State::load(&env.state_path)
     };
-    let todo: Vec<(String, String, Value)> = rows::build(list.as_ref(), &cfg, &planned)?
-        .into_iter()
-        .filter(|r| !r.has_token)
-        .filter_map(|r| {
-            planned
-                .lookup("prio", &r.key)
-                .map(|saved| (r.id, r.key, saved))
-        })
-        .collect();
+    let todo: Vec<(String, String, Value)> =
+        rows::build(list.as_ref(), &cfg, &planned, env.status_indicators)?
+            .into_iter()
+            .filter(|r| !r.has_token)
+            .filter_map(|r| {
+                planned
+                    .lookup("prio", &r.key)
+                    .map(|saved| (r.id, r.key, saved))
+            })
+            .collect();
     // `act` holds the state lock across its write and its herdr call, so holding the same lock for
     // each pane's check and call serializes the two: a priority set or cleared after the state
     // above was read is seen on the re-read, and the pane is skipped instead of overwritten.
@@ -883,6 +887,7 @@ mod tests {
             state_path: state.to_string_lossy().into_owned(),
             list: Some(list.to_string_lossy().into_owned()),
             plugin_id: "t".into(),
+            status_indicators: status::Indicator::Dots,
         }
     }
 

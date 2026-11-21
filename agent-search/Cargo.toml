@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde_json = { version = "1", features = ["preserve_order"] }
 nucleo-matcher = "0.3"
 ratatui = "0.30"
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 unicode-width = "0.2"

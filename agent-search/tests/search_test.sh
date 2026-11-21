@@ -67,6 +67,8 @@ fresh() {
   unset HERDR_SOCKET_PATH
   cp "$tmp/list.orig" "$tmp/list.json"
   export AGENT_SEARCH_LIST="$tmp/list.json" FAKE_LIST="$tmp/list.json" HERDR_BIN_PATH="$tmp/herdr" FAKE_CALLS="$tmp/calls$n"
+  # A missing file here means dots; a test that wants symbols writes [ui] status_indicators to it.
+  export HERDR_CONFIG_PATH="$tmp/herdr-config$n.toml"
   mkdir -p "$HERDR_PLUGIN_CONFIG_DIR"
   : > "$FAKE_CALLS"
 }
@@ -463,7 +465,7 @@ fresh
 jq '.result.panes[1].title = "a\tb\nc\u001b[31m"' "$tmp/list.json" > "$tmp/ctrl.json"
 check "control characters in a value cannot split or color a row" \
   "$(AGENT_SEARCH_LIST="$tmp/ctrl.json" pk lines | wc -l | tr -d ' ')|$(AGENT_SEARCH_LIST="$tmp/ctrl.json" pk lines | sed -n 2p | cut -f2 | tr -s ' ')" \
-  "4| unknown a b c [31m"
+  "4| · a b c [31m"
 jq '.result.panes[3].title = "write"' "$tmp/list.json" > "$tmp/prefix.json"
 echo '{"sorts":[{"name":"t","by":["title:desc"]}]}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
 check "descending text sort puts a string after its longer extensions" \
@@ -848,6 +850,82 @@ check "restore skips a saved priority that changed or went away after it read th
   "$(FAKE_WRITE_STATE_PANE=w1:p1 FAKE_WRITE_STATE_JSON='{"prio":{"s1":4,"w1:p2":9}}' AGENT_SEARCH_LIST="$tmp/lost3.json" pk restore 2>&1; echo "rc=$?"; cat "$FAKE_CALLS")" \
   "rc=0
 pane report-metadata w1:p1 --source takashiaihara.agent-search --token prio=4"
+
+fresh
+check "the agent_status column shows Herdr's dots glyphs, one cell each" \
+  "$(pk lines | cut -f2 | tr '\n' ';')" \
+  "    ●  fix login;    ·  shell;    ●  write docs;    ○  review;"
+check "the status word stays in the search text under the glyph" \
+  "$(pk lines | grep '^w2:p1' | cut -f3 | grep -cw working; pk lines | grep '^w1:p2' | cut -f3 | grep -cw unknown)" \
+  "1
+1"
+check "lines shows the glyphs without color" \
+  "$(pk lines | grep -v '^-' | cut -f2 | grep -c $'\033'; echo "rc=${PIPESTATUS[0]}")" "0
+rc=0"
+
+fresh
+printf '[ui]\nstatus_indicators = "symbols"\n' > "$HERDR_CONFIG_PATH"
+check "ui.status_indicators = symbols picks Herdr's symbol glyphs" \
+  "$(pk lines | cut -f2 | tr '\n' ';')" \
+  "    ✓  fix login;    ·  shell;    ◐  write docs;    ○  review;"
+check "the status word is still searchable under symbols" \
+  "$(pk lines | grep '^w2:p1' | cut -f3 | grep -cw working)" "1"
+
+fresh
+printf '[ui]\nstatus_indicators = "dots"\n' > "$HERDR_CONFIG_PATH"
+check "an explicit dots value shows the dots glyphs" \
+  "$(pk lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
+printf 'this is = = not toml' > "$HERDR_CONFIG_PATH"
+check "an unparsable Herdr config falls back to dots" \
+  "$(pk lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
+printf '[ui]\n' > "$HERDR_CONFIG_PATH"
+check "a missing status_indicators key falls back to dots" \
+  "$(pk lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
+printf '[ui]\nstatus_indicators = "emoji"\n' > "$HERDR_CONFIG_PATH"
+check "an unknown status_indicators value falls back to dots" \
+  "$(pk lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
+printf 'status_indicators = "symbols"\n' > "$HERDR_CONFIG_PATH"
+check "the key outside the ui table does not count" \
+  "$(pk lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
+
+fresh
+mkdir -p "$tmp/xdg/herdr" "$tmp/home/.config/herdr"
+# The two files disagree on purpose and HOME is pinned everywhere, so each check fails when
+# its own lookup is missing or reads the wrong one.
+printf '[ui]\nstatus_indicators = "dots"\n' > "$tmp/xdg/herdr/config.toml"
+printf '[ui]\nstatus_indicators = "symbols"\n' > "$tmp/home/.config/herdr/config.toml"
+check "XDG_CONFIG_HOME/herdr/config.toml is read when HERDR_CONFIG_PATH is unset" \
+  "$(env -u HERDR_CONFIG_PATH XDG_CONFIG_HOME="$tmp/xdg" HOME="$tmp/home" "$bin" lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
+check "HOME/.config/herdr/config.toml is the fallback when XDG_CONFIG_HOME is unset too" \
+  "$(env -u HERDR_CONFIG_PATH -u XDG_CONFIG_HOME HOME="$tmp/home" "$bin" lines | grep '^w2:p1' | cut -f2)" "    ◐  write docs"
+printf '[ui]\nstatus_indicators = "symbols"\n' > "$tmp/xdg/herdr/config.toml"
+check "HERDR_CONFIG_PATH wins over the config dir lookup" \
+  "$(env XDG_CONFIG_HOME="$tmp/xdg" HOME="$tmp/home" "$bin" lines | grep '^w2:p1' | cut -f2)" "    ●  write docs"
+
+fresh
+echo '{"status_colors":{"working":"#ff0000","done":"light blue"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "status_colors with a hex color and a light color name is accepted" \
+  "$(run lines 2>&1 >/dev/null; echo "rc=$?")" "rc=0"
+echo '{"status_colors":{"bogus":"red"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an unknown status name in status_colors is a config error naming the key" \
+  "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: unknown status \"bogus\" in status_colors
+rc=1"
+echo '{"status_colors":{"working":"not-a-color"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an invalid status_colors color is a config error naming the key" \
+  "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: invalid color \"not-a-color\" for status_colors.working
+rc=1"
+echo '{"status_colors":"red"}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "status_colors that is not an object is a config error" \
+  "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: status_colors must be an object
+rc=1"
+echo '{"status_colors":{"working":"10"}}' > "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+check "an indexed color is not a valid status_colors value" \
+  "$(run lines 2>&1 >/dev/null; echo "rc=$?")" \
+  "agent-search: $HERDR_PLUGIN_CONFIG_DIR/config.json: invalid color \"10\" for status_colors.working
+rc=1"
 
 if [ "$fails" -gt 0 ]; then echo "$fails failed"; exit 1; fi
 echo "all passed"
