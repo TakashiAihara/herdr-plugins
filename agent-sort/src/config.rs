@@ -2,8 +2,10 @@ use serde_json::Value;
 use std::fs;
 use std::io::ErrorKind;
 
-// Herdr's agent.view.set limits (agent_view.rs MAX_LABEL_CHARS and MAX_SORT_FIELDS), checked at
-// load so a too-big config is a config error, not a rejected request at apply time.
+// The parts of agent.view.set's input contract checked at load — preset name length (it is sent
+// as the label, MAX_LABEL_CHARS) and the sort entry count (MAX_SORT_FIELDS) — so a too-big config
+// is a config error, not a rejected request at apply time. Herdr's filter depth and node limits
+// are left to it.
 const MAX_NAME_CHARS: usize = 32;
 const MAX_SORT_ENTRIES: usize = 8;
 
@@ -231,7 +233,18 @@ fn preset(path: &str, i: usize, v: &toml::Value) -> Result<Preset, String> {
     }
 
     let name = match t.get("name") {
-        Some(toml::Value::String(s)) if !s.is_empty() => s.clone(),
+        // Herdr trims the label, so a name with padding or only padding is not the name written.
+        Some(toml::Value::String(s)) if s.trim().is_empty() => {
+            return Err(format!(
+                "{path}: the preset name must be a non-empty string, got {s:?}"
+            ))
+        }
+        Some(toml::Value::String(s)) if s.trim() != s => {
+            return Err(format!(
+                "{path}: preset name {s:?} has leading or trailing whitespace"
+            ))
+        }
+        Some(toml::Value::String(s)) => s.clone(),
         Some(v) => {
             return Err(format!(
                 "{path}: the preset name must be a non-empty string, got {}",
@@ -465,7 +478,18 @@ mod tests {
         let cfg = parse("config.toml", TEMPLATE).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(cfg.presets, builtins());
         assert_eq!(cfg.default, None);
-        assert!(TEMPLATE.lines().any(|l| l.starts_with('#')));
+    }
+
+    #[test]
+    fn the_template_documents_every_section_in_its_comments() {
+        for section in ["token", "field", "order", "filter", "default", "[keys]"] {
+            assert!(
+                TEMPLATE
+                    .lines()
+                    .any(|l| l.trim_start().starts_with('#') && l.contains(section)),
+                "no comment line mentions {section:?}"
+            );
+        }
     }
 
     #[test]
@@ -550,6 +574,18 @@ sort = [{ token = "repo" }]
             (
                 "[[sort_presets]]\nname = \"\"\nsort = [{ field = \"agent\" }]",
                 "non-empty string, got \"\"",
+            ),
+            (
+                "[[sort_presets]]\nname = \"   \"\nsort = [{ field = \"agent\" }]",
+                "non-empty string, got \"   \"",
+            ),
+            (
+                "[[sort_presets]]\nname = \" x\"\nsort = [{ field = \"agent\" }]",
+                "preset name \" x\" has leading or trailing whitespace",
+            ),
+            (
+                "[[sort_presets]]\nname = \"x \"\nsort = [{ field = \"agent\" }]",
+                "preset name \"x \" has leading or trailing whitespace",
             ),
             (
                 "[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\", bogus = 1 }]",

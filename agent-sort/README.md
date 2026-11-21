@@ -65,7 +65,7 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - `sort` entries mix `token = "<name>"` and `field = "<name>"`; exactly one of the two per entry, `order` is `"asc"` (default) or `"desc"`.
 - The built-in fields are `workspace_order`, `tab_order`, `pane_order`, `attention`, `status`, `agent`, `seen`, `state_change_seq`.
 - A token name is 1–32 of `[A-Za-z0-9_-]`, the same rule Herdr uses for `pane report-metadata --token`.
-- Token values compare as strings, so a single digit needs no padding, but zero-pad two-digit ranges (`prio=03` … `prio=12`) when numeric order matters.
+- Token values compare as strings, so pad to the same number of digits whenever values can have different lengths (for 1–12 write `01`–`12`, or `"10"` sorts before `"3"`).
 - `filter` is the filter object of the socket API's `agent.view.set`, converted from TOML to JSON untouched; it must be a table.
 - Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset.
 - A `[[sort_presets]]` list replaces the built-ins whole. Without a config file the built-ins are `attention` (attention, then state_change_seq, both desc), `recent` (state_change_seq desc), `workspace` (workspace_order, tab_order, pane_order, all asc).
@@ -99,7 +99,7 @@ Herdr drops all tokens when its server restarts, so whatever reports them should
 
 ## Limits
 
-- A view lasts until the Herdr server exits; the plugin's startup hook (`restore`) re-applies the saved preset.
+- A view lasts until the Herdr server exits; the plugin's startup hook (`restore`) re-applies the saved preset, or the config `default` when the saved preset was removed from the config — it says so once and forgets the stale name.
 - Agents without the token sort after agents that have it; equal entries keep Herdr's own order.
 - The view is one projection for the whole Agents view, not per pane group or per workspace.
 - Herdr has a single Agents view override shared by every source. If another plugin or a manual `agent.view.set` replaces it, agent-sort's state still names its preset: the popup's current mark, `next`, and `restore` at startup all follow the state.

@@ -22,11 +22,24 @@ fn upper(c: char) -> char {
     }
 }
 
+fn lower(c: char) -> char {
+    let mut lo = c.to_lowercase();
+    match (lo.next(), lo.next()) {
+        (Some(l), None) => l,
+        _ => c,
+    }
+}
+
 // The one form of a key: a shifted letter is its uppercase with SHIFT (a terminal reports a typed
-// capital as Char('A') + SHIFT, or as Char('a') + SHIFT, or without SHIFT), and BackTab never
-// carries SHIFT.
+// capital as Char('A') + SHIFT, or as Char('a') + SHIFT, or without SHIFT), except with CONTROL:
+// a terminal sends the same byte for ctrl-a and ctrl-A, so a control letter folds to lowercase
+// without SHIFT. BackTab never carries SHIFT.
 pub fn normalize(code: KeyCode, mods: KeyModifiers) -> Bind {
     match code {
+        KeyCode::Char(c) if c.is_alphabetic() && mods.contains(KeyModifiers::CONTROL) => Bind {
+            code: KeyCode::Char(lower(c)),
+            mods: mods - KeyModifiers::SHIFT,
+        },
         KeyCode::Char(c) if c.is_alphabetic() => {
             let up = upper(c);
             if mods.contains(KeyModifiers::SHIFT) || (c.is_uppercase() && up == c) {
@@ -111,10 +124,10 @@ pub fn parse_key(name: &str) -> Option<Bind> {
 // Ctrl with one of these chars is the same byte a terminal sends for another key: ^M is Enter's
 // byte, ^I is Tab's, ^H is Backspace's, ^J is the byte Enter sends when the line discipline maps
 // it, ^[ is Esc's and ^@ is Ctrl-Space's. A bind named for the char either never fires, because
-// the terminal reports the other key, or it steals that key's presses. The shifted spelling of a
-// control letter (`ctrl-M`, parsed as CONTROL|SHIFT|M) sends the same byte, so it is caught too.
+// the terminal reports the other key, or it steals that key's presses. normalize already folded
+// every control letter to plain CONTROL, so shifted spellings like `ctrl-M` land here too.
 fn ctrl_byte(b: Bind) -> Option<&'static str> {
-    if b.mods != KeyModifiers::CONTROL && b.mods != (KeyModifiers::CONTROL | KeyModifiers::SHIFT) {
+    if b.mods != KeyModifiers::CONTROL {
         return None;
     }
     let KeyCode::Char(c) = b.code else {
@@ -248,9 +261,37 @@ mod tests {
             parse_key("ctrl-alt-f5"),
             bind(KeyCode::F(5), KeyModifiers::CONTROL | KeyModifiers::ALT)
         );
-        assert_eq!(parse_key("tab").map(|b| b.code), Some(KeyCode::Tab));
+        assert_eq!(parse_key("tab"), bind(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(parse_key("ctrl-nonsense"), None);
         assert_eq!(parse_key(""), None);
+    }
+
+    #[test]
+    fn a_ctrl_letter_is_the_lowercase_bind_whatever_its_spelling() {
+        let ctrl_c = bind(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(parse_key("ctrl-c"), ctrl_c);
+        assert_eq!(
+            parse_key("ctrl-C"),
+            ctrl_c,
+            "shift does not reach a control letter"
+        );
+        // A pressed ctrl+c arrives either way and fires the bind.
+        assert_eq!(
+            normalize(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ctrl_c.unwrap_or_else(|| panic!("ctrl_c"))
+        );
+        assert_eq!(
+            normalize(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            ctrl_c.unwrap_or_else(|| panic!("ctrl_c"))
+        );
+        // Alt keeps telling the letters apart.
+        assert_eq!(
+            parse_key("alt-C"),
+            bind(KeyCode::Char('C'), KeyModifiers::ALT | KeyModifiers::SHIFT)
+        );
     }
 
     #[test]
@@ -307,6 +348,11 @@ mod tests {
         assert!(
             dup.contains("keys.edit \"tab\" is the same key as keys.select"),
             "{dup}"
+        );
+        let ctrl_dup = resolve_keys("[keys]\nselect = \"ctrl-C\"\nedit = \"ctrl-c\"");
+        assert!(
+            ctrl_dup.contains("keys.edit \"ctrl-c\" is the same key as keys.select"),
+            "{ctrl_dup}"
         );
         let same = resolve_keys("[keys]\nedit = [\"alt-A\", \"alt-shift-a\"]");
         assert!(

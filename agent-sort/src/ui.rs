@@ -110,17 +110,23 @@ fn help_line(sets: &[KeySet]) -> String {
 struct Loaded {
     app: App,
     binds: Binds,
-    // The [keys] resolution error when the binds are all defaults; an edit reload joins it back
-    // into the status line so it is not lost under the edit result.
+    // The config error when it did not load (the message already carries the path); an edit
+    // reload joins it back into the status line so an editor failure does not hide it.
+    cfg_err: Option<String>,
+    // The [keys] resolution error, with the config path, when the binds are all defaults; joined
+    // back into the status line the same way.
     key_err: Option<String>,
 }
 
-// The resolved key sets, or all defaults when the [keys] table cannot be used; the error goes to
-// the status line and the popup keeps working.
-fn key_sets(cfg: &crate::config::Config) -> (Vec<KeySet>, Option<String>) {
+// The resolved key sets, or all defaults when the [keys] table cannot be used; the error carries
+// the config path, goes to the status line, and the popup keeps working.
+fn key_sets(path: &str, cfg: &crate::config::Config) -> (Vec<KeySet>, Option<String>) {
     match keys::resolve(cfg.keys_raw()) {
         Ok(sets) => (sets, None),
-        Err(e) => (keys::resolve(None).unwrap_or_default(), Some(e)),
+        Err(e) => (
+            keys::resolve(None).unwrap_or_default(),
+            Some(format!("{path}: {e}")),
+        ),
     }
 }
 
@@ -139,18 +145,18 @@ fn load(env: &Env) -> Loaded {
                     help_line(&sets),
                 ),
                 binds: Binds::new(&sets),
+                cfg_err: Some(e),
                 key_err: None,
             };
         }
     };
-    let (sets, key_err) = key_sets(&cfg);
-    let status = key_err
-        .as_ref()
-        .map_or(String::new(), |e| format!("{}: {e}", env.config_path));
+    let (sets, key_err) = key_sets(&env.config_path, &cfg);
+    let status = key_err.clone().unwrap_or_default();
     let current = current(&cfg, &state::read(&env.state_path)).map(String::from);
     Loaded {
         binds: Binds::new(&sets),
         app: App::new(cfg.presets, current, status, help_line(&sets)),
+        cfg_err: None,
         key_err,
     }
 }
@@ -164,6 +170,9 @@ pub fn handle_key(app: &mut App, binds: &Binds, key: KeyEvent) -> Action {
         return Action::None;
     };
     match op {
+        // On an empty list a move changes nothing, so the status line stays.
+        Op::Up if app.presets.is_empty() => Action::None,
+        Op::Down if app.presets.is_empty() => Action::None,
         Op::Up => {
             app.move_cursor(-1);
             app.status.clear();
@@ -199,16 +208,17 @@ pub fn handle_key(app: &mut App, binds: &Binds, key: KeyEvent) -> Action {
 
 // Rows the status needs once Paragraph::wrap folds it to `width` columns, so a long config error
 // and its edit hint stay readable instead of truncating. Words are packed greedily; a word longer
-// than the width is broken across lines the way the widget breaks it.
+// than the width is broken across lines the way the widget breaks it. An empty status takes no
+// row at all.
 fn wrapped_height(text: &str, width: usize) -> usize {
-    if width == 0 {
+    if width == 0 || text.is_empty() {
         return 0;
     }
     let mut lines = 0;
     for logical in text.split('\n') {
         let mut col = 0usize;
         for word in logical.split_whitespace() {
-            let w = word.chars().count();
+            let w = ratatui::text::Line::from(word).width();
             if col > 0 && col + 1 + w <= width {
                 col += 1 + w;
             } else {
@@ -324,11 +334,21 @@ fn session(env: &Env, term: &mut DefaultTerminal) -> Res<()> {
                 }
             }
             Action::Clear => match crate::clear_view(env) {
-                Ok(crate::ClearOutcome::Cleared) => return Ok(()),
-                Ok(crate::ClearOutcome::Kept(source)) => {
-                    loaded.app.status = crate::clear_message(&crate::ClearOutcome::Kept(source));
+                Ok(outcome) => {
+                    env.notify_ok(&crate::clear_message(&outcome));
+                    match outcome {
+                        crate::ClearOutcome::Cleared => return Ok(()),
+                        crate::ClearOutcome::Kept(_) => {
+                            loaded.app.status = crate::clear_message(&outcome);
+                            // The state is null now: nothing of ours is applied anymore.
+                            loaded.app.current = None;
+                        }
+                    }
                 }
-                Err(e) => loaded.app.status = e,
+                Err(e) => {
+                    env.notify_error(&e);
+                    loaded.app.status = e;
+                }
             },
             Action::Edit => {
                 // The editor needs the real terminal: leave the alternate screen, run the same
@@ -345,13 +365,17 @@ fn session(env: &Env, term: &mut DefaultTerminal) -> Res<()> {
                     }
                 };
                 loaded = load(env);
-                // The edit result joins what is still wrong: a key error, or the edit hint while
-                // the config is still broken.
+                // The edit result joins what is still wrong: a config error that survived the
+                // edit (skipped when it is already the result) plus its hint, and a key error.
                 let mut parts = vec![status];
+                if let Some(e) = loaded.cfg_err.clone() {
+                    if e != parts[0] {
+                        parts.push(e);
+                    }
+                    parts.push("press e to edit".into());
+                }
                 if let Some(e) = loaded.key_err.clone() {
                     parts.push(format!("keys: {e}"));
-                } else if !loaded.app.status.is_empty() {
-                    parts.push("press e to edit".into());
                 }
                 loaded.app.status = parts.join("; ");
             }
@@ -534,6 +558,10 @@ mod tests {
             assert_eq!(handle_key(&mut app, &binds, key(code, mods)), Action::None);
         }
         assert_eq!(
+            app.status, "bad config (press e to edit)",
+            "keys that do nothing on an empty list keep the status"
+        );
+        assert_eq!(
             handle_key(
                 &mut app,
                 &binds,
@@ -571,10 +599,17 @@ mod tests {
     fn the_help_line_names_the_default_binds() {
         let sets = keys::resolve(None).unwrap_or_else(|e| panic!("{e}"));
         let help = help_line(&sets);
-        for name in [
-            "up", "k", "down", "j", "enter", "e", "0", "esc", "q", "ctrl-c",
+        // Each group is "key/key/... action"; compare whole groups so a key name hidden in a
+        // label cannot pass.
+        let groups: Vec<&str> = help.split("   ").collect();
+        for group in [
+            "up/k/down/j move",
+            "enter select",
+            "e edit",
+            "0 clear",
+            "esc/q/ctrl-c quit",
         ] {
-            assert!(help.contains(name), "{name} not in {help}");
+            assert!(groups.contains(&group), "{group} not in {help}");
         }
         assert_eq!(app().help, help);
     }
@@ -600,12 +635,23 @@ mod tests {
 
     #[test]
     fn wrapped_height_counts_word_wrapped_lines() {
+        assert_eq!(wrapped_height("", 10), 0, "no status, no row");
         assert_eq!(wrapped_height("one", 10), 1);
         assert_eq!(wrapped_height("aa bb cc", 5), 2);
         assert_eq!(
             wrapped_height("a bbbbbb c", 5),
             3,
             "a word wider than the line breaks"
+        );
+        assert_eq!(
+            wrapped_height("aaaaaaaaaaaa", 5),
+            3,
+            "a word more than twice the width"
+        );
+        assert_eq!(
+            wrapped_height("日本語", 2),
+            4,
+            "display width counts, not chars: 6 columns break over 2"
         );
         assert_eq!(wrapped_height("aaa\nbbb", 10), 2);
         assert_eq!(wrapped_height("anything", 0), 0);
