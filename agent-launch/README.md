@@ -38,7 +38,7 @@ With no configuration the command is `claude -- {prompt}`: Claude Code starts wi
 |---|---|---|
 | Repo | type | filter the candidates (fuzzy) |
 | Repo | `Up` / `Down`, `Ctrl-P` / `Ctrl-N` | move |
-| Repo | `Enter` | take the selected row; with text typed that no candidate matches, take the typed text as the repo |
+| Repo | `Enter` | take the selected row. While you type, the list shows `(this directory)`, then `use "<what you typed>"` (unless it is exactly a candidate), then the fuzzy matches; the best match is selected, or the typed row when nothing matches |
 | Repo | `Esc`, `Ctrl-C`, `Ctrl-D` | close |
 | Prompt | type | the task |
 | Prompt | `Tab` / `Shift-Tab` | next / previous agent |
