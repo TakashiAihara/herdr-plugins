@@ -43,7 +43,8 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-// The repos command's lines are the candidates as they are; only blank lines are dropped.
+// The repos command's lines are the candidates as they are; blank lines and lines holding a
+// control character are dropped.
 pub fn list_repos(cmd: &str, cwd: &str) -> Res<Vec<String>> {
     let out = Command::new("sh")
         .args(["-c", cmd])

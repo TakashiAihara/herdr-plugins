@@ -60,10 +60,10 @@ impl Input {
         self.text.chars().count()
     }
 
-    // Returns whether the text changed. Keys that only move the cursor or mean nothing here
-    // return false.
-    // Pasted text is one line here: line breaks and other control characters become spaces.
+    // Pasted text is one line here: each line break (CRLF counts as one) and other control
+    // character becomes a space.
     fn paste(&mut self, s: &str) {
+        let s = s.replace("\r\n", "\n");
         let clean: String = s
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
@@ -72,6 +72,8 @@ impl Input {
         self.cursor += clean.chars().count();
     }
 
+    // Returns whether the text changed. Keys that only move the cursor or mean nothing here
+    // return false.
     fn edit(&mut self, key: KeyEvent) -> bool {
         match (key.code, key.modifiers) {
             (KeyCode::Left, _) => self.cursor = self.cursor.saturating_sub(1),
@@ -124,16 +126,15 @@ impl Input {
             skip -= 1;
         }
         // Only what fits is returned, so a long paste with the cursor near the start stays cheap.
-        let mut used = 0;
-        let shown = self
-            .text
-            .chars()
-            .skip(skip)
-            .take_while(|&c| {
-                used += w(c);
-                used <= avail
-            })
-            .collect();
+        // Measured as a string like `width_from`, so an emoji sequence is never split.
+        let mut shown = String::new();
+        for c in self.text.chars().skip(skip) {
+            shown.push(c);
+            if shown.width() > avail {
+                shown.pop();
+                break;
+            }
+        }
         (shown, width_from(skip))
     }
 }
@@ -384,7 +385,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             .map(|r| match r {
                 Row::Here => ListItem::new(HERE),
                 Row::Typed(t) => ListItem::new(format!("use {t:?}")),
-                Row::Repo(i) => ListItem::new(shown(&app.repos[i])),
+                Row::Repo(i) => ListItem::new(app.repos[i].as_str()),
             })
             .collect();
         frame.render_stateful_widget(
@@ -397,7 +398,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         );
     }
     let (text, style) = if !app.status.is_empty() {
-        (app.status.clone(), Style::new().fg(Color::Red))
+        (shown(&app.status), Style::new().fg(Color::Red))
     } else {
         (String::new(), dim)
     };
@@ -900,19 +901,38 @@ mod tests {
     }
 
     #[test]
-    fn control_characters_from_the_repos_command_are_not_drawn() {
+    fn control_characters_in_the_status_and_cwd_are_not_drawn() {
+        // The status carries the repos command's stderr; the cwd comes from Herdr.
         let a = App::new(
             cfg(with_repo()),
-            vec!["o/\u{1b}[31mred".into()],
-            "/b".into(),
-            String::new(),
+            vec![],
+            "/b\u{1b}x".into(),
+            "repos command failed: \u{1b}[31mboom".into(),
         );
-        let (lines, _) = screen(&a, 50);
+        let (lines, _) = screen(&a, 60);
         let all = lines.join("\n");
+        assert!(!all.contains('\u{1b}'), "{all}");
         assert!(
-            !all.contains('\u{1b}') && all.contains("o/\u{FFFD}[31mred"),
+            all.contains("/b\u{FFFD}x") && all.contains("\u{FFFD}[31mboom"),
             "{all}"
         );
+    }
+
+    #[test]
+    fn a_pasted_crlf_is_one_space() {
+        let mut i = Input::default();
+        i.paste("a\r\nb");
+        assert_eq!(i.text, "a b");
+    }
+
+    #[test]
+    fn an_emoji_sequence_is_not_split_when_the_line_is_narrow() {
+        let mut i = Input::default();
+        i.text = "👩\u{200d}💻a".into();
+        i.cursor = 0;
+        // Three cells hold the whole text: two for the emoji, one for "a".
+        assert_eq!(i.view(4).0, "👩\u{200d}💻a");
+        assert_eq!(i.view(3).0, "👩\u{200d}💻a");
     }
 
     #[test]
