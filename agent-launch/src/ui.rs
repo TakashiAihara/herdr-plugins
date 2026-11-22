@@ -1,0 +1,795 @@
+use crate::config::{Agent, Config};
+use crate::launch;
+use crate::{Env, Res};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::{DefaultTerminal, Frame};
+use unicode_width::UnicodeWidthChar;
+
+const HERE: &str = "(this directory)";
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Step {
+    Repo,
+    Prompt,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct Request {
+    pub template: String,
+    pub repo: String,
+    pub prompt: String,
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Action {
+    None,
+    Quit,
+    Launch(Request),
+}
+
+// A one-line text field. The cursor counts characters: bytes would cut a multibyte character.
+#[derive(Default)]
+pub struct Input {
+    text: String,
+    cursor: usize,
+}
+
+impl Input {
+    fn byte(&self, chars: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(chars)
+            .map_or(self.text.len(), |(i, _)| i)
+    }
+
+    fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    // Returns whether the text changed. Keys that only move the cursor or mean nothing here
+    // return false.
+    fn edit(&mut self, key: KeyEvent) -> bool {
+        match (key.code, key.modifiers) {
+            (KeyCode::Left, _) => self.cursor = self.cursor.saturating_sub(1),
+            (KeyCode::Right, _) => self.cursor = (self.cursor + 1).min(self.len()),
+            (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => self.cursor = 0,
+            (KeyCode::End, _) | (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                self.cursor = self.len()
+            }
+            (KeyCode::Backspace, _) if self.cursor > 0 => {
+                self.cursor -= 1;
+                self.text.remove(self.byte(self.cursor));
+                return true;
+            }
+            (KeyCode::Delete, _) if self.cursor < self.len() => {
+                self.text.remove(self.byte(self.cursor));
+                return true;
+            }
+            (KeyCode::Char(c), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
+                self.text.insert(self.byte(self.cursor), c);
+                self.cursor += 1;
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    // The text from the first character that keeps the cursor inside `avail` cells, and the
+    // cursor's column in it.
+    fn view(&self, avail: usize) -> (String, usize) {
+        let w = |c: char| c.width().unwrap_or(0);
+        let before: Vec<char> = self.text.chars().take(self.cursor).collect();
+        let mut col: usize = before.iter().map(|&c| w(c)).sum();
+        let mut skip = 0;
+        while col >= avail && skip < before.len() {
+            col -= w(before[skip]);
+            skip += 1;
+        }
+        (self.text.chars().skip(skip).collect(), col)
+    }
+}
+
+pub struct App {
+    cwd: String,
+    agents: Vec<Agent>,
+    agent: usize,
+    repos: Vec<String>,
+    step: Step,
+    repo_step: bool,
+    filter: Input,
+    // Indexes into `repos`, best match first.
+    shown: Vec<usize>,
+    // 0 is "(this directory)", n is shown[n - 1].
+    cur: usize,
+    repo: String,
+    prompt: Input,
+    // The last failure, shown under the list until the next key.
+    pub status: String,
+}
+
+impl App {
+    pub fn new(cfg: Config, repos: Vec<String>, cwd: String, status: String) -> App {
+        let repo_step = cfg.wants_repo();
+        let mut app = App {
+            cwd,
+            agents: cfg.agents,
+            agent: 0,
+            shown: Vec::new(),
+            repos,
+            step: if repo_step { Step::Repo } else { Step::Prompt },
+            repo_step,
+            filter: Input::default(),
+            cur: 0,
+            repo: String::new(),
+            prompt: Input::default(),
+            status,
+        };
+        app.refilter();
+        app
+    }
+
+    #[cfg(test)]
+    pub fn repos(&self) -> &[String] {
+        &self.repos
+    }
+
+    fn query(&self) -> &str {
+        self.filter.text.trim()
+    }
+
+    fn refilter(&mut self) {
+        let q = self.query();
+        if q.is_empty() {
+            self.shown = (0..self.repos.len()).collect();
+            self.cur = 0;
+            return;
+        }
+        let pattern = Pattern::parse(q, CaseMatching::Smart, Normalization::Smart);
+        let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
+        let mut buf = Vec::new();
+        let mut scored: Vec<(usize, u32)> = self
+            .repos
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                pattern
+                    .score(Utf32Str::new(r, &mut buf), &mut matcher)
+                    .map(|s| (i, s))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        self.shown = scored.into_iter().map(|(i, _)| i).collect();
+        // Typing then Enter takes the best match; with none, Enter takes what was typed.
+        self.cur = usize::from(!self.shown.is_empty());
+    }
+
+    // What Enter on the repo step accepts: "(this directory)" is empty, a candidate is as listed,
+    // and typed text no candidate matched is the repo itself.
+    fn repo_choice(&self) -> String {
+        if self.cur > 0 {
+            self.repos[self.shown[self.cur - 1]].clone()
+        } else if !self.query().is_empty() && self.shown.is_empty() {
+            self.query().to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    fn move_cur(&mut self, delta: isize) {
+        let last = self.shown.len();
+        self.cur = self.cur.saturating_add_signed(delta).min(last);
+    }
+
+    fn cycle_agent(&mut self, delta: isize) {
+        let n = self.agents.len();
+        self.agent = (self.agent + n).wrapping_add_signed(delta) % n;
+    }
+}
+
+pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
+    if key.kind == KeyEventKind::Release {
+        return Action::None;
+    }
+    app.status.clear();
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+        return Action::Quit;
+    }
+    match app.step {
+        Step::Repo => match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => Action::Quit,
+            (KeyCode::Enter, _) => {
+                app.repo = app.repo_choice();
+                app.step = Step::Prompt;
+                Action::None
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                app.move_cur(-1);
+                Action::None
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                app.move_cur(1);
+                Action::None
+            }
+            _ => {
+                if app.filter.edit(key) {
+                    app.refilter();
+                }
+                Action::None
+            }
+        },
+        Step::Prompt => match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) if app.repo_step => {
+                app.step = Step::Repo;
+                Action::None
+            }
+            (KeyCode::Esc, _) => Action::Quit,
+            (KeyCode::Enter, _) => {
+                let prompt = app.prompt.text.trim();
+                if prompt.is_empty() {
+                    return Action::Quit;
+                }
+                Action::Launch(Request {
+                    template: app.agents[app.agent].command.clone(),
+                    repo: app.repo.clone(),
+                    prompt: prompt.to_string(),
+                })
+            }
+            (KeyCode::Tab, _) => {
+                app.cycle_agent(1);
+                Action::None
+            }
+            (KeyCode::BackTab, _) => {
+                app.cycle_agent(-1);
+                Action::None
+            }
+            _ => {
+                app.prompt.edit(key);
+                Action::None
+            }
+        },
+    }
+}
+
+fn input_line(frame: &mut Frame, input: &Input, area: Rect) {
+    let avail = usize::from(area.width.saturating_sub(2));
+    let (text, col) = input.view(avail);
+    frame.render_widget(Paragraph::new(format!("> {text}")), area);
+    let x = area
+        .x
+        .saturating_add(2)
+        .saturating_add(u16::try_from(col).unwrap_or(u16::MAX))
+        .min(area.right().saturating_sub(1));
+    frame.set_cursor_position((x, area.y));
+}
+
+pub fn draw(frame: &mut Frame, app: &App) {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let agent = &app.agents[app.agent];
+    let head_lines = match app.step {
+        Step::Repo => format!("in: {}\nrepo (Enter picks, Esc closes)", app.cwd),
+        Step::Prompt => format!(
+            "in: {}\nrepo: {}\nagent: {} (Tab for the next)  {}",
+            app.cwd,
+            if app.repo.is_empty() { HERE } else { &app.repo },
+            agent.name,
+            agent.command
+        ),
+    };
+    let head_height = u16::try_from(head_lines.lines().count()).unwrap_or(2);
+    let [head, input, body, status] = Layout::vertical([
+        Constraint::Length(head_height),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    frame.render_widget(Paragraph::new(head_lines).style(dim), head);
+    match app.step {
+        Step::Repo => input_line(frame, &app.filter, input),
+        Step::Prompt => input_line(frame, &app.prompt, input),
+    }
+    if app.step == Step::Repo {
+        let items: Vec<ListItem> = std::iter::once(HERE)
+            .chain(app.shown.iter().map(|&i| app.repos[i].as_str()))
+            .map(ListItem::new)
+            .collect();
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::bordered())
+                .highlight_symbol("> ")
+                .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+            body,
+            &mut ListState::default().with_selected(Some(app.cur)),
+        );
+    }
+    let (text, style) = if !app.status.is_empty() {
+        (app.status.clone(), Style::new().fg(Color::Red))
+    } else if app.step == Step::Repo
+        && app.cur == 0
+        && !app.query().is_empty()
+        && app.shown.is_empty()
+    {
+        (format!("Enter uses {:?} as the repo", app.query()), dim)
+    } else {
+        (String::new(), dim)
+    };
+    frame.render_widget(Paragraph::new(text).style(style), status);
+}
+
+// The popup would vanish with a message printed just before exit, so the error waits for a key.
+fn show_error(term: &mut DefaultTerminal, msg: &str) {
+    loop {
+        let text = format!("agent-launch: {msg}\n\nPress Enter.");
+        if term
+            .draw(|f| f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), f.area()))
+            .is_err()
+        {
+            return;
+        }
+        match event::read() {
+            Ok(Event::Key(k))
+                if k.kind != KeyEventKind::Release
+                    && (matches!(k.code, KeyCode::Enter | KeyCode::Esc)
+                        || (k.code == KeyCode::Char('c')
+                            && k.modifiers == KeyModifiers::CONTROL)) =>
+            {
+                return
+            }
+            Ok(_) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+// Everything that can fail before the screen is needed. The repos command runs here, before the
+// terminal goes raw, so Ctrl-C still stops one that hangs.
+pub fn prepare(env: &Env) -> Res<App> {
+    // open always sets it; without it the agent would start in some other directory.
+    let cwd = env
+        .cwd
+        .clone()
+        .ok_or("AGENT_LAUNCH_CWD is not set (open the popup with the plugin action)")?;
+    let cfg = crate::config::load(&env.config_path)?;
+    let mut repos = Vec::new();
+    let mut status = String::new();
+    if let (true, Some(cmd)) = (cfg.wants_repo(), &cfg.repos) {
+        match launch::list_repos(cmd, &cwd) {
+            Ok(r) => repos = r,
+            Err(e) => status = e,
+        }
+    }
+    Ok(App::new(cfg, repos, cwd, status))
+}
+
+fn session(env: &Env, mut app: App, term: &mut DefaultTerminal) -> Res<()> {
+    loop {
+        term.draw(|f| draw(f, &app))
+            .map_err(|e| format!("cannot draw the screen: {e}"))?;
+        let Event::Key(key) =
+            event::read().map_err(|e| format!("cannot read the keyboard: {e}"))?
+        else {
+            continue;
+        };
+        match handle_key(&mut app, key) {
+            Action::None => {}
+            Action::Quit => return Ok(()),
+            Action::Launch(r) => {
+                return launch::launch(&env.herdr, &app.cwd, &r.template, &r.repo, &r.prompt)
+            }
+        }
+    }
+}
+
+pub fn run(env: &Env) -> Res<()> {
+    let prepared = prepare(env);
+    let mut term = match ratatui::try_init() {
+        Ok(t) => t,
+        // Without a terminal the problem found while preparing is the one worth reporting.
+        Err(e) => {
+            return Err(prepared
+                .err()
+                .unwrap_or_else(|| format!("cannot start the terminal UI: {e}")))
+        }
+    };
+    let result = prepared.and_then(|app| session(env, app, &mut term));
+    if let Err(msg) = &result {
+        show_error(&mut term, msg);
+    }
+    ratatui::restore();
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn agent(name: &str, command: &str) -> Agent {
+        Agent {
+            name: name.into(),
+            command: command.into(),
+        }
+    }
+
+    fn cfg(agents: Vec<Agent>) -> Config {
+        Config {
+            agents,
+            repos: None,
+        }
+    }
+
+    fn with_repo() -> Vec<Agent> {
+        vec![
+            agent("claude", "ccxn {repo} {prompt}"),
+            agent("devin", "ccxn --agent devin {repo} {prompt}"),
+        ]
+    }
+
+    fn repos() -> Vec<String> {
+        [
+            "github.com/o/alpha",
+            "github.com/o/beta",
+            "gitlab.com/x/alphabet",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    fn app() -> App {
+        App::new(cfg(with_repo()), repos(), "/b c".into(), String::new())
+    }
+
+    fn press(app: &mut App, code: KeyCode) -> Action {
+        handle_key(app, KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ctrl(app: &mut App, c: char) -> Action {
+        handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            assert_eq!(press(app, KeyCode::Char(c)), Action::None);
+        }
+    }
+
+    fn launch_req(repo: &str, prompt: &str, template: &str) -> Action {
+        Action::Launch(Request {
+            template: template.into(),
+            repo: repo.into(),
+            prompt: prompt.into(),
+        })
+    }
+
+    #[test]
+    fn the_repo_step_is_skipped_when_no_agent_has_the_placeholder() {
+        let mut a = App::new(
+            cfg(vec![agent("claude", "claude -- {prompt}")]),
+            vec![],
+            "/b".into(),
+            String::new(),
+        );
+        assert_eq!(a.step, Step::Prompt);
+        type_str(&mut a, "do x");
+        assert_eq!(
+            press(&mut a, KeyCode::Enter),
+            launch_req("", "do x", "claude -- {prompt}")
+        );
+    }
+
+    #[test]
+    fn esc_closes_when_the_repo_step_was_skipped() {
+        let mut a = App::new(
+            cfg(vec![agent("claude", "claude -- {prompt}")]),
+            vec![],
+            "/b".into(),
+            String::new(),
+        );
+        assert_eq!(press(&mut a, KeyCode::Esc), Action::Quit);
+    }
+
+    #[test]
+    fn this_directory_is_the_first_row_and_gives_an_empty_repo() {
+        let mut a = app();
+        assert_eq!(a.step, Step::Repo);
+        assert_eq!(a.cur, 0);
+        assert_eq!(press(&mut a, KeyCode::Enter), Action::None);
+        assert_eq!((a.step, a.repo.as_str()), (Step::Prompt, ""));
+        type_str(&mut a, "do x");
+        assert_eq!(
+            press(&mut a, KeyCode::Enter),
+            launch_req("", "do x", "ccxn {repo} {prompt}")
+        );
+    }
+
+    #[test]
+    fn a_candidate_row_is_taken_as_listed() {
+        let mut a = app();
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.repo, "github.com/o/beta");
+    }
+
+    #[test]
+    fn up_and_down_stop_at_the_ends_and_ctrl_p_n_do_the_same() {
+        let mut a = app();
+        press(&mut a, KeyCode::Up);
+        assert_eq!(a.cur, 0);
+        for _ in 0..10 {
+            ctrl(&mut a, 'n');
+        }
+        assert_eq!(a.cur, 3);
+        ctrl(&mut a, 'p');
+        assert_eq!(a.cur, 2);
+    }
+
+    #[test]
+    fn typing_filters_fuzzily_and_enter_takes_the_best_match() {
+        let mut a = app();
+        type_str(&mut a, "beta");
+        assert_eq!(a.shown, [1]);
+        assert_eq!(a.cur, 1);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.repo, "github.com/o/beta");
+
+        let mut a = app();
+        type_str(&mut a, "ala");
+        // alpha and alphabet both match; the earlier line wins a tie, so the order is stable.
+        assert_eq!(a.shown, [0, 2]);
+    }
+
+    #[test]
+    fn this_directory_stays_reachable_while_filtering() {
+        let mut a = app();
+        type_str(&mut a, "beta");
+        press(&mut a, KeyCode::Up);
+        assert_eq!(a.cur, 0);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.repo, "");
+    }
+
+    #[test]
+    fn typed_text_no_candidate_matches_is_the_repo() {
+        let mut a = app();
+        type_str(&mut a, "new/repo");
+        assert!(a.shown.is_empty());
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.repo, "new/repo");
+        type_str(&mut a, "go");
+        assert_eq!(
+            press(&mut a, KeyCode::Enter),
+            launch_req("new/repo", "go", "ccxn {repo} {prompt}")
+        );
+    }
+
+    #[test]
+    fn typed_repo_works_with_no_candidates_at_all() {
+        let mut a = App::new(cfg(with_repo()), vec![], "/b".into(), "boom".into());
+        type_str(&mut a, "o/r");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.repo, "o/r");
+    }
+
+    #[test]
+    fn backspacing_the_filter_empty_goes_back_to_this_directory() {
+        let mut a = app();
+        type_str(&mut a, "be");
+        assert_eq!(a.cur, 1);
+        press(&mut a, KeyCode::Backspace);
+        press(&mut a, KeyCode::Backspace);
+        assert_eq!((a.cur, a.shown.len()), (0, 3));
+    }
+
+    #[test]
+    fn tab_cycles_the_agent_forward_and_shift_tab_backward_and_enter_uses_it() {
+        let mut a = app();
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.agent, 0);
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.agent, 1);
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.agent, 0);
+        press(&mut a, KeyCode::BackTab);
+        assert_eq!(a.agent, 1);
+        type_str(&mut a, "go");
+        assert_eq!(
+            press(&mut a, KeyCode::Enter),
+            launch_req("", "go", "ccxn --agent devin {repo} {prompt}")
+        );
+    }
+
+    #[test]
+    fn tab_and_shift_tab_walk_three_agents_in_opposite_directions() {
+        let mut a = App::new(
+            cfg(vec![
+                agent("a", "a {prompt}"),
+                agent("b", "b {prompt}"),
+                agent("c", "c {prompt}"),
+            ]),
+            vec![],
+            "/b".into(),
+            String::new(),
+        );
+        press(&mut a, KeyCode::BackTab);
+        assert_eq!(a.agent, 2);
+        press(&mut a, KeyCode::BackTab);
+        assert_eq!(a.agent, 1);
+        press(&mut a, KeyCode::Tab);
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.agent, 0);
+    }
+
+    #[test]
+    fn a_single_agent_stays_put_on_tab() {
+        let mut a = App::new(
+            cfg(vec![agent("claude", "claude -- {prompt}")]),
+            vec![],
+            "/b".into(),
+            String::new(),
+        );
+        press(&mut a, KeyCode::Tab);
+        press(&mut a, KeyCode::BackTab);
+        assert_eq!(a.agent, 0);
+    }
+
+    #[test]
+    fn esc_goes_back_to_the_repo_step_keeping_the_prompt_then_closes() {
+        let mut a = app();
+        type_str(&mut a, "be");
+        press(&mut a, KeyCode::Enter);
+        type_str(&mut a, "do x");
+        assert_eq!(press(&mut a, KeyCode::Esc), Action::None);
+        assert_eq!(a.step, Step::Repo);
+        assert_eq!(a.filter.text, "be");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.prompt.text, "do x");
+        assert_eq!(
+            press(&mut a, KeyCode::Enter),
+            launch_req("github.com/o/beta", "do x", "ccxn {repo} {prompt}")
+        );
+        let mut a = app();
+        assert_eq!(press(&mut a, KeyCode::Esc), Action::Quit);
+    }
+
+    #[test]
+    fn ctrl_c_closes_from_either_step() {
+        let mut a = app();
+        assert_eq!(ctrl(&mut a, 'c'), Action::Quit);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(ctrl(&mut a, 'c'), Action::Quit);
+    }
+
+    #[test]
+    fn a_blank_prompt_starts_nothing() {
+        let mut a = app();
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(press(&mut a, KeyCode::Enter), Action::Quit);
+        type_str(&mut a, "   ");
+        assert_eq!(press(&mut a, KeyCode::Enter), Action::Quit);
+    }
+
+    #[test]
+    fn the_prompt_is_trimmed() {
+        let mut a = app();
+        press(&mut a, KeyCode::Enter);
+        type_str(&mut a, "  do x ");
+        assert_eq!(
+            press(&mut a, KeyCode::Enter),
+            launch_req("", "do x", "ccxn {repo} {prompt}")
+        );
+    }
+
+    #[test]
+    fn editing_counts_characters_so_multibyte_text_is_never_cut() {
+        let mut a = app();
+        press(&mut a, KeyCode::Enter);
+        type_str(&mut a, "あいう");
+        press(&mut a, KeyCode::Left);
+        type_str(&mut a, "x");
+        assert_eq!(a.prompt.text, "あいxう");
+        press(&mut a, KeyCode::Backspace);
+        press(&mut a, KeyCode::Backspace);
+        assert_eq!(a.prompt.text, "あう");
+        press(&mut a, KeyCode::Delete);
+        assert_eq!(a.prompt.text, "あ");
+        press(&mut a, KeyCode::Home);
+        press(&mut a, KeyCode::Delete);
+        assert_eq!(a.prompt.text, "");
+        // Backspace and Delete at the ends do nothing.
+        press(&mut a, KeyCode::Backspace);
+        press(&mut a, KeyCode::Delete);
+        assert_eq!(a.prompt.cursor, 0);
+    }
+
+    fn screen(app: &App, width: u16) -> (Vec<String>, ratatui::layout::Position) {
+        let mut term = Terminal::new(TestBackend::new(width, 12)).unwrap_or_else(|e| panic!("{e}"));
+        term.draw(|f| draw(f, app))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let pos = term.get_cursor_position().unwrap_or_else(|e| panic!("{e}"));
+        let buf = term.backend().buffer();
+        let lines = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        (lines, pos)
+    }
+
+    #[test]
+    fn the_repo_step_shows_this_directory_first_then_the_candidates() {
+        let a = app();
+        let (lines, pos) = screen(&a, 50);
+        let text = lines.join("\n");
+        assert!(lines[0].starts_with("in: /b c"), "{text}");
+        let here = text.find(HERE).unwrap_or(usize::MAX);
+        let alpha = text.find("github.com/o/alpha").unwrap_or(usize::MAX);
+        assert!(here < alpha, "{text}");
+        assert!(text.contains("gitlab.com/x/alphabet"), "{text}");
+        assert_eq!((pos.x, pos.y), (2, 2));
+    }
+
+    #[test]
+    fn the_prompt_step_shows_the_repo_and_the_agent() {
+        let mut a = app();
+        type_str(&mut a, "beta");
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Tab);
+        let (lines, _) = screen(&a, 70);
+        let text = lines.join("\n");
+        assert!(text.contains("repo: github.com/o/beta"), "{text}");
+        assert!(text.contains("agent: devin"), "{text}");
+        assert!(
+            text.contains("ccxn --agent devin {repo} {prompt}"),
+            "{text}"
+        );
+        assert!(!text.contains(HERE), "{text}");
+    }
+
+    #[test]
+    fn a_failed_repos_command_shows_in_the_status_line_until_a_key() {
+        let mut a = App::new(
+            cfg(with_repo()),
+            vec![],
+            "/b".into(),
+            "repos command failed".into(),
+        );
+        let (lines, _) = screen(&a, 50);
+        assert!(lines[11].starts_with("repos command failed"), "{lines:?}");
+        type_str(&mut a, "o");
+        let (lines, _) = screen(&a, 50);
+        assert!(!lines.join("\n").contains("repos command failed"));
+    }
+
+    #[test]
+    fn typed_text_without_a_match_says_it_will_be_used_as_the_repo() {
+        let mut a = app();
+        type_str(&mut a, "zzz");
+        let (lines, _) = screen(&a, 50);
+        assert!(
+            lines[11].starts_with("Enter uses \"zzz\" as the repo"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_cursor_follows_wide_characters_and_stays_inside_the_line() {
+        let mut a = app();
+        press(&mut a, KeyCode::Enter);
+        type_str(&mut a, "あい");
+        let (_, pos) = screen(&a, 40);
+        assert_eq!((pos.x, pos.y), (2 + 4, 3));
+        for _ in 0..300 {
+            press(&mut a, KeyCode::Char('う'));
+        }
+        let (lines, pos) = screen(&a, 20);
+        assert!(pos.x < 20, "{pos:?}");
+        // A wide character fills two cells; the second shows as a space.
+        assert!(lines[3].trim_end().ends_with('う'), "{lines:?}");
+    }
+}

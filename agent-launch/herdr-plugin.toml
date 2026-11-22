@@ -1,19 +1,22 @@
 id = "takashiaihara.agent-launch"
 name = "Agent launch"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.5"
-description = "Type a task in a popup and start an agent on it in a new workspace, in the directory of the pane you were in"
+description = "Pick a repo and type a task in a popup, and start an agent on it in a new workspace, in the directory of the pane you were in"
 platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "scripts/fetch-or-build.sh"]
 
 [[actions]]
 id = "open"
 title = "Launch an agent"
-command = ["bash", "launch.sh", "open"]
+command = ["target/release/agent-launch", "open"]
 
 [[panes]]
 id = "prompt"
 title = "Agent launch"
 placement = "popup"
 width = "70%"
-height = "30%"
-command = ["bash", "launch.sh", "ui"]
+height = "60%"
+command = ["target/release/agent-launch", "ui"]
