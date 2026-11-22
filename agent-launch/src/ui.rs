@@ -58,6 +58,11 @@ impl Input {
             (KeyCode::Left, _) => self.cursor = self.cursor.saturating_sub(1),
             (KeyCode::Right, _) => self.cursor = (self.cursor + 1).min(self.len()),
             (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => self.cursor = 0,
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) if self.cursor > 0 => {
+                self.text.drain(..self.byte(self.cursor));
+                self.cursor = 0;
+                return true;
+            }
             (KeyCode::End, _) | (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
                 self.cursor = self.len()
             }
@@ -86,8 +91,14 @@ impl Input {
         let w = |c: char| c.width().unwrap_or(0);
         let before: Vec<char> = self.text.chars().take(self.cursor).collect();
         let mut col: usize = before.iter().map(|&c| w(c)).sum();
+        // The character under the cursor must fit too, or a wide one is cut at the right edge.
+        let under = self
+            .text
+            .chars()
+            .nth(self.cursor)
+            .map_or(1, |c| w(c).max(1));
         let mut skip = 0;
-        while col >= avail && skip < before.len() {
+        while col + under > avail && skip < before.len() {
             col -= w(before[skip]);
             skip += 1;
         }
@@ -197,7 +208,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         return Action::None;
     }
     app.status.clear();
-    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+    // Ctrl-D closes as EOF did in 0.1's read prompt.
+    if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+        && key.modifiers == KeyModifiers::CONTROL
+    {
         return Action::Quit;
     }
     match app.step {
@@ -775,6 +789,36 @@ mod tests {
             lines[11].starts_with("Enter uses \"zzz\" as the repo"),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut a = app();
+        let rel =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release);
+        assert_eq!(handle_key(&mut a, rel), Action::None);
+        assert_eq!(a.step, Step::Repo);
+    }
+
+    #[test]
+    fn ctrl_d_closes_and_ctrl_u_clears_to_the_start() {
+        let mut a = app();
+        press(&mut a, KeyCode::Enter);
+        type_str(&mut a, "abc");
+        press(&mut a, KeyCode::Left);
+        assert_eq!(ctrl(&mut a, 'u'), Action::None);
+        assert_eq!(a.prompt.text, "c");
+        assert_eq!(ctrl(&mut a, 'd'), Action::Quit);
+    }
+
+    #[test]
+    fn a_wide_character_under_the_cursor_is_not_cut_at_the_edge() {
+        // 3 cells free: "a" + "あ" (2 cells) with the cursor on "あ" must keep "あ" whole.
+        let mut i = Input::default();
+        i.text = "abあ".into();
+        i.cursor = 2;
+        let (shown, col) = i.view(3);
+        assert!(shown.contains('あ') && col + 2 <= 3, "{shown:?} {col}");
     }
 
     #[test]

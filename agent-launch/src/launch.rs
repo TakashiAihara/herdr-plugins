@@ -28,6 +28,14 @@ pub fn herdr(bin: &str, args: &[&str]) -> Res<String> {
     })
 }
 
+// The first JSON value in Herdr's stdout; a line Herdr may print after it does not break parsing.
+pub fn first_json(s: &str) -> Option<Value> {
+    serde_json::Deserializer::from_str(s)
+        .into_iter::<Value>()
+        .next()?
+        .ok()
+}
+
 fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     path.iter()
         .try_fold(v, |v, k| v.get(k))?
@@ -86,8 +94,8 @@ pub fn launch(bin: &str, cwd: &str, template: &str, repo: &str, prompt: &str) ->
         ],
     )?;
     // Parsed as JSON: a quote inside the label or cwd is escaped, so no key can be misread from them.
-    let reply: Value = serde_json::from_str(&created)
-        .map_err(|_| format!("herdr workspace create returned no workspace: {created}"))?;
+    let reply = first_json(&created)
+        .ok_or_else(|| format!("herdr workspace create returned no workspace: {created}"))?;
     let ws = str_at(&reply, &["result", "workspace", "workspace_id"])
         .ok_or_else(|| format!("herdr workspace create returned no workspace: {created}"))?;
     // A workspace made for this launch is not left behind when the command cannot be sent.
@@ -110,7 +118,14 @@ pub mod tests {
     use super::*;
     use crate::testutil::{fake_herdr, serial, Fake};
 
-    const CREATED: &str = r#"{"result":{"root_pane":{"cwd":"/x}y","focused":false,"pane_id":"w9:p1","revision":0,"scroll":{"viewport_rows":74},"tab_id":"w9:t1","workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"workspace":{"label":"a}b","workspace_id":"w9"}}}"#;
+    #[test]
+    fn a_line_after_herdrs_json_does_not_break_parsing() {
+        let v = first_json("{\"a\":1}\nwarning: something\n").unwrap();
+        assert_eq!(v["a"], 1);
+        assert!(first_json("warning first\n{\"a\":1}").is_none());
+    }
+
+    const CREATED: &str = r#"{"result":{"root_pane":{"cwd":"/x}y","focused":false,"pane_id":"w9:p1","revision":0,"scroll":{"viewport_rows":74},"tab_id":"w9:t1","workspace_id":"wX"},"tab":{"tab_id":"w9:t1"},"workspace":{"label":"a}b","workspace_id":"w9"}}}"#;
 
     fn heads(f: &Fake) -> Vec<String> {
         f.calls().iter().map(|c| c[..2].join(" ")).collect()

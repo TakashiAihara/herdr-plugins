@@ -24,6 +24,9 @@ check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1"; echo "  
 reset() { rm -f "$FAKE_LOG"; }
 # The popup draws on /dev/tty when it can; with no controlling terminal it reports the error it
 # found while preparing instead, which is what is checked here and cannot hang waiting for a key.
+# Without setsid (macOS) a controlling terminal cannot be dropped portably, so the two ui cases are
+# skipped there when one exists; CI has none, so they still run on every platform in CI.
+can_notty() { command -v setsid >/dev/null 2>&1 || ! { : </dev/tty; } 2>/dev/null; }
 notty() { if command -v setsid >/dev/null 2>&1; then setsid -w "$@"; else "$@"; fi; }
 
 printf '{"result":{"panes":[{"agent":"claude","cwd":"/a","focused":false,"pane_id":"p1"},{"cwd":"/b c","focused":true,"pane_id":"p2"}]}}' > "$FAKE_LIST"
@@ -43,6 +46,7 @@ printf '{"result":{"panes":[{"cwd":"/a","focused":true,"pane_id":"p1"},{"cwd":"/
 reset; "$bin" open 2>/dev/null; rc=$?
 check "two focused panes fail and open nothing" "$rc:$(grep -c '^plugin$' "$FAKE_LOG")" "1:0"
 
+if can_notty; then
 # ui: without the remembered directory it refuses before touching Herdr, even with no terminal.
 reset; notty "$bin" ui </dev/null 2>"$tmp/err"; rc=$?
 check "ui without the cwd fails naming the variable" "$rc:$(grep -c AGENT_LAUNCH_CWD "$tmp/err")" "1:1"
@@ -54,6 +58,9 @@ reset; AGENT_LAUNCH_CWD=/b notty "$bin" ui </dev/null 2>"$tmp/err"; rc=$?
 check "ui with an invalid config fails naming the problem" "$rc:$(grep -c 'agents must be a non-empty list' "$tmp/err")" "1:1"
 check "ui with an invalid config creates nothing" "$([ -e "$FAKE_LOG" ] && echo called || echo none)" none
 rm -f "$HERDR_PLUGIN_CONFIG_DIR/config.json"
+else
+echo "skip ui cases: no setsid to drop the controlling terminal"
+fi
 
 reset; "$bin" bogus 2>"$tmp/err"; rc=$?
 check "an unknown subcommand is a usage error" "$rc:$(grep -c usage "$tmp/err")" "1:1"

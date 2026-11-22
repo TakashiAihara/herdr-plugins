@@ -35,6 +35,14 @@ fn default_config() -> Config {
 
 // A missing file is the default; a file that exists but is unusable is an error, never a fallback.
 pub fn load(path: &str) -> Result<Config, String> {
+    // 0.1 read a one-line `command` file next to it; ignoring it would launch a different agent.
+    let old = std::path::Path::new(path).with_file_name("command");
+    if old.exists() {
+        return Err(format!(
+            "{} is the 0.1 config; move its template into config.json \"agents\" and delete it",
+            old.display()
+        ));
+    }
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(default_config()),
@@ -82,6 +90,12 @@ fn parse(value: &Value) -> Result<Config, String> {
                 })
             })
             .collect::<Result<_, String>>()?;
+        // Tab shows only the name, so two agents with one name could not be told apart.
+        for (i, a) in cfg.agents.iter().enumerate() {
+            if cfg.agents[..i].iter().any(|b| b.name == a.name) {
+                return Err(format!("agents[{i}]: name {:?} is used twice", a.name));
+            }
+        }
     }
     if let Some(repos) = obj.get("repos") {
         match repos {
@@ -108,6 +122,24 @@ mod tests {
 
     fn err_of(name: &str, body: &str) -> String {
         load_text(name, body).unwrap_err()
+    }
+
+    #[test]
+    fn a_leftover_0_1_command_file_is_an_error_naming_the_migration() {
+        let dir = unique_dir("stale");
+        fs::write(dir.join("command"), "ccxn {repo} {prompt}\n").unwrap();
+        let r = load(dir.join("config.json").to_str().unwrap());
+        let _ = fs::remove_dir_all(dir);
+        assert!(r.unwrap_err().contains("is the 0.1 config"));
+    }
+
+    #[test]
+    fn two_agents_with_one_name_are_an_error() {
+        let e = err_of(
+            "dup",
+            r#"{"agents":[{"name":"a","command":"x {prompt}"},{"name":"b","command":"y"},{"name":"a","command":"z"}]}"#,
+        );
+        assert!(e.contains("agents[2]: name \"a\" is used twice"), "{e}");
     }
 
     #[test]

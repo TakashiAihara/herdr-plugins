@@ -134,8 +134,7 @@ impl Env {
 // (claude, or a launcher given none) runs in that repo.
 fn open(env: &Env) -> Res<()> {
     let list = launch::herdr(&env.herdr, &["pane", "list"])?;
-    let list: Value = serde_json::from_str(&list)
-        .map_err(|_| "herdr pane list did not return JSON".to_string())?;
+    let list = launch::first_json(&list).ok_or("herdr pane list did not return JSON")?;
     let panes = list["result"]["panes"]
         .as_array()
         .ok_or("herdr pane list has no panes")?;

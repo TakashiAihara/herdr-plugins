@@ -39,13 +39,13 @@ With no configuration the command is `claude -- {prompt}`: Claude Code starts wi
 | Repo | type | filter the candidates (fuzzy) |
 | Repo | `Up` / `Down`, `Ctrl-P` / `Ctrl-N` | move |
 | Repo | `Enter` | take the selected row; with text typed that no candidate matches, take the typed text as the repo |
-| Repo | `Esc`, `Ctrl-C` | close |
+| Repo | `Esc`, `Ctrl-C`, `Ctrl-D` | close |
 | Prompt | type | the task |
 | Prompt | `Tab` / `Shift-Tab` | next / previous agent |
 | Prompt | `Enter` | launch (an empty task starts nothing and closes the popup) |
 | Prompt | `Esc` | back to the repo step, or close when that step was skipped |
-| Prompt | `Ctrl-C` | close |
-| both | `Left` / `Right`, `Home` / `End`, `Ctrl-A` / `Ctrl-E`, `Backspace`, `Delete` | edit |
+| Prompt | `Ctrl-C`, `Ctrl-D` | close |
+| both | `Left` / `Right`, `Home` / `End`, `Ctrl-A` / `Ctrl-E`, `Ctrl-U` (delete to the start), `Backspace`, `Delete` | edit |
 
 ## Configuration
 
@@ -63,7 +63,7 @@ With no configuration the command is `claude -- {prompt}`: Claude Code starts wi
 
 - `agents`: a non-empty list; the first is the default. `name` is shown in the popup and `command` is the template below. Without the key the single agent `claude` with `claude -- {prompt}` is used.
 - `repos`: a shell command (run with `sh -c` in the remembered directory) that prints one repo per line. Its lines are the candidates exactly as printed; blank lines are dropped. It runs only when some agent's command has `{repo}`. When it fails, the popup shows the error under the list and you can still type a repo by hand.
-- Without `config.json` the default above applies. A `config.json` that exists but is not valid (bad JSON, an empty `agents`, an agent without `name` or `command`, an unknown key) stops the popup with an error naming the problem; it never falls back to the default.
+- Without `config.json` the default above applies. A `config.json` that exists but is not valid (bad JSON, an empty `agents`, an agent without `name` or `command`, two agents with one `name`, an unknown key) stops the popup with an error naming the problem; it never falls back to the default.
 
 A command template is typed into the new pane's shell, so shell functions and aliases from your shell's startup files work:
 
@@ -73,7 +73,7 @@ A command template is typed into the new pane's shell, so shell functions and al
 
 ### Migrating from 0.1
 
-0.1 read a one-line template from a file named `command`. That file is no longer read. Move it into `config.json`:
+0.1 read a one-line template from a file named `command`. While that file is still there, the popup stops with an error naming it, so a launch never silently uses a different agent. Move it into `config.json` and delete it:
 
 ```bash
 printf '{"agents":[{"name":"default","command":"%s"}]}\n' 'claude --model opus {prompt}' > "$(herdr plugin config-dir takashiaihara.agent-launch)/config.json"
