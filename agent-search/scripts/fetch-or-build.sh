@@ -34,8 +34,9 @@ build_from_source() {
   fi
   # --target-dir pins the output next to the manifest's command path, whatever CARGO_TARGET_DIR says.
   # The binary's path comes from cargo's own report of this build: a build.target in the user's
-  # Cargo config (or CARGO_BUILD_TARGET) puts it under target/<triple>/release, and an older binary
-  # for another target may sit next to it.
+  # Cargo config (or CARGO_BUILD_TARGET) puts it under target/<triple>/release, and after a later
+  # cross build a binary for another target can be newer than this one, which a build with nothing
+  # to do does not rewrite.
   report="$root/target/.agent-search-build.json"
   mkdir -p "$root/target" &&
     (cd "$root" && cargo build --release --locked --target-dir "$root/target" \
@@ -45,7 +46,8 @@ build_from_source() {
     echo "agent-search: cargo build finished but wrote no agent-search binary under $root/target" >&2
     exit 1
   }
-  if [ "$built" != "$out" ]; then
+  # cargo may spell the path differently from $out (a symlink in $root) while naming the same file.
+  if [ "$built" != "$out" ] && ! [ "$built" -ef "$out" ]; then
     { mkdir -p "$(dirname "$out")" && cp -f "$built" "$out"; } || {
       echo "agent-search: cannot copy $built to $out" >&2
       exit 1

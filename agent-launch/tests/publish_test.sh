@@ -30,11 +30,13 @@ case "$1 ${2:-}" in
     esac
     exit 0 ;;
   "release create")
-    mkdir -p "$files"; : > "$state"
     # FAKE_CREATE_RACE: another run created the release first, so this create fails.
+    mkdir -p "$files"; : > "$state"
     [ -n "${FAKE_CREATE_RACE:-}" ] && exit 1
     exit 0 ;;
   "release upload")
+    # Like gh: uploading to a release that does not exist fails.
+    [ -d "$FAKE_RELEASE" ] || exit 1
     mkdir -p "$files"; [ -f "$state" ] || : > "$state"
     shift 3 # release upload <tag>
     while [ $# -gt 0 ]; do
