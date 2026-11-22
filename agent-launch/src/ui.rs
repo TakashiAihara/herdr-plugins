@@ -140,7 +140,7 @@ impl Input {
             first
         };
         let mut first = fit(groups.get(at).map_or(1, |g| g.2.max(1)));
-        if first == groups.len() && first > 0 {
+        if first > 0 && groups[first..].iter().all(|g| g.2 == 0) {
             first = fit(0);
         }
         let col = groups[first..at].iter().map(|g| g.2).sum();
@@ -985,6 +985,14 @@ mod tests {
         i.text = "aあ".into();
         i.cursor = 1;
         assert_eq!(i.view(1), (String::new(), 0));
+    }
+
+    #[test]
+    fn a_trailing_zero_width_space_does_not_blank_the_field() {
+        let mut i = Input::default();
+        i.text = "あ\u{200b}".into();
+        i.cursor = 2;
+        assert!(i.view(2).0.starts_with('あ'), "{:?}", i.view(2));
     }
 
     #[test]
