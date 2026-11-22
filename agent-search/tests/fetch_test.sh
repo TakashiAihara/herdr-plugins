@@ -163,7 +163,7 @@ check "the binary this build reported is installed, not a newer one for another 
 # that path names the same file, which is not copied onto itself.
 n=$((n + 1))
 mkdir -p "$tmp/real$n" && ln -s "$tmp/real$n" "$tmp/link$n"
-env -u AGENT_SEARCH_OUT FAKE_CARGO_LOG="$tmp/cargo$n.log" AGENT_SEARCH_ROOT="$tmp/link$n" FAKE_CARGO_PHYSICAL=1 \
+env -u AGENT_SEARCH_OUT HOME="$tmp/home" FAKE_CARGO_LOG="$tmp/cargo$n.log" AGENT_SEARCH_ROOT="$tmp/link$n" FAKE_CARGO_PHYSICAL=1 \
   PATH="$tmp/bin:$PATH" AGENT_SEARCH_KEY=000000000000 AGENT_SEARCH_BASE_URL="file://$tmp/rel" \
   sh "$script" > "$tmp/fetch$n.txt" 2>&1; rc=$?
 check "a path cargo spells differently but that names the same file is left in place" \
