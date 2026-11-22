@@ -98,19 +98,19 @@ impl Input {
         let before: Vec<char> = self.text.chars().take(self.cursor).collect();
         // Measured as a string, as ratatui draws it: an emoji sequence is narrower than its chars.
         let width_from = |s: usize| before[s..].iter().collect::<String>().width();
-        let mut col = width_from(0);
         // The character under the cursor must fit too, or a wide one is cut at the right edge.
         let under = self
             .text
             .chars()
             .nth(self.cursor)
             .map_or(1, |c| w(c).max(1));
-        let mut skip = 0;
-        while col + under > avail && skip < before.len() {
-            skip += 1;
-            col = width_from(skip);
+        // Grow the shown part leftwards from the cursor while it fits, so only about `avail`
+        // characters are ever measured however long the text is.
+        let mut skip = before.len();
+        while skip > 0 && width_from(skip - 1) + under <= avail {
+            skip -= 1;
         }
-        (self.text.chars().skip(skip).collect(), col)
+        (self.text.chars().skip(skip).collect(), width_from(skip))
     }
 }
 
@@ -853,6 +853,17 @@ mod tests {
         assert_eq!(ctrl(&mut a, 'u'), Action::None);
         assert_eq!(a.prompt.text, "c");
         assert_eq!(ctrl(&mut a, 'd'), Action::Quit);
+    }
+
+    #[test]
+    fn a_long_line_scrolls_to_the_same_view_quickly() {
+        let mut i = Input::default();
+        i.text = "a".repeat(50_000);
+        i.cursor = 50_000;
+        let start = std::time::Instant::now();
+        let (shown, col) = i.view(18);
+        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+        assert_eq!((shown.len(), col), (17, 17));
     }
 
     #[test]
