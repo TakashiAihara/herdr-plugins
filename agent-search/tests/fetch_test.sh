@@ -163,7 +163,8 @@ check "a build that writes no binary fails naming it" \
 
 # Copied into another repo under a different directory name, the key is still this tree's hash.
 mkdir -p "$tmp/other/plugins" && command cp -R "$tmp/repo/agent-search" "$tmp/other/plugins/renamed"
-git -C "$tmp/other" init -q && git -C "$tmp/other" add -A && git -C "$tmp/other" -c user.name=t -c user.email=t@t commit -qm init
+git -C "$tmp/other" init -q && git -C "$tmp/other" add -A &&
+  GIT_CONFIG_GLOBAL=/dev/null git -C "$tmp/other" -c user.name=t -c user.email=t@t commit -qm init
 ROOT="$tmp/other/plugins/renamed" fetch
 check "the key is the tree of the plugin directory itself, wherever it sits" "$(head -1 "$out")" "agent-search: installed prebuilt agent-search-$tree-x86_64-unknown-linux-musl"
 
