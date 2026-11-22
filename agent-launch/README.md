@@ -86,7 +86,6 @@ printf '{"agents":[{"name":"default","command":"%s"}]}\n' 'claude --model opus {
 
 - The workspace starts in the focused pane's directory as Herdr reports it (`cwd`), not the foreground program's.
 - Exactly one pane must be focused in `herdr pane list`; with none or several, the key's action fails and shows up in `herdr plugin log list --plugin takashiaihara.agent-launch`.
-
 - A failure in the popup (an invalid config, `workspace create` returning nothing, `pane run` failing) is shown there until you press `Enter` or `Esc` (or `Ctrl-C`), and the popup exits non-zero. A failure before the command is sent closes the workspace already created for it. A failed `workspace focus` leaves the workspace and the running agent in place.
 - The `repos` command runs once, when the popup opens, with no time limit; `Ctrl-C` stops it before the popup is drawn. The candidate list is not refreshed while the popup is up.
 - A task is one line. The label is cut at 24 characters, not bytes.

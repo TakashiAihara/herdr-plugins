@@ -126,7 +126,8 @@ impl Input {
             .iter()
             .position(|g| self.cursor < g.1)
             .unwrap_or(groups.len());
-        // The cluster under the cursor must fit too, or a wide one is cut at the right edge. Past
+        // The cluster under the cursor must fit too, or a wide one is cut at the right edge; one
+        // wider than the whole field leaves the field empty. Past
         // the end one cell is kept for the cursor, unless that leaves nothing at all to show (a
         // wide last character in a very narrow field); the cursor is clamped to the last cell then.
         let fit = |under: usize| {
@@ -965,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn an_emoji_sequence_is_kept_whole_when_its_characters_fit() {
+    fn an_emoji_sequence_is_kept_whole_when_it_fits() {
         let mut i = Input::default();
         i.text = "👩\u{200d}💻a".into();
         i.cursor = 0;
@@ -976,6 +977,14 @@ mod tests {
         // With the cursor on "a", the emoji scrolls out whole rather than half.
         i.cursor = 3;
         assert_eq!(i.view(2), ("a".to_string(), 0));
+    }
+
+    #[test]
+    fn a_cluster_wider_than_the_field_shows_nothing_rather_than_panicking() {
+        let mut i = Input::default();
+        i.text = "aあ".into();
+        i.cursor = 1;
+        assert_eq!(i.view(1), (String::new(), 0));
     }
 
     #[test]
