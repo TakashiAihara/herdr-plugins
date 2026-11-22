@@ -8,7 +8,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const HERE: &str = "(this directory)";
 
@@ -96,7 +96,9 @@ impl Input {
     fn view(&self, avail: usize) -> (String, usize) {
         let w = |c: char| c.width().unwrap_or(0);
         let before: Vec<char> = self.text.chars().take(self.cursor).collect();
-        let mut col: usize = before.iter().map(|&c| w(c)).sum();
+        // Measured as a string, as ratatui draws it: an emoji sequence is narrower than its chars.
+        let width_from = |s: usize| before[s..].iter().collect::<String>().width();
+        let mut col = width_from(0);
         // The character under the cursor must fit too, or a wide one is cut at the right edge.
         let under = self
             .text
@@ -105,8 +107,8 @@ impl Input {
             .map_or(1, |c| w(c).max(1));
         let mut skip = 0;
         while col + under > avail && skip < before.len() {
-            col -= w(before[skip]);
             skip += 1;
+            col = width_from(skip);
         }
         (self.text.chars().skip(skip).collect(), col)
     }
@@ -195,7 +197,9 @@ impl App {
     // hide a new name inside an existing one, so it must stay pickable), then the matches.
     fn rows(&self) -> Vec<Row> {
         let q = self.query();
-        let typed = !q.is_empty() && !self.repos.iter().any(|r| r == q);
+        // Only an exact candidate actually shown makes the typed row a duplicate: the pattern syntax
+        // can hide one (a trailing `$` anchors), and then the typed text must stay pickable.
+        let typed = !q.is_empty() && !self.shown.iter().any(|&i| self.repos[i] == q);
         std::iter::once(Row::Here)
             .chain(typed.then(|| Row::Typed(q.to_string())))
             .chain(self.shown.iter().map(|&i| Row::Repo(i)))
@@ -849,6 +853,29 @@ mod tests {
         assert_eq!(ctrl(&mut a, 'u'), Action::None);
         assert_eq!(a.prompt.text, "c");
         assert_eq!(ctrl(&mut a, 'd'), Action::Quit);
+    }
+
+    #[test]
+    fn the_cursor_column_measures_an_emoji_sequence_as_drawn() {
+        // 👩‍💻 is three chars (woman, ZWJ, laptop) but two cells on screen.
+        let mut i = Input::default();
+        i.text = "👩\u{200d}💻a".into();
+        i.cursor = i.text.chars().count();
+        assert_eq!(i.view(40).1, 3);
+    }
+
+    #[test]
+    fn typed_text_stays_pickable_when_the_pattern_syntax_hides_the_same_candidate() {
+        // A trailing `$` anchors in the filter syntax, so the candidate "o/r$" is not shown.
+        let mut a = App::new(
+            cfg(with_repo()),
+            vec!["o/r$".into()],
+            "/b".into(),
+            String::new(),
+        );
+        type_str(&mut a, "o/r$");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.repo, "o/r$");
     }
 
     #[test]
