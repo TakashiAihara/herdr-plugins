@@ -3,7 +3,10 @@ use crate::launch;
 use crate::{Env, Res};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
@@ -59,6 +62,16 @@ impl Input {
 
     // Returns whether the text changed. Keys that only move the cursor or mean nothing here
     // return false.
+    // Pasted text is one line here: line breaks and other control characters become spaces.
+    fn paste(&mut self, s: &str) {
+        let clean: String = s
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        self.text.insert_str(self.byte(self.cursor), &clean);
+        self.cursor += clean.chars().count();
+    }
+
     fn edit(&mut self, key: KeyEvent) -> bool {
         match (key.code, key.modifiers) {
             (KeyCode::Left, _) => self.cursor = self.cursor.saturating_sub(1),
@@ -225,6 +238,25 @@ impl App {
     }
 }
 
+// Repo lines come from a command and could carry escape sequences; they are drawn, never sent.
+fn shown(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
+}
+
+pub fn handle_paste(app: &mut App, s: &str) -> Action {
+    app.status.clear();
+    match app.step {
+        Step::Repo => {
+            app.filter.paste(s);
+            app.refilter();
+        }
+        Step::Prompt => app.prompt.paste(s),
+    }
+    Action::None
+}
+
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     if key.kind == KeyEventKind::Release {
         return Action::None;
@@ -308,13 +340,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let agent = &app.agents[app.agent];
     let head_lines = match app.step {
-        Step::Repo => format!("in: {}\nrepo (Enter picks, Esc closes)", app.cwd),
+        Step::Repo => format!("in: {}\nrepo (Enter picks, Esc closes)", shown(&app.cwd)),
         Step::Prompt => format!(
             "in: {}\nrepo: {}\nagent: {} (Tab for the next)  {}",
-            app.cwd,
-            if app.repo.is_empty() { HERE } else { &app.repo },
-            agent.name,
-            agent.command
+            shown(&app.cwd),
+            if app.repo.is_empty() {
+                HERE.into()
+            } else {
+                shown(&app.repo)
+            },
+            shown(&agent.name),
+            shown(&agent.command)
         ),
     };
     let head_height = u16::try_from(head_lines.lines().count()).unwrap_or(2);
@@ -337,7 +373,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             .map(|r| match r {
                 Row::Here => ListItem::new(HERE),
                 Row::Typed(t) => ListItem::new(format!("use {t:?}")),
-                Row::Repo(i) => ListItem::new(app.repos[i].as_str()),
+                Row::Repo(i) => ListItem::new(shown(&app.repos[i])),
             })
             .collect();
         frame.render_stateful_widget(
@@ -406,12 +442,12 @@ fn session(env: &Env, mut app: App, term: &mut DefaultTerminal) -> Res<()> {
     loop {
         term.draw(|f| draw(f, &app))
             .map_err(|e| format!("cannot draw the screen: {e}"))?;
-        let Event::Key(key) =
-            event::read().map_err(|e| format!("cannot read the keyboard: {e}"))?
-        else {
-            continue;
+        let action = match event::read().map_err(|e| format!("cannot read the keyboard: {e}"))? {
+            Event::Key(key) => handle_key(&mut app, key),
+            Event::Paste(s) => handle_paste(&mut app, &s),
+            _ => continue,
         };
-        match handle_key(&mut app, key) {
+        match action {
             Action::None => {}
             Action::Quit => return Ok(()),
             Action::Launch(r) => {
@@ -432,10 +468,13 @@ pub fn run(env: &Env) -> Res<()> {
                 .unwrap_or_else(|| format!("cannot start the terminal UI: {e}")))
         }
     };
+    // Without bracketed paste a pasted task would arrive as key presses, and a pasted newline as Enter.
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
     let result = prepared.and_then(|app| session(env, app, &mut term));
     if let Err(msg) = &result {
         show_error(&mut term, msg);
     }
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
 }
@@ -833,6 +872,36 @@ mod tests {
         assert_eq!(a.rows().len(), 2);
         press(&mut a, KeyCode::Enter);
         assert_eq!(a.repo, "github.com/o/beta");
+    }
+
+    #[test]
+    fn a_paste_goes_into_the_focused_input_as_one_line() {
+        let mut a = app();
+        handle_paste(&mut a, "beta");
+        assert_eq!(
+            (a.filter.text.as_str(), a.shown.as_slice()),
+            ("beta", &[1][..])
+        );
+        press(&mut a, KeyCode::Enter);
+        handle_paste(&mut a, "fix\nthe\tbuild");
+        assert_eq!(a.prompt.text, "fix the build");
+        assert_eq!(a.prompt.cursor, 13);
+    }
+
+    #[test]
+    fn control_characters_from_the_repos_command_are_not_drawn() {
+        let a = App::new(
+            cfg(with_repo()),
+            vec!["o/\u{1b}[31mred".into()],
+            "/b".into(),
+            String::new(),
+        );
+        let (lines, _) = screen(&a, 50);
+        let all = lines.join("\n");
+        assert!(
+            !all.contains('\u{1b}') && all.contains("o/\u{FFFD}[31mred"),
+            "{all}"
+        );
     }
 
     #[test]

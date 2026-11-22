@@ -46,6 +46,7 @@ With no configuration the command is `claude -- {prompt}`: Claude Code starts wi
 | Prompt | `Esc` | back to the repo step, or close when that step was skipped |
 | Prompt | `Ctrl-C`, `Ctrl-D` | close |
 | both | `Left` / `Right`, `Home` / `End`, `Ctrl-A` / `Ctrl-E`, `Ctrl-U` (delete to the start), `Backspace`, `Delete` | edit |
+| both | paste | inserts the text as one line (line breaks become spaces) |
 
 ## Configuration
 
