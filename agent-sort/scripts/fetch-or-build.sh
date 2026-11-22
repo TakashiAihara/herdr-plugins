@@ -43,7 +43,7 @@ build_from_source() {
       --message-format=json-render-diagnostics > "$report") || exit 1
   built=$(sed -n 's/.*"executable":"\([^"]*\/agent-sort\)".*/\1/p' "$report" | tail -n 1)
   [ -n "$built" ] && [ -x "$built" ] || {
-    echo "agent-sort: cargo build finished but wrote no agent-sort binary under $root/target" >&2
+    echo "agent-sort: cargo build finished but its report ($report) names no runnable agent-sort binary" >&2
     exit 1
   }
   # cargo may spell the path differently from $out (a symlink in $root) while naming the same file.

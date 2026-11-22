@@ -83,8 +83,9 @@ fails=0
 check() {
   if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1"; echo "  want: $3"; echo "  got:  $2"; fails=$((fails + 1)); fi
 }
-# The shell GitHub Actions runs a `run:` step with.
-publish() { GITHUB_REPOSITORY=t/r GH_TOKEN=x PATH="$tmp:$PATH" bash --noprofile --norc -eo pipefail "$tmp/publish.sh"; }
+# The shell GitHub Actions runs a `run:` step with when no `shell:` is set; PUBLISH_SHELL_OPTS adds
+# what `shell: bash` would (-o pipefail).
+publish() { GITHUB_REPOSITORY=t/r GH_TOKEN=x PATH="$tmp:$PATH" bash -e ${PUBLISH_SHELL_OPTS:-} "$tmp/publish.sh"; }
 # Content checks go through this: a publish that fails adds a line, so a failure that happens to
 # leave the assets as expected still fails the check.
 publish_ok() { publish >/dev/null || echo "publish failed: rc=$?"; }
@@ -130,15 +131,16 @@ check "a lone checksum is replaced by the pair" \
   "new-binary
 new-sha"
 
-# A complete pair listed first, then more than a pipe buffer of other assets: a `grep -q` fed by a
-# pipe would stop early, the writer would die of SIGPIPE, and pipefail would report a miss.
+# A complete pair listed first, then more than a pipe buffer of other assets, under pipefail as
+# `shell: bash` would run it: a `grep -q` fed by a pipe would stop early, the writer would die of
+# SIGPIPE, and pipefail would report a miss.
 { printf '%s\tuploaded\n%s\tuploaded\n' "$base" "$base.sha256"
   for i in $(seq 1 3000); do printf 'agent-sort-%040d-x86_64-unknown-linux-musl\tuploaded\n' "$i"; done
 } > "$FAKE_RELEASE/state"
 printf 'old-binary\n' > "$FAKE_RELEASE/files/$base"
 printf 'old-sha\n' > "$FAKE_RELEASE/files/$base.sha256"
 check "a complete pair is kept when the asset list is longer than a pipe buffer" \
-  "$(publish_ok; asset "$base"; asset "$base.sha256")" \
+  "$(PUBLISH_SHELL_OPTS='-o pipefail' publish_ok; asset "$base"; asset "$base.sha256")" \
   "old-binary
 old-sha"
 

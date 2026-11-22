@@ -28,6 +28,8 @@ if [ -n "${FAKE_CARGO_STALE:-}" ]; then
   echo stale > "$td/aarch64-unknown-linux-gnu/release/agent-launch"
   chmod +x "$td/aarch64-unknown-linux-gnu/release/agent-launch"
 fi
+# FAKE_CARGO_PHYSICAL reports the path with symlinks resolved, as cargo may.
+[ -n "${FAKE_CARGO_PHYSICAL:-}" ] && d=$(cd "$d" && pwd -P)
 printf '{"reason":"compiler-artifact","executable":"%s"}\n' "$d/agent-launch"
 printf '{"reason":"build-finished","success":true}\n'
 exit 0
@@ -157,9 +159,19 @@ FAKE_CARGO_STALE=1 AGENT_LAUNCH_KEY=000000000000 fetch; rc=$?
 check "the binary this build reported is installed, not a newer one for another target" \
   "rc=$rc $(cat "$AGENT_LAUNCH_OUT")" "rc=0 built"
 
+# The plugin reached through a symlink, installing to its default path: cargo's resolved spelling of
+# that path names the same file, which is not copied onto itself.
+n=$((n + 1))
+mkdir -p "$tmp/real$n" && ln -s "$tmp/real$n" "$tmp/link$n"
+env -u AGENT_LAUNCH_OUT FAKE_CARGO_LOG="$tmp/cargo$n.log" AGENT_LAUNCH_ROOT="$tmp/link$n" FAKE_CARGO_PHYSICAL=1 \
+  PATH="$tmp/bin:$PATH" AGENT_LAUNCH_KEY=000000000000 AGENT_LAUNCH_BASE_URL="file://$tmp/rel" \
+  sh "$script" > "$tmp/fetch$n.txt" 2>&1; rc=$?
+check "a path cargo spells differently but that names the same file is left in place" \
+  "rc=$rc $(cat "$tmp/real$n/target/release/agent-launch" 2>/dev/null)" "rc=0 built"
+
 FAKE_CARGO_NOBIN=1 AGENT_LAUNCH_KEY=000000000000 fetch; rc=$?
 check "a build that writes no binary fails naming it" \
-  "rc=$rc $(grep -c 'wrote no agent-launch binary' "$tmp/fetch$n.txt")" "rc=1 1"
+  "rc=$rc $(grep -c 'names no runnable agent-launch binary' "$tmp/fetch$n.txt")" "rc=1 1"
 
 # Copied into another repo under a different directory name, the key is still this tree's hash.
 mkdir -p "$tmp/other/plugins" && command cp -R "$tmp/repo/agent-launch" "$tmp/other/plugins/renamed"

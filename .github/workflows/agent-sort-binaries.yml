@@ -107,8 +107,9 @@ jobs:
               --title "agent-sort binaries" --notes "Prebuilt agent-sort binaries, named by the git tree hash of agent-sort/. Installed by agent-sort/scripts/fetch-or-build.sh." ||
             gh release view agent-sort-binaries --repo "$GITHUB_REPOSITORY" >/dev/null
           assets=$(gh release view agent-sort-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"')
-          # Here-strings, not `printf | grep -q`: grep -q stops at the first match, and with a long
-          # asset list the writer then dies of SIGPIPE, which bash -o pipefail turns into a miss.
+          # Here-strings, not `printf | grep -q`: the step runs under `bash -e` today, but with
+          # `shell: bash` (which adds pipefail) grep -q stopping at the first match would kill the
+          # writer with SIGPIPE on a long asset list and turn the match into a miss.
           # A binary and its .sha256 are one pair. Only a pair whose two assets finished uploading
           # is complete, and a complete pair is never replaced: a binary a user has already
           # downloaded and checked must not change under its checksum. Half a pair or an asset
