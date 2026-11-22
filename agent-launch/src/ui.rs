@@ -123,7 +123,18 @@ impl Input {
         while skip > 0 && width_from(skip - 1) + under <= avail {
             skip -= 1;
         }
-        (self.text.chars().skip(skip).collect(), width_from(skip))
+        // Only what fits is returned, so a long paste with the cursor near the start stays cheap.
+        let mut used = 0;
+        let shown = self
+            .text
+            .chars()
+            .skip(skip)
+            .take_while(|&c| {
+                used += w(c);
+                used <= avail
+            })
+            .collect();
+        (shown, width_from(skip))
     }
 }
 
@@ -238,7 +249,7 @@ impl App {
     }
 }
 
-// Repo lines come from a command and could carry escape sequences; they are drawn, never sent.
+// The cwd and config values are drawn here; a control byte in them would act on the terminal.
 fn shown(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
@@ -922,6 +933,14 @@ mod tests {
         assert_eq!(ctrl(&mut a, 'u'), Action::None);
         assert_eq!(a.prompt.text, "c");
         assert_eq!(ctrl(&mut a, 'd'), Action::Quit);
+    }
+
+    #[test]
+    fn only_what_fits_is_returned_with_the_cursor_at_the_start() {
+        let mut i = Input::default();
+        i.text = "a".repeat(50_000);
+        i.cursor = 0;
+        assert_eq!(i.view(18), ("a".repeat(18), 0));
     }
 
     #[test]

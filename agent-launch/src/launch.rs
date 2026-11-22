@@ -60,9 +60,11 @@ pub fn list_repos(cmd: &str, cwd: &str) -> Res<Vec<String>> {
             if first.is_empty() { "" } else { ": " }
         ));
     }
+    // The chosen line is typed into the new pane, where a control byte (Ctrl-C, ESC) would act on
+    // the shell before quoting applies, so such a line is not offered at all.
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter(|l| !l.trim().is_empty())
+        .filter(|l| !l.trim().is_empty() && !l.chars().any(char::is_control))
         .map(String::from)
         .collect())
 }
@@ -117,6 +119,12 @@ pub fn launch(bin: &str, cwd: &str, template: &str, repo: &str, prompt: &str) ->
 pub mod tests {
     use super::*;
     use crate::testutil::{fake_herdr, serial, Fake};
+
+    #[test]
+    fn repo_lines_with_control_characters_are_not_offered() {
+        let got = list_repos(r"printf 'o/a\n\033[31mo/b\no/c\003\no/d\n'", "/").unwrap();
+        assert_eq!(got, ["o/a", "o/d"]);
+    }
 
     #[test]
     fn a_line_after_herdrs_json_does_not_break_parsing() {
