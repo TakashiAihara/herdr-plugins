@@ -96,6 +96,7 @@ cargo build --release
 cargo test
 bash tests/open_test.sh     # the binary against a fake herdr
 bash tests/fetch_test.sh    # scripts/fetch-or-build.sh against a local release
+bash tests/publish_test.sh  # the binaries workflow's publish step against a fake gh
 ```
 
 `.github/workflows/agent-launch-binaries.yml` builds a binary per platform for every `agent-launch/` tree that reaches main and publishes it to the `agent-launch-binaries` release, named by the tree hash. `scripts/fetch-or-build.sh`, the plugin's build step, downloads the one for the installed tree and checks its SHA-256.
