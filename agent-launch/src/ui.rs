@@ -11,7 +11,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const HERE: &str = "(this directory)";
 
@@ -110,33 +111,36 @@ impl Input {
     // cursor's column in it.
     fn view(&self, avail: usize) -> (String, usize) {
         let chars: Vec<char> = self.text.chars().collect();
-        // Characters grouped as drawn: a base with the zero-width characters after it (combining
-        // marks, a variation selector) and anything joined by ZWJ. Each group is measured once as a
-        // string, the way ratatui draws it, so fitting and the cursor column agree and a redraw
-        // stays linear even for a long zero-width paste. A group is never split.
+        // Grapheme clusters, the units ratatui draws (base + combining marks, ZWJ sequences, skin
+        // tones, flags), each measured once as a string. Fitting, the cursor column and the shown
+        // slice all use these widths, a cluster is never split, and a redraw stays linear.
         let mut groups: Vec<(usize, usize, usize)> = Vec::new();
-        for (i, &c) in chars.iter().enumerate() {
-            let joins = c.width().unwrap_or(0) == 0 || (i > 0 && chars[i - 1] == '\u{200d}');
-            match groups.last_mut() {
-                Some(g) if joins => g.1 = i + 1,
-                _ => groups.push((i, i + 1, 0)),
-            }
+        let mut start = 0;
+        for g in self.text.graphemes(true) {
+            let n = g.chars().count();
+            groups.push((start, start + n, g.width()));
+            start += n;
         }
-        for g in &mut groups {
-            g.2 = chars[g.0..g.1].iter().collect::<String>().width();
-        }
-        // The group the cursor sits on; a cursor inside a group counts as after it.
+        // The cluster the cursor is on, also when the cursor is inside it.
         let at = groups
             .iter()
-            .position(|g| g.0 >= self.cursor)
+            .position(|g| self.cursor < g.1)
             .unwrap_or(groups.len());
-        // The group under the cursor must fit too, or a wide one is cut at the right edge.
-        let under = groups.get(at).map_or(1, |g| g.2.max(1));
-        let mut first = at;
-        let mut used = under;
-        while first > 0 && used + groups[first - 1].2 <= avail {
-            first -= 1;
-            used += groups[first].2;
+        // The cluster under the cursor must fit too, or a wide one is cut at the right edge. Past
+        // the end one cell is kept for the cursor, unless that leaves nothing at all to show (a
+        // wide last character in a very narrow field); the cursor is clamped to the last cell then.
+        let fit = |under: usize| {
+            let mut first = at;
+            let mut used = under;
+            while first > 0 && used + groups[first - 1].2 <= avail {
+                first -= 1;
+                used += groups[first].2;
+            }
+            first
+        };
+        let mut first = fit(groups.get(at).map_or(1, |g| g.2.max(1)));
+        if first == groups.len() && first > 0 {
+            first = fit(0);
         }
         let col = groups[first..at].iter().map(|g| g.2).sum();
         let mut used = 0;
@@ -972,6 +976,34 @@ mod tests {
         // With the cursor on "a", the emoji scrolls out whole rather than half.
         i.cursor = 3;
         assert_eq!(i.view(2), ("a".to_string(), 0));
+    }
+
+    #[test]
+    fn skin_tones_and_flags_are_one_cluster() {
+        let mut i = Input::default();
+        i.text = "👍🏽".into();
+        i.cursor = 2;
+        assert_eq!(i.view(10), ("👍🏽".to_string(), 2));
+        i.text = "🇺🇸".into();
+        assert_eq!(i.view(3), ("🇺🇸".to_string(), 2));
+    }
+
+    #[test]
+    fn a_cursor_inside_a_cluster_keeps_that_cluster_on_screen() {
+        // Left can stop between U+2764 and U+FE0F; the heart stays visible with the cursor on it.
+        let mut i = Input::default();
+        i.text = "❤\u{fe0f}X".into();
+        i.cursor = 1;
+        assert_eq!(i.view(2), ("❤\u{fe0f}".to_string(), 0));
+    }
+
+    #[test]
+    fn a_wide_last_character_stays_visible_with_the_cursor_at_the_end() {
+        let mut i = Input::default();
+        i.text = "あ".into();
+        i.cursor = 1;
+        assert_eq!(i.view(2).0, "あ");
+        assert_eq!(Input::default().view(0), (String::new(), 0));
     }
 
     #[test]
