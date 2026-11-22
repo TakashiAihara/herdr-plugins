@@ -38,7 +38,7 @@ With no configuration the command is `claude -- {prompt}`: Claude Code starts wi
 |---|---|---|
 | Repo | type | filter the candidates (fuzzy) |
 | Repo | `Up` / `Down`, `Ctrl-P` / `Ctrl-N` | move |
-| Repo | `Enter` | take the selected row. While you type, the list shows `(this directory)`, then `use "<what you typed>"` (unless it is exactly a candidate), then the fuzzy matches; the best match is selected, or the typed row when nothing matches |
+| Repo | `Enter` | take the selected row. While you type, the list shows `(this directory)`, then `use "<what you typed>"` (unless that exact candidate is among the matches), then the fuzzy matches; the best match is selected, or the typed row when nothing matches |
 | Repo | `Esc`, `Ctrl-C`, `Ctrl-D` | close |
 | Prompt | type | the task |
 | Prompt | `Tab` / `Shift-Tab` | next / previous agent |
@@ -46,7 +46,7 @@ With no configuration the command is `claude -- {prompt}`: Claude Code starts wi
 | Prompt | `Esc` | back to the repo step, or close when that step was skipped |
 | Prompt | `Ctrl-C`, `Ctrl-D` | close |
 | both | `Left` / `Right`, `Home` / `End`, `Ctrl-A` / `Ctrl-E`, `Ctrl-U` (delete to the start), `Backspace`, `Delete` | edit |
-| both | paste | inserts the text as one line (line breaks become spaces) |
+| both | paste | inserts the text as one line (line breaks, tabs and other control characters become spaces) |
 
 ## Configuration
 
@@ -86,7 +86,8 @@ printf '{"agents":[{"name":"default","command":"%s"}]}\n' 'claude --model opus {
 
 - The workspace starts in the focused pane's directory as Herdr reports it (`cwd`), not the foreground program's.
 - Exactly one pane must be focused in `herdr pane list`; with none or several, the key's action fails and shows up in `herdr plugin log list --plugin takashiaihara.agent-launch`.
-- A failure in the popup (an invalid config, `workspace create` returning nothing, `pane run` failing) is shown there until you press a key, and the popup exits non-zero. A failure before the command is sent closes the workspace already created for it. A failed `workspace focus` leaves the workspace and the running agent in place.
+- A run of thousands of zero-width characters (combining marks) in one line is cut in the input display; what you typed is still sent whole.
+- A failure in the popup (an invalid config, `workspace create` returning nothing, `pane run` failing) is shown there until you press `Enter`, `Esc` or `Ctrl-C`, and the popup exits non-zero. A failure before the command is sent closes the workspace already created for it. A failed `workspace focus` leaves the workspace and the running agent in place.
 - The `repos` command runs once, when the popup opens, with no time limit; `Ctrl-C` stops it before the popup is drawn. The candidate list is not refreshed while the popup is up.
 - A task is one line. The label is cut at 24 characters, not bytes.
 

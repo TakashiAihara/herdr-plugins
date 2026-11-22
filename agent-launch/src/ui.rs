@@ -119,16 +119,19 @@ impl Input {
             .chars()
             .nth(self.cursor)
             .map_or(1, |c| w(c).max(1));
-        // Grow the shown part leftwards from the cursor while it fits, so only about `avail`
-        // characters are ever measured however long the text is.
+        // Zero-width characters (combining marks, ZWJ) take no cells, so a scan bounded by width
+        // alone could walk the whole text; `cap` bounds it by characters too, keeping each redraw
+        // cheap however long a paste is. A longer zero-width run is simply cut.
+        let cap = avail.max(1) * 8;
+        // Grow the shown part leftwards from the cursor while it fits.
         let mut skip = before.len();
-        while skip > 0 && width_from(skip - 1) + under <= avail {
+        while skip > 0 && before.len() - skip < cap && width_from(skip - 1) + under <= avail {
             skip -= 1;
         }
         // Only what fits is returned, so a long paste with the cursor near the start stays cheap.
         // Measured as a string like `width_from`, so an emoji sequence is never split.
         let mut shown = String::new();
-        for c in self.text.chars().skip(skip) {
+        for c in self.text.chars().skip(skip).take(cap) {
             shown.push(c);
             if shown.width() > avail {
                 shown.pop();
@@ -953,6 +956,19 @@ mod tests {
         assert_eq!(ctrl(&mut a, 'u'), Action::None);
         assert_eq!(a.prompt.text, "c");
         assert_eq!(ctrl(&mut a, 'd'), Action::Quit);
+    }
+
+    #[test]
+    fn a_long_run_of_zero_width_characters_stays_quick() {
+        // U+0301 (combining acute accent) takes no cell.
+        let mut i = Input::default();
+        i.text = format!("a{}", "\u{301}".repeat(50_000));
+        let start = std::time::Instant::now();
+        i.cursor = i.text.chars().count();
+        let _ = i.view(18);
+        i.cursor = 0;
+        let _ = i.view(18);
+        assert!(start.elapsed() < std::time::Duration::from_millis(200));
     }
 
     #[test]
