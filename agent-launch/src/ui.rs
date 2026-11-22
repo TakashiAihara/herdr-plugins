@@ -121,8 +121,8 @@ impl Input {
             .map_or(1, |c| w(c).max(1));
         // Both scans add per-character widths, one pass each, so a redraw stays linear in the text
         // even for a long paste of zero-width characters. The per-character sum is never less than
-        // the drawn width (an emoji sequence draws narrower), so what is kept always fits; at the
-        // right edge such a sequence may be cut a little early.
+        // the drawn width for ordinary text and emoji sequences (which draw narrower), so what is
+        // kept fits; at the right edge such a sequence may be cut a little early.
         let mut skip = before.len();
         let mut used = under;
         while skip > 0 && used + w(before[skip - 1]) <= avail {
@@ -410,8 +410,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 // A subprocess's stderr can be part of the message; its control bytes must not reach the terminal.
+// Line breaks are kept so a multi-line stderr stays readable.
 fn error_text(msg: &str) -> String {
-    format!("agent-launch: {}\n\nPress Enter (or Esc).", shown(msg))
+    let body: String = msg
+        .split('\n')
+        .map(|l| shown(&l.replace('\t', " ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("agent-launch: {body}\n\nPress Enter (or Esc).")
 }
 
 // The popup would vanish with a message printed just before exit, so the error waits for a key.
@@ -929,11 +935,12 @@ mod tests {
 
     #[test]
     fn the_error_screen_does_not_draw_control_characters() {
-        let t = error_text("pane run failed: \u{1b}[31mboom");
+        let t = error_text("pane run failed: \u{1b}[31mboom\nsecond\tline");
         assert!(
             !t.contains('\u{1b}') && t.contains("\u{FFFD}[31mboom"),
             "{t}"
         );
+        assert!(t.contains("boom\nsecond line"), "{t}");
     }
 
     #[test]
@@ -944,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn an_emoji_sequence_is_not_split_when_the_line_is_narrow() {
+    fn an_emoji_sequence_is_kept_whole_when_its_characters_fit() {
         let mut i = Input::default();
         i.text = "👩\u{200d}💻a".into();
         i.cursor = 0;
