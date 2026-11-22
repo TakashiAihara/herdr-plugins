@@ -33,9 +33,21 @@ build_from_source() {
     exit 1
   fi
   # --target-dir pins the output next to the manifest's command path, whatever CARGO_TARGET_DIR says.
-  (cd "$root" && cargo build --release --locked --target-dir "$root/target") || exit 1
-  built="$root/target/release/agent-sort"
-  if [ "$built" != "$out" ]; then
+  # The binary's path comes from cargo's own report of this build: a build.target in the user's
+  # Cargo config (or CARGO_BUILD_TARGET) puts it under target/<triple>/release, and after a later
+  # cross build a binary for another target can be newer than this one, which a build with nothing
+  # to do does not rewrite.
+  report="$root/target/.agent-sort-build.json"
+  mkdir -p "$root/target" &&
+    (cd "$root" && cargo build --release --locked --target-dir "$root/target" \
+      --message-format=json-render-diagnostics > "$report") || exit 1
+  built=$(sed -n 's/.*"executable":"\([^"]*\/agent-sort\)".*/\1/p' "$report" | tail -n 1)
+  [ -n "$built" ] && [ -x "$built" ] || {
+    echo "agent-sort: cargo build finished but its report ($report) names no runnable agent-sort binary" >&2
+    exit 1
+  }
+  # cargo may spell the path differently from $out (a symlink in $root) while naming the same file.
+  if [ "$built" != "$out" ] && ! [ "$built" -ef "$out" ]; then
     { mkdir -p "$(dirname "$out")" && cp -f "$built" "$out"; } || {
       echo "agent-sort: cannot copy $built to $out" >&2
       exit 1
@@ -73,7 +85,9 @@ esac
 key="${AGENT_SORT_KEY:-}"
 if [ -z "$key" ]; then
   have git || fallback "git is not available to identify this checkout"
-  key=$(git -C "$root" rev-parse HEAD:agent-sort 2>/dev/null) || fallback "not a git checkout"
+  # The tree of this directory itself, wherever it sits in the checkout: it is the source the
+  # binary must match, and CI names binaries by the same tree hash.
+  key=$(git -C "$root" rev-parse HEAD:./ 2>/dev/null) || fallback "not a git checkout"
   # A linked working copy with edits is not the committed tree the binary was built from.
   # --untracked-files=all so a user's status.showUntrackedFiles=no does not hide new files.
   dirty=$(git -C "$root" status --porcelain --untracked-files=all -- . 2>/dev/null) || fallback "cannot read the git status"

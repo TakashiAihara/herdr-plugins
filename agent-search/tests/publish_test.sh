@@ -30,8 +30,13 @@ case "$1 ${2:-}" in
     esac
     exit 0 ;;
   "release create")
-    mkdir -p "$files"; : > "$state"; exit 0 ;;
+    # FAKE_CREATE_RACE: another run created the release first, so this create fails.
+    mkdir -p "$files"; : > "$state"
+    [ -n "${FAKE_CREATE_RACE:-}" ] && exit 1
+    exit 0 ;;
   "release upload")
+    # Like gh: uploading to a release that does not exist fails.
+    [ -d "$FAKE_RELEASE" ] || exit 1
     mkdir -p "$files"; [ -f "$state" ] || : > "$state"
     shift 3 # release upload <tag>
     while [ $# -gt 0 ]; do
@@ -78,12 +83,17 @@ fails=0
 check() {
   if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1"; echo "  want: $3"; echo "  got:  $2"; fails=$((fails + 1)); fi
 }
-publish() { GITHUB_REPOSITORY=t/r GH_TOKEN=x PATH="$tmp:$PATH" bash "$tmp/publish.sh"; }
+# The shell GitHub Actions runs a `run:` step with when no `shell:` is set; PUBLISH_SHELL_OPTS adds
+# what `shell: bash` would (-o pipefail).
+publish() { GITHUB_REPOSITORY=t/r GH_TOKEN=x PATH="$tmp:$PATH" bash -e ${PUBLISH_SHELL_OPTS:-} "$tmp/publish.sh"; }
+# Content checks go through this: a publish that fails adds a line, so a failure that happens to
+# leave the assets as expected still fails the check.
+publish_ok() { publish >/dev/null || echo "publish failed: rc=$?"; }
 state() { tr '\t' ' ' < "$FAKE_RELEASE/state"; }
 asset() { cat "$FAKE_RELEASE/files/$1"; }
 
 check "a missing pair is uploaded together" \
-  "$(publish >/dev/null; state; asset "$base"; asset "$base.sha256")" \
+  "$(publish_ok; state; asset "$base"; asset "$base.sha256")" \
   "$base uploaded
 $base.sha256 uploaded
 new-binary
@@ -102,7 +112,7 @@ printf '%s\tuploaded\n' "$base" > "$FAKE_RELEASE/state"
 printf 'old-binary\n' > "$FAKE_RELEASE/files/$base"
 rm -f "$FAKE_RELEASE/files/$base.sha256"
 check "a pair missing its checksum is uploaded again as a pair" \
-  "$(publish >/dev/null; asset "$base"; asset "$base.sha256")" \
+  "$(publish_ok; asset "$base"; asset "$base.sha256")" \
   "new-binary
 new-sha"
 
@@ -110,20 +120,39 @@ printf '%s\tstarter\n%s\tuploaded\n' "$base" "$base.sha256" > "$FAKE_RELEASE/sta
 printf 'old-binary\n' > "$FAKE_RELEASE/files/$base"
 printf 'old-sha\n' > "$FAKE_RELEASE/files/$base.sha256"
 check "a pair whose asset never finished uploading is uploaded again" \
-  "$(publish >/dev/null; asset "$base"; asset "$base.sha256")" \
+  "$(publish_ok; asset "$base"; asset "$base.sha256")" \
   "new-binary
 new-sha"
 
 rm -f "$FAKE_RELEASE/files/$base"
 printf '%s\tuploaded\n' "$base.sha256" > "$FAKE_RELEASE/state"
 check "a lone checksum is replaced by the pair" \
-  "$(publish >/dev/null; asset "$base"; asset "$base.sha256")" \
+  "$(publish_ok; asset "$base"; asset "$base.sha256")" \
   "new-binary
 new-sha"
 
+# A complete pair listed first, then more than a pipe buffer of other assets, under pipefail as
+# `shell: bash` would run it: a `grep -q` fed by a pipe would stop early, the writer would die of
+# SIGPIPE, and pipefail would report a miss.
+{ printf '%s\tuploaded\n%s\tuploaded\n' "$base" "$base.sha256"
+  for i in $(seq 1 3000); do printf 'agent-search-%040d-x86_64-unknown-linux-musl\tuploaded\n' "$i"; done
+} > "$FAKE_RELEASE/state"
+printf 'old-binary\n' > "$FAKE_RELEASE/files/$base"
+printf 'old-sha\n' > "$FAKE_RELEASE/files/$base.sha256"
+check "a complete pair is kept when the asset list is longer than a pipe buffer" \
+  "$(PUBLISH_SHELL_OPTS='-o pipefail' publish_ok; asset "$base"; asset "$base.sha256")" \
+  "old-binary
+old-sha"
+
 rm -rf "$FAKE_RELEASE"
 check "the release is created when missing" \
-  "$(publish >/dev/null; state)" \
+  "$(publish_ok; state)" \
+  "$base uploaded
+$base.sha256 uploaded"
+
+rm -rf "$FAKE_RELEASE"
+check "losing the race to create the release still publishes the pair" \
+  "$(FAKE_CREATE_RACE=1 publish_ok; state)" \
   "$base uploaded
 $base.sha256 uploaded"
 

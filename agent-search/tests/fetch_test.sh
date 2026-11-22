@@ -16,7 +16,22 @@ cat > "$tmp/bin/cargo" <<'FAKE'
 echo "cargo $* in $(pwd) target=${CARGO_TARGET_DIR:-}" >> "$FAKE_CARGO_LOG"
 td=
 while [ $# -gt 0 ]; do [ "$1" = --target-dir ] && td=$2; shift; done
-[ -n "$td" ] && mkdir -p "$td/release" && echo built > "$td/release/agent-search"
+# FAKE_CARGO_TRIPLE plays a build.target in the user's Cargo config; FAKE_CARGO_NOBIN a build that
+# writes nothing.
+[ -n "${FAKE_CARGO_NOBIN:-}" ] && exit 0
+d="$td/release"; [ -n "${FAKE_CARGO_TRIPLE:-}" ] && d="$td/$FAKE_CARGO_TRIPLE/release"
+[ -n "$td" ] && mkdir -p "$d" && echo built > "$d/agent-search" && chmod +x "$d/agent-search"
+# FAKE_CARGO_STALE leaves a newer binary for another target next to this one, as an earlier
+# cross build would; only the reported path is this build's.
+if [ -n "${FAKE_CARGO_STALE:-}" ]; then
+  mkdir -p "$td/aarch64-unknown-linux-gnu/release"
+  echo stale > "$td/aarch64-unknown-linux-gnu/release/agent-search"
+  chmod +x "$td/aarch64-unknown-linux-gnu/release/agent-search"
+fi
+# FAKE_CARGO_PHYSICAL reports the path with symlinks resolved, as cargo may.
+[ -n "${FAKE_CARGO_PHYSICAL:-}" ] && d=$(cd "$d" && pwd -P)
+printf '{"reason":"compiler-artifact","executable":"%s"}\n' "$d/agent-search"
+printf '{"reason":"build-finished","success":true}\n'
 exit 0
 FAKE
 chmod +x "$tmp/bin/uname" "$tmp/bin/cargo"
@@ -117,7 +132,7 @@ popd > /dev/null || exit 1
 check "a relative AGENT_SEARCH_ROOT is resolved before the build" \
   "$(echo "rc=$rc"; sed -e 's/ in .*//' -e "s|$tmp/repo|REPO|" "$FAKE_CARGO_LOG"; cat "$AGENT_SEARCH_OUT")" \
   "rc=0
-cargo build --release --locked --target-dir REPO/agent-search/target
+cargo build --release --locked --target-dir REPO/agent-search/target --message-format=json-render-diagnostics
 built"
 echo y > "$tmp/repo/other" && echo w >> "$tmp/repo/other"
 ROOT="$tmp/repo/agent-search" fetch
@@ -127,7 +142,7 @@ CARGO_TARGET_DIR="$tmp/elsewhere" AGENT_SEARCH_KEY=000000000000 fetch; rc=$?
 check "the source build pins the target dir and copies the binary to where the manifest points" \
   "$(echo "rc=$rc"; sed -e 's/ in .*//' -e "s|$AGENT_SEARCH_ROOT|ROOT|" "$FAKE_CARGO_LOG"; cat "$AGENT_SEARCH_OUT"; [ -e "$tmp/elsewhere" ] && echo moved)" \
   "rc=0
-cargo build --release --locked --target-dir ROOT/target
+cargo build --release --locked --target-dir ROOT/target --message-format=json-render-diagnostics
 built"
 
 n=$((n + 1))
@@ -135,6 +150,35 @@ export FAKE_CARGO_LOG="$tmp/cargo$n.log" AGENT_SEARCH_OUT="$tmp/out$n/agent-sear
 mkdir -p "$AGENT_SEARCH_ROOT"
 env -u HOME PATH="$tmp/bin:$PATH" AGENT_SEARCH_KEY=000000000000 AGENT_SEARCH_BASE_URL="file://$tmp/rel" sh "$script" > "$tmp/fetch$n.txt" 2>&1; rc=$?
 check "the source build does not need HOME" "rc=$rc $(cat "$AGENT_SEARCH_OUT")" "rc=0 built"
+
+FAKE_CARGO_TRIPLE=x86_64-unknown-linux-gnu AGENT_SEARCH_KEY=000000000000 fetch; rc=$?
+check "a build.target in the user's Cargo config still installs the binary where the manifest points" \
+  "rc=$rc $(cat "$AGENT_SEARCH_OUT")" "rc=0 built"
+
+FAKE_CARGO_STALE=1 AGENT_SEARCH_KEY=000000000000 fetch; rc=$?
+check "the binary this build reported is installed, not a newer one for another target" \
+  "rc=$rc $(cat "$AGENT_SEARCH_OUT")" "rc=0 built"
+
+# The plugin reached through a symlink, installing to its default path: cargo's resolved spelling of
+# that path names the same file, which is not copied onto itself.
+n=$((n + 1))
+mkdir -p "$tmp/real$n" && ln -s "$tmp/real$n" "$tmp/link$n"
+env -u AGENT_SEARCH_OUT HOME="$tmp/home" FAKE_CARGO_LOG="$tmp/cargo$n.log" AGENT_SEARCH_ROOT="$tmp/link$n" FAKE_CARGO_PHYSICAL=1 \
+  PATH="$tmp/bin:$PATH" AGENT_SEARCH_KEY=000000000000 AGENT_SEARCH_BASE_URL="file://$tmp/rel" \
+  sh "$script" > "$tmp/fetch$n.txt" 2>&1; rc=$?
+check "a path cargo spells differently but that names the same file is left in place" \
+  "rc=$rc $(cat "$tmp/real$n/target/release/agent-search" 2>/dev/null)" "rc=0 built"
+
+FAKE_CARGO_NOBIN=1 AGENT_SEARCH_KEY=000000000000 fetch; rc=$?
+check "a build that writes no binary fails naming it" \
+  "rc=$rc $(grep -c 'names no runnable agent-search binary' "$tmp/fetch$n.txt")" "rc=1 1"
+
+# Copied into another repo under a different directory name, the key is still this tree's hash.
+mkdir -p "$tmp/other/plugins" && command cp -R "$tmp/repo/agent-search" "$tmp/other/plugins/renamed"
+git -C "$tmp/other" init -q && git -C "$tmp/other" add -A &&
+  GIT_CONFIG_GLOBAL=/dev/null git -C "$tmp/other" -c user.name=t -c user.email=t@t commit -qm init
+ROOT="$tmp/other/plugins/renamed" fetch
+check "the key is the tree of the plugin directory itself, wherever it sits" "$(head -1 "$out")" "agent-search: installed prebuilt agent-search-$tree-x86_64-unknown-linux-musl"
 
 printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/cargo"
 AGENT_SEARCH_KEY=000000000000 fetch; rc=$?
