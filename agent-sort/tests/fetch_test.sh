@@ -19,7 +19,11 @@ while [ $# -gt 0 ]; do [ "$1" = --target-dir ] && td=$2; shift; done
 # Like cargo: without --target-dir the build goes to CARGO_TARGET_DIR, so a script that drops the
 # flag shows up as files under it.
 [ -z "$td" ] && td=${CARGO_TARGET_DIR:-}
-[ -n "$td" ] && mkdir -p "$td/release" && echo built > "$td/release/agent-sort"
+# FAKE_CARGO_TRIPLE plays a build.target in the user's Cargo config; FAKE_CARGO_NOBIN a build that
+# writes nothing.
+[ -n "${FAKE_CARGO_NOBIN:-}" ] && exit 0
+d="$td/release"; [ -n "${FAKE_CARGO_TRIPLE:-}" ] && d="$td/$FAKE_CARGO_TRIPLE/release"
+[ -n "$td" ] && mkdir -p "$d" && echo built > "$d/agent-sort" && chmod +x "$d/agent-sort"
 exit 0
 FAKE
 chmod +x "$tmp/bin/uname" "$tmp/bin/cargo"
@@ -138,6 +142,20 @@ export FAKE_CARGO_LOG="$tmp/cargo$n.log" AGENT_SORT_OUT="$tmp/out$n/agent-sort" 
 mkdir -p "$AGENT_SORT_ROOT"
 env -u HOME PATH="$tmp/bin:$PATH" AGENT_SORT_KEY=000000000000 AGENT_SORT_BASE_URL="file://$tmp/rel" sh "$script" > "$tmp/fetch$n.txt" 2>&1; rc=$?
 check "the source build does not need HOME" "rc=$rc $(cat "$AGENT_SORT_OUT")" "rc=0 built"
+
+FAKE_CARGO_TRIPLE=x86_64-unknown-linux-gnu AGENT_SORT_KEY=000000000000 fetch; rc=$?
+check "a build.target in the user's Cargo config still installs the binary where the manifest points" \
+  "rc=$rc $(cat "$AGENT_SORT_OUT")" "rc=0 built"
+
+FAKE_CARGO_NOBIN=1 AGENT_SORT_KEY=000000000000 fetch; rc=$?
+check "a build that writes no binary fails naming it" \
+  "rc=$rc $(grep -c 'wrote no agent-sort binary' "$tmp/fetch$n.txt")" "rc=1 1"
+
+# Copied into another repo under a different directory name, the key is still this tree's hash.
+mkdir -p "$tmp/other/plugins" && command cp -R "$tmp/repo/agent-sort" "$tmp/other/plugins/renamed"
+git -C "$tmp/other" init -q && git -C "$tmp/other" add -A && git -C "$tmp/other" -c user.name=t -c user.email=t@t commit -qm init
+ROOT="$tmp/other/plugins/renamed" fetch
+check "the key is the tree of the plugin directory itself, wherever it sits" "$(head -1 "$out")" "agent-sort: installed prebuilt agent-sort-$tree-x86_64-unknown-linux-musl"
 
 printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/cargo"
 AGENT_SORT_KEY=000000000000 fetch; rc=$?

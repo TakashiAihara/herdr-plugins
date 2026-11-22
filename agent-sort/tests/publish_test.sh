@@ -78,7 +78,8 @@ fails=0
 check() {
   if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1"; echo "  want: $3"; echo "  got:  $2"; fails=$((fails + 1)); fi
 }
-publish() { GITHUB_REPOSITORY=t/r GH_TOKEN=x PATH="$tmp:$PATH" bash "$tmp/publish.sh"; }
+# The shell GitHub Actions runs a `run:` step with.
+publish() { GITHUB_REPOSITORY=t/r GH_TOKEN=x PATH="$tmp:$PATH" bash --noprofile --norc -eo pipefail "$tmp/publish.sh"; }
 state() { tr '\t' ' ' < "$FAKE_RELEASE/state"; }
 asset() { cat "$FAKE_RELEASE/files/$1"; }
 
@@ -120,6 +121,18 @@ check "a lone checksum is replaced by the pair" \
   "$(publish >/dev/null; asset "$base"; asset "$base.sha256")" \
   "new-binary
 new-sha"
+
+# A complete pair listed first, then more than a pipe buffer of other assets: a `grep -q` fed by a
+# pipe would stop early, the writer would die of SIGPIPE, and pipefail would report a miss.
+{ printf '%s\tuploaded\n%s\tuploaded\n' "$base" "$base.sha256"
+  for i in $(seq 1 3000); do printf 'agent-sort-%040d-x86_64-unknown-linux-musl\tuploaded\n' "$i"; done
+} > "$FAKE_RELEASE/state"
+printf 'old-binary\n' > "$FAKE_RELEASE/files/$base"
+printf 'old-sha\n' > "$FAKE_RELEASE/files/$base.sha256"
+check "a complete pair is kept when the asset list is longer than a pipe buffer" \
+  "$(publish >/dev/null; asset "$base"; asset "$base.sha256")" \
+  "old-binary
+old-sha"
 
 rm -rf "$FAKE_RELEASE"
 check "the release is created when missing" \

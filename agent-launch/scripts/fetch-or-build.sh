@@ -34,7 +34,13 @@ build_from_source() {
   fi
   # --target-dir pins the output next to the manifest's command path, whatever CARGO_TARGET_DIR says.
   (cd "$root" && cargo build --release --locked --target-dir "$root/target") || exit 1
-  built="$root/target/release/agent-launch"
+  # A build.target in the user's Cargo config (or CARGO_BUILD_TARGET) puts the binary under
+  # target/<triple>/release instead; take whichever this build wrote, newest first.
+  built=$(ls -t "$root/target/release/agent-launch" "$root"/target/*/release/agent-launch 2>/dev/null | head -n 1)
+  [ -n "$built" ] && [ -x "$built" ] || {
+    echo "agent-launch: cargo build finished but wrote no agent-launch binary under $root/target" >&2
+    exit 1
+  }
   if [ "$built" != "$out" ]; then
     { mkdir -p "$(dirname "$out")" && cp -f "$built" "$out"; } || {
       echo "agent-launch: cannot copy $built to $out" >&2
@@ -73,7 +79,9 @@ esac
 key="${AGENT_LAUNCH_KEY:-}"
 if [ -z "$key" ]; then
   have git || fallback "git is not available to identify this checkout"
-  key=$(git -C "$root" rev-parse HEAD:agent-launch 2>/dev/null) || fallback "not a git checkout"
+  # The tree of this directory itself, wherever it sits in the checkout: it is the source the
+  # binary must match, and CI names binaries by the same tree hash.
+  key=$(git -C "$root" rev-parse HEAD:./ 2>/dev/null) || fallback "not a git checkout"
   # A linked working copy with edits is not the committed tree the binary was built from.
   # --untracked-files=all so a user's status.showUntrackedFiles=no does not hide new files.
   dirty=$(git -C "$root" status --porcelain --untracked-files=all -- . 2>/dev/null) || fallback "cannot read the git status"

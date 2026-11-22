@@ -13,11 +13,6 @@ on:
 permissions:
   contents: read
 
-# One run at a time: publishing compares the release's assets with what it built, and parallel runs
-# would decide on each other's half-uploaded state.
-concurrency:
-  group: agent-sort-binaries
-  cancel-in-progress: false
 
 jobs:
   key:
@@ -42,7 +37,7 @@ jobs:
           exists=true
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin; do
             for suffix in "" ".sha256"; do
-              printf '%s\n' "$assets" | grep -qxF "agent-sort-$key-$target$suffix uploaded" || exists=false
+              grep -qxF "agent-sort-$key-$target$suffix uploaded" <<< "$assets" || exists=false
             done
           done
           echo "exists=$exists" >> "$GITHUB_OUTPUT"
@@ -86,6 +81,12 @@ jobs:
 
   publish:
     needs: [key, build]
+    # Publishing compares the release's assets with what it built, so two runs publishing the same
+    # tree must not overlap. The group is per tree: one workflow-wide group keeps a single pending
+    # run, and a third push would cancel the second, whose tree then never gets a binary.
+    concurrency:
+      group: agent-sort-binaries-${{ needs.key.outputs.key }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -104,6 +105,8 @@ jobs:
             gh release create agent-sort-binaries --repo "$GITHUB_REPOSITORY" --prerelease \
               --title "agent-sort binaries" --notes "Prebuilt agent-sort binaries, named by the git tree hash of agent-sort/. Installed by agent-sort/scripts/fetch-or-build.sh."
           assets=$(gh release view agent-sort-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"')
+          # Here-strings, not `printf | grep -q`: grep -q stops at the first match, and with a long
+          # asset list the writer then dies of SIGPIPE, which bash -o pipefail turns into a miss.
           # A binary and its .sha256 are one pair. Only a pair whose two assets finished uploading
           # is complete, and a complete pair is never replaced: a binary a user has already
           # downloaded and checked must not change under its checksum. Half a pair or an asset
@@ -111,20 +114,20 @@ jobs:
           for f in dist/*; do
             case "$f" in *.sha256) continue ;; esac
             name=$(basename "$f")
-            if printf '%s\n' "$assets" | grep -qxF "$name uploaded" &&
-              printf '%s\n' "$assets" | grep -qxF "$name.sha256 uploaded"; then
+            if grep -qxF "$name uploaded" <<< "$assets" &&
+              grep -qxF "$name.sha256 uploaded" <<< "$assets"; then
               echo "keeping the existing $name pair"
               continue
             fi
             for a in "$name" "$name.sha256"; do
-              if printf '%s\n' "$assets" | cut -d' ' -f1 | grep -qxF "$a"; then
+              if awk -v a="$a" '$1 == a { found = 1 } END { exit !found }' <<< "$assets"; then
                 gh release delete-asset agent-sort-binaries --repo "$GITHUB_REPOSITORY" -y "$a" || exit 1
               fi
             done
             if ! gh release upload agent-sort-binaries --repo "$GITHUB_REPOSITORY" "$f" "$f.sha256"; then
               # A parallel run may have completed the pair first; that is fine, any other failure is not.
               assets=$(gh release view agent-sort-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"')
-              printf '%s\n' "$assets" | grep -qxF "$name uploaded" &&
-                printf '%s\n' "$assets" | grep -qxF "$name.sha256 uploaded" || exit 1
+              grep -qxF "$name uploaded" <<< "$assets" &&
+                grep -qxF "$name.sha256 uploaded" <<< "$assets" || exit 1
             fi
           done
