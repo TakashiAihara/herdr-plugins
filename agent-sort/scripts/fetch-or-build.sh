@@ -33,10 +33,14 @@ build_from_source() {
     exit 1
   fi
   # --target-dir pins the output next to the manifest's command path, whatever CARGO_TARGET_DIR says.
-  (cd "$root" && cargo build --release --locked --target-dir "$root/target") || exit 1
-  # A build.target in the user's Cargo config (or CARGO_BUILD_TARGET) puts the binary under
-  # target/<triple>/release instead; take whichever this build wrote, newest first.
-  built=$(ls -t "$root/target/release/agent-sort" "$root"/target/*/release/agent-sort 2>/dev/null | head -n 1)
+  # The binary's path comes from cargo's own report of this build: a build.target in the user's
+  # Cargo config (or CARGO_BUILD_TARGET) puts it under target/<triple>/release, and an older binary
+  # for another target may sit next to it.
+  report="$root/target/.agent-sort-build.json"
+  mkdir -p "$root/target" &&
+    (cd "$root" && cargo build --release --locked --target-dir "$root/target" \
+      --message-format=json-render-diagnostics > "$report") || exit 1
+  built=$(sed -n 's/.*"executable":"\([^"]*\/agent-sort\)".*/\1/p' "$report" | tail -n 1)
   [ -n "$built" ] && [ -x "$built" ] || {
     echo "agent-sort: cargo build finished but wrote no agent-sort binary under $root/target" >&2
     exit 1

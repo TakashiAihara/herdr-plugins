@@ -101,9 +101,11 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Runs publishing other trees can race to create the release; losing that race is fine.
           gh release view agent-launch-binaries --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             gh release create agent-launch-binaries --repo "$GITHUB_REPOSITORY" --prerelease \
-              --title "agent-launch binaries" --notes "Prebuilt agent-launch binaries, named by the git tree hash of agent-launch/. Installed by agent-launch/scripts/fetch-or-build.sh."
+              --title "agent-launch binaries" --notes "Prebuilt agent-launch binaries, named by the git tree hash of agent-launch/. Installed by agent-launch/scripts/fetch-or-build.sh." ||
+            gh release view agent-launch-binaries --repo "$GITHUB_REPOSITORY" >/dev/null
           assets=$(gh release view agent-launch-binaries --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.state)"')
           # Here-strings, not `printf | grep -q`: grep -q stops at the first match, and with a long
           # asset list the writer then dies of SIGPIPE, which bash -o pipefail turns into a miss.
