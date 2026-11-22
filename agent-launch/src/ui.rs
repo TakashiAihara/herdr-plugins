@@ -109,37 +109,47 @@ impl Input {
     // The text from the first character that keeps the cursor inside `avail` cells, and the
     // cursor's column in it.
     fn view(&self, avail: usize) -> (String, usize) {
-        let w = |c: char| c.width().unwrap_or(0);
-        let before: Vec<char> = self.text.chars().take(self.cursor).collect();
-        // Measured as a string, as ratatui draws it: an emoji sequence is narrower than its chars.
-        let width_from = |s: usize| before[s..].iter().collect::<String>().width();
-        // The character under the cursor must fit too, or a wide one is cut at the right edge.
-        let under = self
-            .text
-            .chars()
-            .nth(self.cursor)
-            .map_or(1, |c| w(c).max(1));
-        // Both scans add per-character widths, one pass each, so a redraw stays linear in the text
-        // even for a long paste of zero-width characters. The per-character sum is never less than
-        // the drawn width for ordinary text and emoji sequences (which draw narrower), so what is
-        // kept fits; at the right edge such a sequence may be cut a little early.
-        let mut skip = before.len();
-        let mut used = under;
-        while skip > 0 && used + w(before[skip - 1]) <= avail {
-            skip -= 1;
-            used += w(before[skip]);
+        let chars: Vec<char> = self.text.chars().collect();
+        // Characters grouped as drawn: a base with the zero-width characters after it (combining
+        // marks, a variation selector) and anything joined by ZWJ. Each group is measured once as a
+        // string, the way ratatui draws it, so fitting and the cursor column agree and a redraw
+        // stays linear even for a long zero-width paste. A group is never split.
+        let mut groups: Vec<(usize, usize, usize)> = Vec::new();
+        for (i, &c) in chars.iter().enumerate() {
+            let joins = c.width().unwrap_or(0) == 0 || (i > 0 && chars[i - 1] == '\u{200d}');
+            match groups.last_mut() {
+                Some(g) if joins => g.1 = i + 1,
+                _ => groups.push((i, i + 1, 0)),
+            }
         }
+        for g in &mut groups {
+            g.2 = chars[g.0..g.1].iter().collect::<String>().width();
+        }
+        // The group the cursor sits on; a cursor inside a group counts as after it.
+        let at = groups
+            .iter()
+            .position(|g| g.0 >= self.cursor)
+            .unwrap_or(groups.len());
+        // The group under the cursor must fit too, or a wide one is cut at the right edge.
+        let under = groups.get(at).map_or(1, |g| g.2.max(1));
+        let mut first = at;
+        let mut used = under;
+        while first > 0 && used + groups[first - 1].2 <= avail {
+            first -= 1;
+            used += groups[first].2;
+        }
+        let col = groups[first..at].iter().map(|g| g.2).sum();
         let mut used = 0;
-        let shown = self
-            .text
-            .chars()
-            .skip(skip)
-            .take_while(|&c| {
-                used += w(c);
+        let last = groups[first..]
+            .iter()
+            .take_while(|g| {
+                used += g.2;
                 used <= avail
             })
-            .collect();
-        (shown, width_from(skip))
+            .last()
+            .map_or(0, |g| g.1);
+        let start = groups.get(first).map_or(chars.len(), |g| g.0);
+        (chars[start..last.max(start)].iter().collect(), col)
     }
 }
 
@@ -955,8 +965,23 @@ mod tests {
         let mut i = Input::default();
         i.text = "👩\u{200d}💻a".into();
         i.cursor = 0;
-        // The characters add up to five cells (the emoji draws as two), so five hold all of it.
-        assert_eq!(i.view(5).0, "👩\u{200d}💻a");
+        // The emoji draws as two cells and "a" as one, so three hold all of it.
+        assert_eq!(i.view(3).0, "👩\u{200d}💻a");
+        // Two cells cannot hold "a" as well, and the emoji is never split.
+        assert_eq!(i.view(2), ("👩\u{200d}💻".to_string(), 0));
+        // With the cursor on "a", the emoji scrolls out whole rather than half.
+        i.cursor = 3;
+        assert_eq!(i.view(2), ("a".to_string(), 0));
+    }
+
+    #[test]
+    fn a_variation_selector_emoji_fits_and_puts_the_cursor_where_it_draws() {
+        // "❤️" is U+2764 + U+FE0F: one char of width 1 plus a zero-width one, drawn as two cells.
+        let mut i = Input::default();
+        i.text = "❤\u{fe0f}❤\u{fe0f}".into();
+        i.cursor = 4;
+        let (shown, col) = i.view(3);
+        assert_eq!((shown.as_str(), col), ("❤\u{fe0f}", 2));
     }
 
     #[test]
