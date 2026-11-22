@@ -382,9 +382,14 @@ mod tests {
         assert!(app.repos().is_empty());
 
         // Without a {repo} anywhere the command is not worth running.
-        write(r#"{"agents":[{"name":"c","command":"c {prompt}"}],"repos":"exit 2"}"#);
+        let marker = dir.join("ran");
+        write(&format!(
+            r#"{{"agents":[{{"name":"c","command":"c {{prompt}}"}}],"repos":"touch {}"}}"#,
+            marker.display()
+        ));
         let app = ui::prepare(&env).unwrap();
         assert_eq!(app.status, "");
+        assert!(!marker.exists(), "the repos command ran");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

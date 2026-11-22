@@ -12,6 +12,12 @@ use unicode_width::UnicodeWidthChar;
 
 const HERE: &str = "(this directory)";
 
+enum Row {
+    Here,
+    Typed(String),
+    Repo(usize),
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Step {
     Repo,
@@ -116,7 +122,7 @@ pub struct App {
     filter: Input,
     // Indexes into `repos`, best match first.
     shown: Vec<usize>,
-    // 0 is "(this directory)", n is shown[n - 1].
+    // An index into rows().
     cur: usize,
     repo: String,
     prompt: Input,
@@ -176,24 +182,36 @@ impl App {
             .collect();
         scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         self.shown = scored.into_iter().map(|(i, _)| i).collect();
-        // Typing then Enter takes the best match; with none, Enter takes what was typed.
-        self.cur = usize::from(!self.shown.is_empty());
+        // Typing then Enter takes the best match; with none, the typed text.
+        let rows = self.rows();
+        self.cur = rows
+            .iter()
+            .position(|r| matches!(r, Row::Repo(_)))
+            .or_else(|| rows.iter().position(|r| matches!(r, Row::Typed(_))))
+            .unwrap_or(0);
     }
 
-    // What Enter on the repo step accepts: "(this directory)" is empty, a candidate is as listed,
-    // and typed text no candidate matched is the repo itself.
+    // The repo list: "(this directory)", then the typed text as its own row (fuzzy matches can
+    // hide a new name inside an existing one, so it must stay pickable), then the matches.
+    fn rows(&self) -> Vec<Row> {
+        let q = self.query();
+        let typed = !q.is_empty() && !self.repos.iter().any(|r| r == q);
+        std::iter::once(Row::Here)
+            .chain(typed.then(|| Row::Typed(q.to_string())))
+            .chain(self.shown.iter().map(|&i| Row::Repo(i)))
+            .collect()
+    }
+
     fn repo_choice(&self) -> String {
-        if self.cur > 0 {
-            self.repos[self.shown[self.cur - 1]].clone()
-        } else if !self.query().is_empty() && self.shown.is_empty() {
-            self.query().to_string()
-        } else {
-            String::new()
+        match self.rows().get(self.cur) {
+            Some(Row::Typed(t)) => t.clone(),
+            Some(Row::Repo(i)) => self.repos[*i].clone(),
+            _ => String::new(),
         }
     }
 
     fn move_cur(&mut self, delta: isize) {
-        let last = self.shown.len();
+        let last = self.rows().len() - 1;
         self.cur = self.cur.saturating_add_signed(delta).min(last);
     }
 
@@ -309,9 +327,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Step::Prompt => input_line(frame, &app.prompt, input),
     }
     if app.step == Step::Repo {
-        let items: Vec<ListItem> = std::iter::once(HERE)
-            .chain(app.shown.iter().map(|&i| app.repos[i].as_str()))
-            .map(ListItem::new)
+        let items: Vec<ListItem> = app
+            .rows()
+            .into_iter()
+            .map(|r| match r {
+                Row::Here => ListItem::new(HERE),
+                Row::Typed(t) => ListItem::new(format!("use {t:?}")),
+                Row::Repo(i) => ListItem::new(app.repos[i].as_str()),
+            })
             .collect();
         frame.render_stateful_widget(
             List::new(items)
@@ -324,12 +347,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     let (text, style) = if !app.status.is_empty() {
         (app.status.clone(), Style::new().fg(Color::Red))
-    } else if app.step == Step::Repo
-        && app.cur == 0
-        && !app.query().is_empty()
-        && app.shown.is_empty()
-    {
-        (format!("Enter uses {:?} as the repo", app.query()), dim)
     } else {
         (String::new(), dim)
     };
@@ -550,7 +567,8 @@ mod tests {
         let mut a = app();
         type_str(&mut a, "beta");
         assert_eq!(a.shown, [1]);
-        assert_eq!(a.cur, 1);
+        // 0 is "(this directory)", 1 the typed text, 2 the best match.
+        assert_eq!(a.cur, 2);
         press(&mut a, KeyCode::Enter);
         assert_eq!(a.repo, "github.com/o/beta");
 
@@ -564,6 +582,7 @@ mod tests {
     fn this_directory_stays_reachable_while_filtering() {
         let mut a = app();
         type_str(&mut a, "beta");
+        press(&mut a, KeyCode::Up);
         press(&mut a, KeyCode::Up);
         assert_eq!(a.cur, 0);
         press(&mut a, KeyCode::Enter);
@@ -596,7 +615,7 @@ mod tests {
     fn backspacing_the_filter_empty_goes_back_to_this_directory() {
         let mut a = app();
         type_str(&mut a, "be");
-        assert_eq!(a.cur, 1);
+        assert_eq!(a.cur, 2);
         press(&mut a, KeyCode::Backspace);
         press(&mut a, KeyCode::Backspace);
         assert_eq!((a.cur, a.shown.len()), (0, 3));
@@ -781,14 +800,35 @@ mod tests {
     }
 
     #[test]
-    fn typed_text_without_a_match_says_it_will_be_used_as_the_repo() {
+    fn typed_text_without_a_match_is_the_highlighted_row() {
         let mut a = app();
         type_str(&mut a, "zzz");
+        assert_eq!(a.cur, 1);
         let (lines, _) = screen(&a, 50);
         assert!(
-            lines[11].starts_with("Enter uses \"zzz\" as the repo"),
+            lines.iter().any(|l| l.contains("> use \"zzz\"")),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn typed_text_that_fuzzy_matches_a_candidate_can_still_be_picked() {
+        let mut a = app();
+        // "o/ab" fuzzily matches github.com/o/alphabet but is a different, new repo.
+        type_str(&mut a, "o/ab");
+        assert!(!a.shown.is_empty());
+        press(&mut a, KeyCode::Up);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.repo, "o/ab");
+    }
+
+    #[test]
+    fn typing_a_candidate_exactly_adds_no_typed_row() {
+        let mut a = app();
+        type_str(&mut a, "github.com/o/beta");
+        assert_eq!(a.rows().len(), 2);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.repo, "github.com/o/beta");
     }
 
     #[test]
