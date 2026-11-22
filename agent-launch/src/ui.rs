@@ -119,25 +119,26 @@ impl Input {
             .chars()
             .nth(self.cursor)
             .map_or(1, |c| w(c).max(1));
-        // Zero-width characters (combining marks, ZWJ) take no cells, so a scan bounded by width
-        // alone could walk the whole text; `cap` bounds it by characters too, keeping each redraw
-        // cheap however long a paste is. A longer zero-width run is simply cut.
-        let cap = avail.max(1) * 8;
-        // Grow the shown part leftwards from the cursor while it fits.
+        // Both scans add per-character widths, one pass each, so a redraw stays linear in the text
+        // even for a long paste of zero-width characters. The per-character sum is never less than
+        // the drawn width (an emoji sequence draws narrower), so what is kept always fits; at the
+        // right edge such a sequence may be cut a little early.
         let mut skip = before.len();
-        while skip > 0 && before.len() - skip < cap && width_from(skip - 1) + under <= avail {
+        let mut used = under;
+        while skip > 0 && used + w(before[skip - 1]) <= avail {
             skip -= 1;
+            used += w(before[skip]);
         }
-        // Only what fits is returned, so a long paste with the cursor near the start stays cheap.
-        // Measured as a string like `width_from`, so an emoji sequence is never split.
-        let mut shown = String::new();
-        for c in self.text.chars().skip(skip).take(cap) {
-            shown.push(c);
-            if shown.width() > avail {
-                shown.pop();
-                break;
-            }
-        }
+        let mut used = 0;
+        let shown = self
+            .text
+            .chars()
+            .skip(skip)
+            .take_while(|&c| {
+                used += w(c);
+                used <= avail
+            })
+            .collect();
         (shown, width_from(skip))
     }
 }
@@ -408,10 +409,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(text).style(style), status);
 }
 
+// A subprocess's stderr can be part of the message; its control bytes must not reach the terminal.
+fn error_text(msg: &str) -> String {
+    format!("agent-launch: {}\n\nPress Enter (or Esc).", shown(msg))
+}
+
 // The popup would vanish with a message printed just before exit, so the error waits for a key.
 fn show_error(term: &mut DefaultTerminal, msg: &str) {
     loop {
-        let text = format!("agent-launch: {msg}\n\nPress Enter.");
+        let text = error_text(msg);
         if term
             .draw(|f| f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), f.area()))
             .is_err()
@@ -922,6 +928,15 @@ mod tests {
     }
 
     #[test]
+    fn the_error_screen_does_not_draw_control_characters() {
+        let t = error_text("pane run failed: \u{1b}[31mboom");
+        assert!(
+            !t.contains('\u{1b}') && t.contains("\u{FFFD}[31mboom"),
+            "{t}"
+        );
+    }
+
+    #[test]
     fn a_pasted_crlf_is_one_space() {
         let mut i = Input::default();
         i.paste("a\r\nb");
@@ -933,9 +948,8 @@ mod tests {
         let mut i = Input::default();
         i.text = "👩\u{200d}💻a".into();
         i.cursor = 0;
-        // Three cells hold the whole text: two for the emoji, one for "a".
-        assert_eq!(i.view(4).0, "👩\u{200d}💻a");
-        assert_eq!(i.view(3).0, "👩\u{200d}💻a");
+        // The characters add up to five cells (the emoji draws as two), so five hold all of it.
+        assert_eq!(i.view(5).0, "👩\u{200d}💻a");
     }
 
     #[test]
@@ -965,10 +979,22 @@ mod tests {
         i.text = format!("a{}", "\u{301}".repeat(50_000));
         let start = std::time::Instant::now();
         i.cursor = i.text.chars().count();
-        let _ = i.view(18);
+        let (end_view, _) = i.view(18);
         i.cursor = 0;
-        let _ = i.view(18);
+        let (start_view, _) = i.view(18);
         assert!(start.elapsed() < std::time::Duration::from_millis(200));
+        // The visible "a" is never pushed out by the invisible run around it.
+        assert!(end_view.starts_with('a') && start_view.starts_with('a'));
+    }
+
+    #[test]
+    fn a_zero_width_run_before_the_cursor_keeps_the_visible_text() {
+        let mut i = Input::default();
+        i.text = format!("a{}b", "\u{301}".repeat(200));
+        i.cursor = 201;
+        let (shown, col) = i.view(18);
+        assert!(shown.starts_with('a') && shown.ends_with('b'), "{shown:?}");
+        assert_eq!(col, 1);
     }
 
     #[test]
