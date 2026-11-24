@@ -43,15 +43,15 @@ impl Entry {
         self.meta.title(&self.id)
     }
 
+    // A body that could not be read matches nothing this time and is read again the next time.
     fn body(&mut self, index: &Index, tier: usize) -> &str {
-        self.bodies[tier].get_or_insert_with(|| {
-            index
-                .body(&self.id, tier, self.meta.lens[tier])
-                .unwrap_or_else(|e| {
-                    self.read_error = Some(e);
-                    String::new()
-                })
-        })
+        if self.bodies[tier].is_none() {
+            match index.body(&self.id, tier, self.meta.lens[tier]) {
+                Ok(text) => self.bodies[tier] = Some(text),
+                Err(e) => self.read_error = Some(e),
+            }
+        }
+        self.bodies[tier].as_deref().unwrap_or("")
     }
 
     fn matches(&mut self, index: &Index, terms: &[&str], scope: Scope) -> bool {
@@ -145,7 +145,9 @@ impl Searcher {
             .into_iter()
             .filter(|&i| self.entries[i].matches(&self.index, &terms, scope))
             .collect();
-        self.last = Some(Last {
+        // Hits found while a body could not be read are not a base to narrow from.
+        let complete = self.entries.iter().all(|e| e.read_error.is_none());
+        self.last = complete.then(|| Last {
             scope,
             query: q.clone(),
             hits: hits.clone(),
@@ -402,6 +404,26 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("s-mid.user"), "{errs:?}");
         assert!(f.s.take_errors().is_empty());
+    }
+
+    #[test]
+    fn a_body_that_could_not_be_read_is_read_again_and_its_hits_are_not_narrowed_from() {
+        let mut f = corpus("retry");
+        let path = f.root.join("index/s-mid.user");
+        let saved = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(f.s.search("billing slow", Scope::User).is_empty());
+        fs::write(&path, saved).unwrap();
+        // An extension of the failed query would narrow from its empty result if that were kept.
+        let ids = |f: &Fx, hits: Vec<usize>| -> Vec<String> {
+            hits.iter().map(|&i| f.s.entries[i].id.clone()).collect()
+        };
+        let hits = f.s.search("billing slow", Scope::User);
+        assert_eq!(ids(&f, hits), ["s-mid"]);
+        fs::remove_file(&path).unwrap();
+        assert!(f.s.search("deploy", Scope::User).len() == 1);
+        let hits = f.s.search("billing slow", Scope::User);
+        assert_eq!(ids(&f, hits), ["s-mid"], "the body read once is kept");
     }
 
     #[test]

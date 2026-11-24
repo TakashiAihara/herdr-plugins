@@ -10,6 +10,8 @@ pub struct Meta {
     // The transcript's size when it was last read, and the end of the last complete line read.
     pub size: u64,
     pub offset: u64,
+    // The transcript these were read from; the same id found elsewhere is another file.
+    pub source: String,
     pub custom_title: String,
     pub ai_title: String,
     pub first_prompt: String,
@@ -211,7 +213,9 @@ pub fn parse_ms(s: &str) -> Option<i64> {
             .filter(|_| t.bytes().all(|b| b.is_ascii_digit()))
     };
     let mut d = date.split('-');
-    let (y, mo, da) = (num(d.next()?)?, num(d.next()?)?, num(d.next()?)?);
+    // A four-digit year keeps the arithmetic below far inside i64.
+    let y = d.next().filter(|y| y.len() == 4).and_then(num)?;
+    let (mo, da) = (num(d.next()?)?, num(d.next()?)?);
     let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
     let mut t = hms.split(':');
     let (h, mi, se) = (num(t.next()?)?, num(t.next()?)?, num(t.next()?)?);
@@ -224,6 +228,7 @@ pub fn parse_ms(s: &str) -> Option<i64> {
     let ms = if frac.is_empty() {
         0
     } else {
+        num(frac)?;
         let digits: String = format!("{frac:0<3}").chars().take(3).collect();
         num(&digits)?
     };
@@ -473,6 +478,9 @@ mod tests {
             "2026-11-04T25:00:00Z",
             "x-y-zT1:2:3Z",
             "2026-11-04T14:44Z",
+            "300000000-01-01T00:00:00Z",
+            "026-11-04T14:44:21Z",
+            "2026-11-04T14:44:21.123xyzZ",
         ] {
             assert_eq!(parse_ms(bad), None, "{bad}");
         }

@@ -92,7 +92,10 @@ fn default_config(d: &Defaults) -> Config {
 pub fn load(path: &str, d: &Defaults) -> Result<Config, String> {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(default_config(d)),
+        // A link whose target is gone is a config the user wrote, not a missing one.
+        Err(e) if e.kind() == ErrorKind::NotFound && fs::symlink_metadata(path).is_err() => {
+            return Ok(default_config(d))
+        }
         Err(e) => return Err(format!("cannot read {path}: {e}")),
     };
     let value: Value =
@@ -196,6 +199,16 @@ mod tests {
         let r = load(path.to_str().unwrap(), d);
         let _ = fs::remove_dir_all(dir);
         r
+    }
+
+    #[test]
+    fn a_config_that_is_a_link_to_a_missing_file_is_an_error_not_the_default() {
+        let dir = unique_dir("dangling");
+        let path = dir.join("config.json");
+        std::os::unix::fs::symlink(dir.join("gone.json"), &path).unwrap();
+        let r = load(path.to_str().unwrap(), &D);
+        let _ = fs::remove_dir_all(dir);
+        assert!(r.unwrap_err().contains("cannot read"), "not an error");
     }
 
     #[test]

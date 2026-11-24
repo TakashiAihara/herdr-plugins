@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -426,11 +426,28 @@ impl Background {
     // What arrived since the last call, and the progress to show (None once everything is read).
     pub fn drain(&mut self) -> Arrived {
         let (mut metas, mut errors) = (vec![], vec![]);
-        while let Ok((id, r)) = self.rx.try_recv() {
-            self.done += 1;
-            match r {
-                Ok(m) => metas.push((id, m)),
-                Err(e) => errors.push(e),
+        loop {
+            match self.rx.try_recv() {
+                Ok((id, Ok(m))) => {
+                    self.done += 1;
+                    metas.push((id, m));
+                }
+                Ok((_, Err(e))) => {
+                    self.done += 1;
+                    errors.push(e);
+                }
+                Err(TryRecvError::Empty) => break,
+                // The reader is gone with sessions unread; say so instead of counting forever.
+                Err(TryRecvError::Disconnected) => {
+                    if self.done < self.total {
+                        errors.push(format!(
+                            "indexing stopped after {} of {} sessions",
+                            self.done, self.total
+                        ));
+                        self.done = self.total;
+                    }
+                    break;
+                }
             }
         }
         let progress = (self.done < self.total).then_some((self.done, self.total));
@@ -1091,13 +1108,36 @@ mod tests {
     #[test]
     fn a_refreshed_session_that_no_longer_matches_drops_the_selection_to_the_first_row() {
         let (mut a, root) = app();
-        type_str(&mut a, "min");
         press(&mut a, KeyCode::Down);
-        assert_eq!(a.cur, 0);
+        press(&mut a, KeyCode::Down);
+        assert_eq!((a.cur, a.selected().unwrap().id.as_str()), (2, "s-day"));
+        // No user or assistant line any more: the session leaves the list.
         let gone = Meta::default();
-        a.apply(vec![("s-min".into(), gone)], None);
-        assert!(a.hits.is_empty());
+        a.apply(vec![("s-day".into(), gone)], None);
+        assert_eq!(shown_ids(&a), ["s-min", "s-hour", "s-week"]);
+        assert_eq!((a.cur, a.selected().unwrap().id.as_str()), (0, "s-min"));
         done(root);
+    }
+
+    #[test]
+    fn a_background_reader_that_died_ends_the_progress_and_says_how_far_it_got() {
+        let (tx, rx) = channel::<Refreshed>();
+        let meta = Meta {
+            last_ms: Some(NOW),
+            ..Meta::default()
+        };
+        tx.send(("a".into(), Ok(meta))).unwrap();
+        drop(tx);
+        let mut bg = Background {
+            rx,
+            total: 3,
+            done: 0,
+        };
+        let got = bg.drain();
+        assert_eq!(got.metas.len(), 1);
+        assert_eq!(got.errors, ["indexing stopped after 1 of 3 sessions"]);
+        assert_eq!(got.progress, None);
+        assert!(bg.drain().errors.is_empty());
     }
 
     // The Env of a popup whose projects, state and config live in `dir`, with a herdr that

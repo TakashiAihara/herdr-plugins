@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 // A cache written by another version is rebuilt, never read.
@@ -16,6 +16,7 @@ fn to_json(m: &Meta) -> Value {
         "version": FORMAT,
         "size": m.size,
         "offset": m.offset,
+        "source": m.source,
         "custom_title": m.custom_title,
         "ai_title": m.ai_title,
         "first_prompt": m.first_prompt,
@@ -35,6 +36,7 @@ fn from_json(v: &Value) -> Option<Meta> {
     Some(Meta {
         size: v["size"].as_u64()?,
         offset: v["offset"].as_u64()?,
+        source: s("source")?,
         custom_title: s("custom_title")?,
         ai_title: s("ai_title")?,
         first_prompt: s("first_prompt")?,
@@ -79,7 +81,10 @@ pub fn transcripts(projects: &Path) -> Res<Vec<(String, PathBuf)>> {
             let Ok(md) = fs::metadata(&path) else {
                 continue;
             };
-            if md.is_file() && best.get(id).is_none_or(|(len, _)| md.len() > *len) {
+            // Equal lengths go to the lower path, so the choice does not follow directory order.
+            let wins =
+                |(len, p): &(u64, PathBuf)| md.len() > *len || (md.len() == *len && path < *p);
+            if md.is_file() && best.get(id).is_none_or(wins) {
                 best.insert(id.to_string(), (md.len(), path.clone()));
             }
         }
@@ -103,7 +108,27 @@ impl Index {
             .mode(0o700)
             .create(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        // A directory that was already there (restored, or made by an older tool) keeps its mode
+        // through `create`.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot restrict {}: {e}", dir.display()))?;
         Ok(Index { dir })
+    }
+
+    // Held while one session's cache is rewritten: a popup and `session-resume index` may run at
+    // the same time, and two writers would interleave their appends. Dropping it unlocks.
+    fn lock(&self) -> Res<File> {
+        let path = self.dir.join(".lock");
+        let f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        f.lock()
+            .map_err(|e| format!("cannot lock {}: {e}", path.display()))?;
+        Ok(f)
     }
 
     fn file(&self, id: &str, ext: &str) -> PathBuf {
@@ -126,7 +151,9 @@ impl Index {
 
     // Up to date means nothing was appended since the last read; it takes stats and no reading.
     pub fn is_fresh(&self, id: &str, meta: &Meta, transcript: &Path) -> bool {
-        fs::metadata(transcript).is_ok_and(|m| m.len() == meta.size) && self.bodies_intact(id, meta)
+        fs::metadata(transcript).is_ok_and(|m| m.len() == meta.size)
+            && transcript.to_string_lossy() == meta.source
+            && self.bodies_intact(id, meta)
     }
 
     // The first `len` bytes of one body file; what an index of that length recorded.
@@ -141,17 +168,22 @@ impl Index {
 
     // Brings one session's cache up to date with its transcript and returns its meta and whether
     // anything was read. Only the bytes after the last complete line already read are parsed; a
-    // transcript smaller than that (cut by another tool) or a cache that cannot be trusted is
-    // rebuilt from the start.
+    // transcript that became shorter (cut by another tool), one found at another path, or a cache
+    // that cannot be trusted is rebuilt from the start.
     pub fn refresh(&self, id: &str, transcript: &Path) -> Res<(Meta, bool)> {
         let size = fs::metadata(transcript)
             .map_err(|e| format!("cannot stat {}: {e}", transcript.display()))?
             .len();
+        let source = transcript.to_string_lossy().into_owned();
+        // The meta is read under the lock: another process may just have brought it up to date.
+        let _lock = self.lock()?;
         let mut meta = match self.meta(id) {
-            Some(m) if size == m.size && self.bodies_intact(id, &m) => return Ok((m, false)),
-            Some(m) if size >= m.offset && self.bodies_intact(id, &m) => m,
+            Some(m) if m.source != source || !self.bodies_intact(id, &m) => Meta::default(),
+            Some(m) if size == m.size => return Ok((m, false)),
+            Some(m) if size > m.size => m,
             _ => Meta::default(),
         };
+        meta.source = source;
         let mut bodies = Bodies::default();
         let mut file = File::open(transcript)
             .map_err(|e| format!("cannot open {}: {e}", transcript.display()))?;
@@ -378,7 +410,13 @@ mod tests {
         let other = Fx::new("append-full");
         other.write("s1", &(first + &second));
         let (full, _) = other.refresh("s1");
-        assert_eq!(m2, full);
+        // Only where it was read from differs.
+        let unplaced = |m: &Meta| Meta {
+            source: String::new(),
+            ..m.clone()
+        };
+        assert_ne!(m2.source, full.source);
+        assert_eq!(unplaced(&m2), unplaced(&full));
         for t in 0..3 {
             assert_eq!(fx.body("s1", t), other.body("s1", t));
         }
@@ -538,7 +576,84 @@ mod tests {
             assert_eq!(mode(&e.path()), 0o600, "{:?}", e.path());
             files += 1;
         }
-        assert_eq!(files, 4);
+        // The meta, the three bodies and the lock file.
+        assert_eq!(files, 5);
+    }
+
+    #[test]
+    fn an_index_directory_left_open_to_others_is_closed_again_on_open() {
+        let fx = Fx::new("reopen");
+        fs::set_permissions(&fx.index.dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let again = Index::open(fx.index.dir.parent().unwrap()).unwrap();
+        let mode = fs::metadata(&again.dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn a_refresh_waits_while_another_process_holds_the_index_lock() {
+        let fx = Fx::new("locked");
+        fx.write("s1", &line("user", T1, r#""one""#));
+        let held = fx.index.lock().unwrap();
+        let (index, path) = (fx.index.clone(), fx.transcript("s1"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(index.refresh("s1", &path).map(|(m, _)| m.offset));
+        });
+        let early = rx.recv_timeout(std::time::Duration::from_millis(300));
+        assert!(early.is_err(), "refreshed under a held lock: {early:?}");
+        drop(held);
+        let done = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(done, Ok(line("user", T1, r#""one""#).len() as u64));
+    }
+
+    #[test]
+    fn the_same_id_found_at_another_path_is_read_from_the_start_not_continued() {
+        let fx = Fx::new("moved");
+        fx.write("s1", &line("user", T1, r#""old place""#));
+        fx.refresh("s1");
+        let other = fx.projects.join("-w-b");
+        fs::create_dir_all(&other).unwrap();
+        let moved = other.join("s1.jsonl");
+        // The same length as the first file: only the path tells them apart.
+        let text = line("user", T2, r#""new place""#);
+        fs::write(&moved, &text).unwrap();
+        let cached = fx.index.meta("s1").unwrap();
+        assert_eq!(cached.size, text.len() as u64);
+        assert!(!fx.index.is_fresh("s1", &cached, &moved));
+        let (m, did) = fx.index.refresh("s1", &moved).unwrap();
+        assert!(did);
+        assert_eq!(m.offset, text.len() as u64);
+        assert_eq!(fx.body("s1", 0), "new place\n");
+    }
+
+    #[test]
+    fn of_two_equally_long_transcripts_with_one_id_the_lower_path_is_taken() {
+        let fx = Fx::new("tie");
+        for dir in ["-w-z", "-w-m", "-w-q"] {
+            fs::create_dir_all(fx.projects.join(dir)).unwrap();
+            fs::write(fx.projects.join(dir).join("dup.jsonl"), "12345").unwrap();
+        }
+        let all = transcripts(&fx.projects).unwrap();
+        let (_, path) = all.iter().find(|(id, _)| id == "dup").unwrap();
+        assert_eq!(path, &fx.projects.join("-w-m").join("dup.jsonl"));
+    }
+
+    #[test]
+    fn a_transcript_that_shrank_but_not_below_the_read_offset_is_still_rebuilt() {
+        let fx = Fx::new("shrunk");
+        let first = line("user", T1, r#""one""#);
+        // The read stops at the end of the first line; the rest is a line still being written.
+        fx.write("s1", &(first.clone() + "{\"type\":\"user\",\"unfinished"));
+        let (m1, _) = fx.refresh("s1");
+        assert_eq!(m1.offset, first.len() as u64);
+        let rewritten = line("user", T2, r#""two""#);
+        assert_eq!(rewritten.len(), first.len());
+        fx.write("s1", &rewritten);
+        let (m2, did) = fx.refresh("s1");
+        assert!(did);
+        assert_eq!(m2.offset, rewritten.len() as u64);
+        assert_eq!(fx.body("s1", 0), "two\n");
     }
 
     #[test]

@@ -57,7 +57,7 @@ pub fn label(title: &str, id: &str) -> String {
     let l: String = clean(title).trim().chars().take(24).collect();
     let l = l.trim_end();
     if l.is_empty() {
-        id.chars().take(8).collect()
+        clean(id).chars().take(8).collect()
     } else {
         l.to_string()
     }
@@ -127,6 +127,11 @@ pub fn resume(bin: &str, template: &str, id: &str, cwd: &str, title: &str) -> Re
     if let Some(pane) = running(bin)?.get(id) {
         herdr(bin, &["agent", "focus", pane])?;
         return Ok(());
+    }
+    if cwd.is_empty() {
+        return Err(format!(
+            "the transcript of session {id} records no directory"
+        ));
     }
     if !std::path::Path::new(cwd).is_dir() {
         return Err(format!(
@@ -249,6 +254,7 @@ mod tests {
         assert_eq!(label("a\u{1b}[31mb\nc", "id"), "a [31mb c");
         assert_eq!(label("\u{1b}\u{7}", "0123456789abcdef"), "01234567");
         assert_eq!(label("  ", "abc"), "abc");
+        assert_eq!(label("", "a\tb\u{1b}c"), "a b c");
         assert_eq!(
             label(&format!("{} z", "x".repeat(23)), "id"),
             "x".repeat(23)
@@ -393,6 +399,18 @@ mod tests {
         ]);
         let err = resume(&f.bin, "x {id}", "s1", "/nonexistent/gone dir", "t").unwrap_err();
         assert!(err.contains("/nonexistent/gone dir"), "{err}");
+        assert_eq!(heads(&f), ["pane list"]);
+    }
+
+    #[test]
+    fn a_session_without_a_recorded_directory_creates_nothing_and_says_so() {
+        let _g = serial();
+        let f = fake_herdr(&[
+            ("pane list", &reply(r#"{"result":{"panes":[]}}"#)),
+            created(),
+        ]);
+        let err = resume(&f.bin, "x {id}", "s1", "", "t").unwrap_err();
+        assert!(err.contains("records no directory"), "{err}");
         assert_eq!(heads(&f), ["pane list"]);
     }
 

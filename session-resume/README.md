@@ -5,7 +5,7 @@ Find a Claude Code session and pick it up again, including one whose pane is lon
 ## Requirements
 
 - Herdr 0.9.5+
-- Linux or macOS (x86_64 or arm64). Installing downloads a prebuilt binary; nothing else is needed at runtime. On another platform, or when the download fails, it builds from source and needs a Rust toolchain.
+- Linux or macOS (x86_64 or arm64). Installing downloads a prebuilt binary; nothing else is needed at runtime. On another platform, or when the download fails, it builds from source and needs a Rust toolchain (1.89 or newer).
 - Claude Code transcripts under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`)
 
 ## Install
@@ -116,7 +116,7 @@ Searching the conversation does not read the transcripts on every popup: the plu
 - Transcript lines are recognised by Claude Code's compact JSON (`"type":"user"` and so on); lines written another way are skipped.
 - A match is shown in lowercase, because the index stores lowercase text.
 - Times are shown in UTC.
-- Two popups (or a popup and `session-resume index`) indexing the same session at the same moment can leave its entry inconsistent for one refresh; the next change to that transcript repairs it.
+- A popup and `session-resume index` running at the same time take turns writing the index (a lock file in it), so neither sees a half-written session. A popup that is already open keeps the text it loaded and does not notice a rewrite by the other until it is opened again.
 - Text that came from a transcript is stripped of control characters before it is drawn or used as a workspace label.
 - A failure in the popup (an invalid config, a projects directory that is not there, `workspace create` returning nothing, `pane run` failing) is shown there until you press `Enter` or `Esc` (or `Ctrl-C`), and the popup exits non-zero. A failure before the command is sent closes the workspace already created for it. A `herdr pane list` that fails when the popup opens is shown under the list and nothing is marked as running; when it fails at `Enter`, nothing is resumed.
 
