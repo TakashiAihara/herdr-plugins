@@ -36,14 +36,12 @@ d="$td/release"; [ -n "$tg" ] && d="$td/$tg/release"
 body=built; [ -n "$tg" ] && [ "$tg" != "$host" ] && body=cross
 [ -n "$td" ] && mkdir -p "$d" && echo "$body" > "$d/agent-sort" && chmod +x "$d/agent-sort"
 # FAKE_CARGO_STALE leaves a newer binary for another target next to this one, as an earlier
-# cross build would; only the reported path is this build's.
+# cross build would.
 if [ -n "${FAKE_CARGO_STALE:-}" ]; then
   mkdir -p "$td/aarch64-unknown-linux-gnu/release"
   echo stale > "$td/aarch64-unknown-linux-gnu/release/agent-sort"
   chmod +x "$td/aarch64-unknown-linux-gnu/release/agent-sort"
 fi
-printf '{"reason":"compiler-artifact","executable":"%s"}\n' "$d/agent-sort"
-printf '{"reason":"build-finished","success":true}\n'
 exit 0
 FAKE
 chmod +x "$tmp/bin/uname" "$tmp/bin/cargo"
@@ -87,7 +85,7 @@ check "the download does not go through TMPDIR, which can be missing or noexec" 
 # Without curl the download goes through wget: a PATH holding what the script needs and no curl,
 # and a wget that records its arguments and copies the file:// URL.
 mkdir -p "$tmp/nocurl"
-for c in sh dirname cut mktemp awk sed tail chmod mkdir mv rm cp cat sha256sum shasum; do
+for c in sh dirname cut awk sed chmod mkdir mv rm cp cat sha256sum shasum; do
   p=$(command -v "$c") && ln -s "$p" "$tmp/nocurl/$c"
 done
 ln -s "$tmp/bin/uname" "$tmp/bin/cargo" "$tmp/nocurl/"
@@ -180,7 +178,7 @@ popd > /dev/null || exit 1
 check "a relative AGENT_SORT_ROOT is resolved before the build" \
   "$(echo "rc=$rc"; sed -e 's/ in .*//' -e "s|$tmp/repo|REPO|" "$FAKE_CARGO_LOG"; cat "$AGENT_SORT_OUT")" \
   "rc=0
-cargo build --release --locked --target x86_64-unknown-linux-gnu --target-dir REPO/agent-sort/target --message-format=json-render-diagnostics
+cargo build --release --locked --target x86_64-unknown-linux-gnu --target-dir REPO/agent-sort/target
 built"
 echo y > "$tmp/repo/other" && echo w >> "$tmp/repo/other"
 ROOT="$tmp/repo/agent-sort" fetch
@@ -190,7 +188,7 @@ CARGO_TARGET_DIR="$tmp/elsewhere" AGENT_SORT_KEY=000000000000 fetch; rc=$?
 check "the source build pins the target dir and copies the binary to where the manifest points" \
   "$(echo "rc=$rc"; sed -e 's/ in .*//' -e "s|$AGENT_SORT_ROOT|ROOT|" "$FAKE_CARGO_LOG"; cat "$AGENT_SORT_OUT"; [ -e "$tmp/elsewhere" ] && echo moved)" \
   "rc=0
-cargo build --release --locked --target x86_64-unknown-linux-gnu --target-dir ROOT/target --message-format=json-render-diagnostics
+cargo build --release --locked --target x86_64-unknown-linux-gnu --target-dir ROOT/target
 built"
 
 n=$((n + 1))
@@ -208,12 +206,12 @@ check "a cargo that names no host triple fails saying so and builds nothing" \
   "rc=$rc $(grep -c 'cargo -vV names no host triple' "$out") $(cargo_calls)" "rc=1 1 0"
 
 FAKE_CARGO_STALE=1 AGENT_SORT_KEY=000000000000 fetch; rc=$?
-check "the binary this build reported is installed, not a newer one for another target" \
+check "the binary built for this host is installed, not a newer one for another target" \
   "rc=$rc $(cat "$AGENT_SORT_OUT")" "rc=0 built"
 
 FAKE_CARGO_NOBIN=1 AGENT_SORT_KEY=000000000000 fetch; rc=$?
 check "a build that writes no binary fails naming it" \
-  "rc=$rc $(grep -c 'names no runnable agent-sort binary' "$tmp/fetch$n.txt")" "rc=1 1"
+  "rc=$rc $(grep -c 'cargo build finished without a runnable ' "$tmp/fetch$n.txt")" "rc=1 1"
 
 # Copied into another repo under a different directory name, the key is still this tree's hash.
 mkdir -p "$tmp/other/plugins" && command cp -R "$tmp/repo/agent-sort" "$tmp/other/plugins/renamed"

@@ -46,7 +46,7 @@ pub fn herdr_within(bin: &str, args: &[&str], limit: Duration) -> Res<String> {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
-                    "herdr {} did not answer within {} s",
+                    "herdr {} did not answer within {} s and was stopped; it may still have taken effect",
                     args[..args.len().min(2)].join(" "),
                     limit.as_secs()
                 ));
@@ -314,11 +314,11 @@ pub mod tests {
             ),
         )]);
         let start = std::time::Instant::now();
-        let limit = std::time::Duration::from_millis(300);
+        let limit = std::time::Duration::from_secs(1);
         let err = herdr_within(&f.bin, &["pane", "list"], limit).unwrap_err();
         let took = start.elapsed();
         assert!(
-            err.contains("herdr pane list") && err.contains("did not answer"),
+            err.contains("herdr pane list did not answer within 1 s"),
             "{err}"
         );
         assert!(took < std::time::Duration::from_millis(2500), "{took:?}");
@@ -326,6 +326,11 @@ pub mod tests {
         let answered = marker.exists();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!answered, "the fake herdr was left running");
+    }
+
+    #[test]
+    fn the_limit_on_a_herdr_call_is_ten_seconds() {
+        assert_eq!(HERDR_TIMEOUT, std::time::Duration::from_secs(10));
     }
 
     #[test]

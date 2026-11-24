@@ -39,19 +39,14 @@ build_from_source() {
     echo "agent-search: cargo -vV names no host triple to build for" >&2
     exit 1
   }
-  # --target-dir pins the output next to the manifest's command path, whatever CARGO_TARGET_DIR says.
-  # The binary's path comes from cargo's own report of this build, not from a guess at the layout
-  # under target/, where an earlier build for another target can have left a newer binary.
-  report="$root/target/.agent-search-build.json"
-  mkdir -p "$root/target" &&
-    (cd "$root" && cargo build --release --locked --target "$host" --target-dir "$root/target" \
-      --message-format=json-render-diagnostics > "$report") || exit 1
-  built=$(sed -n 's/.*"executable":"\([^"]*\/agent-search\)".*/\1/p' "$report" | tail -n 1)
-  [ -n "$built" ] && [ -x "$built" ] || {
-    echo "agent-search: cargo build finished but its report ($report) names no runnable agent-search binary" >&2
+  # --target-dir keeps the build under this plugin's target/, whatever CARGO_TARGET_DIR says.
+  (cd "$root" && cargo build --release --locked --target "$host" --target-dir "$root/target") || exit 1
+  # A --target build lands under <target-dir>/<triple>/release, never where the manifest points.
+  built="$root/target/$host/release/agent-search"
+  [ -x "$built" ] || {
+    echo "agent-search: cargo build finished without a runnable $built" >&2
     exit 1
   }
-  # A --target build lands under target/<triple>/release, never where the manifest points.
   { mkdir -p "$(dirname "$out")" && cp -f "$built" "$out"; } || {
     echo "agent-search: cannot copy $built to $out" >&2
     exit 1
@@ -102,8 +97,9 @@ asset="agent-search-$key-$triple"
 # Downloaded next to where it is installed, not under TMPDIR: the binary is run once before it is
 # installed, and a temporary directory can be mounted noexec.
 dest=$(dirname "$out")
-mkdir -p "$dest" 2>/dev/null && tmp=$(mktemp -d "$dest/.fetch.XXXXXX" 2>/dev/null) ||
-  fallback "cannot create a temporary directory in $dest"
+# One fixed name: what an interrupted install left behind is reused and removed by the next one.
+tmp="$dest/.fetch"
+mkdir -p "$tmp" 2>/dev/null || fallback "cannot create $tmp"
 download "$base_url/$asset" "$tmp/$asset" || fallback "no prebuilt binary $asset"
 download "$base_url/$asset.sha256" "$tmp/$asset.sha256" || fallback "no checksum for $asset"
 want=$(awk '{print $1}' "$tmp/$asset.sha256")

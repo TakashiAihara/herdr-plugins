@@ -8,8 +8,8 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # The one `run: |` block of the publish job, up to the next line indented less than the block,
-# without its 10-space step indent. A second run block in that job fails here instead of silently
-# becoming the script under test.
+# without its 10-space step indent. A second `run: |` block in that job fails here instead of
+# silently becoming the script under test.
 awk '
   /^  [^ ]/ { job = $0 }
   on && $0 != "" && substr($0, 1, 10) != "          " { on = 0 }
