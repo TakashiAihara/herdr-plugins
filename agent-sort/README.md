@@ -29,7 +29,7 @@ command = "takashiaihara.agent-sort.open"
 description = "pick an agent sort"
 ```
 
-`prefix+s` replaces Herdr's default `settings` binding; pick another key if you open settings from the keyboard.
+`prefix+s` replaces Herdr's default `settings` binding. If your config sets `settings = "prefix+s"` explicitly (for example, a copy of the default config), Herdr keeps `settings` and disables this binding; `herdr config check` reports it. Move `settings` or pick another key for `next`.
 
 ## Built-in presets
 
