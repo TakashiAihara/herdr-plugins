@@ -386,6 +386,15 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("s2.user"), "{err}");
+        // With a second problem both are named, the sessions first.
+        let knot = dir.join("claude/projects/-w-knot");
+        std::os::unix::fs::symlink("-w-knot", &knot).unwrap();
+        let err = index_all(&env_in(&dir, "/nonexistent/herdr")).unwrap_err();
+        assert!(
+            err.starts_with("1 of 2 sessions could not be indexed: ")
+                && err.contains(&format!("; cannot read {}: ", knot.display())),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -403,7 +412,7 @@ mod tests {
         std::fs::remove_file(proj.join("s2.jsonl")).unwrap();
         std::fs::write(proj.join("s3.jsonl"), user_line("three")).unwrap();
         let knot = dir.join("claude/projects/-w-knot");
-        std::os::unix::fs::symlink(&knot, &knot).unwrap();
+        std::os::unix::fs::symlink("-w-knot", &knot).unwrap();
         let err = index_all(&env).unwrap_err();
         assert!(
             err.starts_with(&format!("cannot read {}: ", knot.display())),

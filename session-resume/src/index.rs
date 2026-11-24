@@ -63,8 +63,22 @@ fn stamp(md: &fs::Metadata) -> (u64, u64, i64) {
     (
         md.len(),
         md.ino(),
-        md.mtime() * 1_000_000_000 + md.mtime_nsec(),
+        // Only compared for equality, so a time too far from 1970 to fit may wrap.
+        md.mtime()
+            .wrapping_mul(1_000_000_000)
+            .wrapping_add(md.mtime_nsec()),
     )
+}
+
+// The entries of a listing. One that fails part-way is named in `unread`: what it did not return
+// only looks absent.
+fn listed(entries: fs::ReadDir, of: &Path, unread: &mut Vec<String>) -> Vec<fs::DirEntry> {
+    entries
+        .filter_map(|e| {
+            e.map_err(|e| unread.push(format!("cannot list all of {}: {e}", of.display())))
+                .ok()
+        })
+        .collect()
 }
 
 // Session ids with the transcript of each.
@@ -83,7 +97,7 @@ pub fn transcripts(projects: &Path) -> Res<(Sessions, Vec<String>)> {
     // One session id in two directories is one session; the longer file has the later history.
     let mut best: HashMap<String, (u64, PathBuf)> = HashMap::new();
     let mut unread = vec![];
-    for dir in dirs.flatten() {
+    for dir in listed(dirs, projects, &mut unread) {
         let files = match fs::read_dir(dir.path()) {
             Ok(files) => files,
             // A file beside the project directories is not one of them.
@@ -93,7 +107,7 @@ pub fn transcripts(projects: &Path) -> Res<(Sessions, Vec<String>)> {
                 continue;
             }
         };
-        for f in files.flatten() {
+        for f in listed(files, &dir.path(), &mut unread) {
             let path = f.path();
             let Some(id) = path
                 .file_name()
@@ -200,14 +214,20 @@ impl Index {
     // transcript found shorter than it was at the last read (cut by another tool), of the same
     // length but written since, at another path or inode, or a cache that cannot be trusted is
     // rebuilt from the start. A transcript rewritten in place and grown past its old size between
-    // two reads is not noticed, nor is a same-length rewrite within the clock's granularity.
+    // two reads is not noticed, nor is a same-length rewrite that leaves the modification time as
+    // it was (within the clock's granularity, or put back).
     pub fn refresh(&self, id: &str, transcript: &Path) -> Res<(Meta, bool)> {
         let source = transcript.to_string_lossy().into_owned();
         // The size and the meta are both read under the lock: another process may just have
         // brought the cache up to date, and a size taken before that would look like a cut.
         let _lock = self.lock()?;
+        // The stamp is taken from the open file, so it is of the file that is read below even if
+        // another is renamed over the path meanwhile.
+        let mut file = File::open(transcript)
+            .map_err(|e| format!("cannot open {}: {e}", transcript.display()))?;
         let (size, ino, mtime_ns) = stamp(
-            &fs::metadata(transcript)
+            &file
+                .metadata()
                 .map_err(|e| format!("cannot stat {}: {e}", transcript.display()))?,
         );
         let mut meta = match self.meta(id) {
@@ -220,8 +240,6 @@ impl Index {
         };
         meta.source = source;
         let mut bodies = Bodies::default();
-        let mut file = File::open(transcript)
-            .map_err(|e| format!("cannot open {}: {e}", transcript.display()))?;
         file.seek(SeekFrom::Start(meta.offset))
             .map_err(|e| format!("cannot read {}: {e}", transcript.display()))?;
         // Only what the stat above saw: the stamp kept below then says exactly what was read, and
@@ -416,7 +434,8 @@ mod tests {
         fs::write(fx.index.file("s9", "meta.json"), "x").unwrap();
         // A link to itself fails to list whoever runs the test; a mode would not stop root.
         let knot = fx.projects.join("-w-knot");
-        std::os::unix::fs::symlink(&knot, &knot).unwrap();
+        // The link's target is relative to the link's directory, so the name alone is itself.
+        std::os::unix::fs::symlink("-w-knot", &knot).unwrap();
         let (all, mut problems) = transcripts(&fx.projects).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(problems.len(), 1);
@@ -440,21 +459,23 @@ mod tests {
     fn a_stale_index_file_that_cannot_be_removed_is_reported_and_the_others_still_go() {
         let fx = Fx::new("sweep-fail");
         // A directory with something in it cannot be removed as a file, by anyone.
+        // Two of them: stopping at the first failure would count one.
         fs::create_dir_all(fx.index.file("gone", "user").join("x")).unwrap();
+        fs::create_dir_all(fx.index.file("gone", "assistant").join("x")).unwrap();
         fs::write(fx.index.file("gone", "tools"), "t").unwrap();
         let mut problems = vec![];
         fx.index.prune(&[], &mut problems);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(
-            problems[0].starts_with("cannot remove 1 stale index file(s): ")
-                && problems[0].contains("gone.user"),
+            problems[0].starts_with("cannot remove 2 stale index file(s): ")
+                && problems[0].contains("/gone."),
             "{problems:?}"
         );
         assert!(!fx.index.file("gone", "tools").exists());
     }
 
-    fn set_mtime(path: &Path, secs: u64) {
-        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    fn set_mtime(path: &Path, secs: u64, nanos: u32) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos);
         File::options()
             .write(true)
             .open(path)
@@ -469,16 +490,17 @@ mod tests {
         let (old, new) = (line("user", T1, r#""old""#), line("user", T2, r#""new""#));
         assert_eq!(old.len(), new.len());
         fx.write("s1", &old);
-        set_mtime(&fx.transcript("s1"), 1_000);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
         let (m1, _) = fx.refresh("s1");
         // Written in place: the same inode and length, a later time.
         fx.write("s1", &new);
-        set_mtime(&fx.transcript("s1"), 2_000);
+        // Later by a nanosecond only.
+        set_mtime(&fx.transcript("s1"), 1_000, 2);
         assert!(!fx.index.is_fresh("s1", &m1, &fx.transcript("s1")));
         let (m2, did) = fx.refresh("s1");
         assert!(did);
         assert_eq!(fx.body("s1", 0), "new\n");
-        assert_eq!((m2.ino, m2.mtime_ns), (m1.ino, 2_000_000_000_000));
+        assert_eq!((m2.ino, m2.mtime_ns), (m1.ino, 1_000_000_000_002));
     }
 
     // A file under /proc reports length 0 and still has content: what a transcript appended to
@@ -499,13 +521,13 @@ mod tests {
         let fx = Fx::new("replaced");
         let old = line("user", T1, r#""old""#);
         fx.write("s1", &old);
-        set_mtime(&fx.transcript("s1"), 1_000);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
         let (m1, _) = fx.refresh("s1");
         // Renamed over it with the old time kept, as a copy that preserves times would: only the
         // inode tells. Both files exist at once, so the new one cannot get the old inode.
         let other = fx.projects.join("-w-a/incoming");
         fs::write(&other, &old).unwrap();
-        set_mtime(&other, 1_000);
+        set_mtime(&other, 1_000, 1);
         fs::rename(&other, fx.transcript("s1")).unwrap();
         assert!(!fx.index.is_fresh("s1", &m1, &fx.transcript("s1")));
         assert!(fx.refresh("s1").1);
@@ -794,7 +816,7 @@ mod tests {
         let both = one.clone() + &line("user", T2, r#""two""#);
         // What another process leaves after indexing the two-line transcript.
         fx.write("s1", &both);
-        set_mtime(&fx.transcript("s1"), 1_000);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
         fx.refresh("s1");
         let names = ["s1.meta.json", "s1.user", "s1.assistant", "s1.tools"];
         let cache: Vec<Vec<u8>> = names
@@ -817,7 +839,7 @@ mod tests {
             .is_err());
         // While it waits, the transcript grows and the other writer indexes it.
         fx.write("s1", &both);
-        set_mtime(&fx.transcript("s1"), 1_000);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
         for (n, bytes) in names.iter().zip(&cache) {
             fs::write(fx.index.dir.join(n), bytes).unwrap();
         }

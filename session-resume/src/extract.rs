@@ -70,7 +70,7 @@ fn record(s: &str) -> Option<String> {
 }
 
 // Text Claude Code wraps in these tags is written by the harness (a slash command, its output, a
-// `!` command, a paste), not typed as a prompt. Any other text starting with `<` is a prompt.
+// `!` command, a paste), not typed as a prompt. Text starting with any other tag is taken as one.
 const WRAPPERS: [&str; 13] = [
     "command-name",
     "command-message",

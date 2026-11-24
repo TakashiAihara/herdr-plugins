@@ -95,6 +95,14 @@ impl App {
         app
     }
 
+    // The status line keeps the first failure until the next key: a later one does not replace
+    // what has not been read yet.
+    fn note(&mut self, e: String) {
+        if self.status.is_empty() {
+            self.status = e;
+        }
+    }
+
     fn selected(&self) -> Option<&Entry> {
         self.hits.get(self.cur).map(|&i| &self.s.entries[i])
     }
@@ -117,7 +125,7 @@ impl App {
             .unwrap_or(0);
         self.hits = hits;
         if let Some(e) = self.s.take_errors().into_iter().next() {
-            self.status = e;
+            self.note(e);
         }
         self.refresh_snippet();
     }
@@ -149,16 +157,17 @@ impl App {
                 .map(|e| e.id.clone());
             let mut problem = None;
             for (id, meta) in metas {
-                // Shown as unmarked, and said so.
-                let marked = is_marked(self.marker.as_deref(), &id).unwrap_or_else(|e| {
-                    problem = Some(e);
-                    false
-                });
+                // Shown as unmarked, and said so. A session that is not listed has no row to mark.
+                let marked = meta.listed()
+                    && is_marked(self.marker.as_deref(), &id).unwrap_or_else(|e| {
+                        problem.get_or_insert(e);
+                        false
+                    });
                 self.s.upsert(Entry::new(id, meta, marked));
             }
             self.research(keep);
             if let Some(e) = problem {
-                self.status = e;
+                self.note(e);
             }
         }
     }
@@ -533,16 +542,17 @@ pub fn prepare(env: &Env, now_ms: i64) -> Res<Prepared> {
             _ => stale.push((id, path)),
         }
     }
-    // The one line under the list shows the first thing that went wrong.
-    let mut status = problems.into_iter().next().unwrap_or_default();
     // Without the running set nothing is marked as running; the failure is shown, not guessed past.
     let running = match launch::running(&env.herdr) {
         Ok(map) => map.into_keys().collect(),
         Err(e) => {
-            status = e;
+            problems.push(e);
             HashSet::new()
         }
     };
+    // The one line under the list shows the first thing that went wrong: sessions missing from
+    // the list come before a missing running dot.
+    let status = problems.into_iter().next().unwrap_or_default();
     let s = Searcher::new(index.clone(), entries);
     Ok(Prepared {
         app: App::new(s, &cfg, running, now_ms, status),
@@ -572,7 +582,7 @@ fn session(env: &Env, prepared: Prepared, term: &mut DefaultTerminal) -> Res<()>
             } = b.drain();
             app.apply(metas, progress);
             if let Some(e) = errors.into_iter().next() {
-                app.status = e;
+                app.note(e);
             }
             if progress.is_none() {
                 bg = None;
@@ -894,7 +904,8 @@ mod tests {
 
     // A marker under a link to itself: looking for it fails whoever runs the test.
     fn knotted_marker(dir: &Path) -> String {
-        std::os::unix::fs::symlink(dir.join("knot"), dir.join("knot")).unwrap();
+        // The link's target is relative to the link's directory, so the name alone is itself.
+        std::os::unix::fs::symlink("knot", dir.join("knot")).unwrap();
         format!("{}/knot/{{id}}", dir.display())
     }
 
@@ -918,12 +929,40 @@ mod tests {
             last_ms: Some(NOW),
             ..Meta::default()
         };
-        a.apply(vec![("s-fresh".into(), meta)], None);
+        a.apply(
+            vec![("s-fresh".into(), meta.clone()), ("s-later".into(), meta)],
+            None,
+        );
         assert_eq!(shown_ids(&a)[0], "s-fresh");
         assert!(!a.s.entries[a.hits[0]].marked);
+        // The first of them, as when the popup opens.
         assert!(a.status.contains("/knot/s-fresh: "), "{}", a.status);
+        // It stays until a key even when something else fails after it.
+        a.note("later".into());
+        assert!(a.status.contains("/knot/s-fresh: "), "{}", a.status);
+        press(&mut a, KeyCode::Down);
+        // A session that is not listed has no marker to look for.
+        a.apply(vec![("s-unlisted".into(), Meta::default())], None);
+        assert_eq!(a.status, "");
         done(root);
         done(dir);
+    }
+
+    #[test]
+    fn a_search_failure_after_a_refresh_does_not_replace_a_failure_not_yet_read() {
+        let (mut a, root) = app();
+        press(&mut a, KeyCode::Tab);
+        std::fs::remove_file(root.join("index/s-day.user")).unwrap();
+        type_str(&mut a, "z");
+        assert!(a.status.contains("s-day.user"), "{}", a.status);
+        a.status = "first".into();
+        let meta = Meta {
+            last_ms: Some(NOW),
+            ..Meta::default()
+        };
+        a.apply(vec![("s-fresh".into(), meta)], None);
+        assert_eq!(a.status, "first");
+        done(root);
     }
 
     #[test]
@@ -1292,9 +1331,12 @@ mod tests {
         assert_eq!(shown_ids(&p.app), ["s1"]);
         assert!(p.app.status.contains("/knot/s1: "), "{}", p.app.status);
 
-        // The unreadable directory is found first, so it is the one the status line names.
+        // The unreadable directory is found first, so it is the one the status line names, also
+        // when herdr fails after it.
         let knot = dir.join("claude/projects/-w-knot");
-        std::os::unix::fs::symlink(&knot, &knot).unwrap();
+        std::os::unix::fs::symlink("-w-knot", &knot).unwrap();
+        let down = fake_herdr(&[("pane list", "echo down >&2; exit 1")]);
+        let env = env_in(&dir, &down.bin);
         let p = prepare(&env, NOW).unwrap();
         assert_eq!(shown_ids(&p.app), ["s1"]);
         assert!(
