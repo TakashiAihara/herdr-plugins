@@ -52,8 +52,8 @@ pub struct Bodies {
 }
 
 // The form both the indexed text and a query are compared in.
-// shortcut: lowercase plus the Greek final sigma, not a full Unicode case fold (ß and ss, dotted
-// İ); use a case-folding crate when a language needs those.
+// NOTE: lowercase plus the Greek final sigma, not a full Unicode case fold (ß and ss, dotted İ);
+// use a case-folding crate when a language needs those.
 pub fn fold(s: &str) -> String {
     s.to_lowercase().replace('ς', "σ")
 }

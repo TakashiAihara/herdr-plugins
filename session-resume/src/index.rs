@@ -73,12 +73,15 @@ fn stamp(md: &fs::Metadata) -> (u64, u64, i64) {
 // The entries of a listing. One that fails part-way is named in `unread`: what it did not return
 // only looks absent.
 fn listed(entries: fs::ReadDir, of: &Path, unread: &mut Vec<String>) -> Vec<fs::DirEntry> {
-    entries
-        .filter_map(|e| {
-            e.map_err(|e| unread.push(format!("cannot list all of {}: {e}", of.display())))
-                .ok()
-        })
-        .collect()
+    let mut failed = false;
+    let all = entries
+        .filter_map(|e| e.map_err(|_| failed = true).ok())
+        .collect();
+    // Once, however many entries failed.
+    if failed {
+        unread.push(format!("cannot list all of {}", of.display()));
+    }
+    all
 }
 
 // Session ids with the transcript of each.
@@ -117,8 +120,15 @@ pub fn transcripts(projects: &Path) -> Res<(Sessions, Vec<String>)> {
             else {
                 continue;
             };
-            let Ok(md) = fs::metadata(&path) else {
-                continue;
+            let md = match fs::metadata(&path) {
+                Ok(md) => md,
+                // Gone since it was listed, or a link to nothing: not a session.
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                // There, but it cannot be told what it is: its cache is kept like the rest.
+                Err(e) => {
+                    unread.push(format!("cannot stat {}: {e}", path.display()));
+                    continue;
+                }
             };
             // Equal lengths go to the lower path, so the choice does not follow directory order.
             let wins =
@@ -456,6 +466,22 @@ mod tests {
     }
 
     #[test]
+    fn a_transcript_that_cannot_be_stat_ed_is_named_and_one_that_is_gone_is_not() {
+        let fx = Fx::new("unstat");
+        fx.write("s1", &line("user", T1, r#""a""#));
+        let knot = fx.projects.join("-w-a/s2.jsonl");
+        std::os::unix::fs::symlink("s2.jsonl", &knot).unwrap();
+        std::os::unix::fs::symlink("nowhere", fx.projects.join("-w-a/s3.jsonl")).unwrap();
+        let (all, unread) = transcripts(&fx.projects).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(unread.len(), 1, "{unread:?}");
+        assert!(
+            unread[0].starts_with(&format!("cannot stat {}: ", knot.display())),
+            "{unread:?}"
+        );
+    }
+
+    #[test]
     fn a_stale_index_file_that_cannot_be_removed_is_reported_and_the_others_still_go() {
         let fx = Fx::new("sweep-fail");
         // A directory with something in it cannot be removed as a file, by anyone.
@@ -608,7 +634,7 @@ mod tests {
         let other = Fx::new("append-full");
         other.write("s1", &(first + &second));
         let (full, _) = other.refresh("s1");
-        // Only where it was read from differs.
+        // Only the file it was read from differs: its path, inode and time.
         let unplaced = |m: &Meta| Meta {
             source: String::new(),
             ino: 0,
