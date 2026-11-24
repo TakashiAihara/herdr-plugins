@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn folding_lowercases_and_makes_both_greek_sigmas_one() {
         assert_eq!(fold("ΟΔΟΣ Abc"), "οδοσ abc");
-        assert_eq!(fold("οδος"), fold("ΟΔΟΣ"));
+        assert_eq!(fold("οδος"), fold("οδοσ"));
         let (_, b) = read(&[&user(r#""ΟΔΟΣ""#)]);
         assert_eq!(b.text[USER], "οδοσ\n");
     }
