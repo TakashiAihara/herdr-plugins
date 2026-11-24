@@ -331,6 +331,39 @@ pub mod tests {
     }
 
     #[test]
+    fn a_pane_run_that_does_not_answer_leaves_the_workspace_open() {
+        let _g = serial();
+        // Left alone the fake answers after 3 s: the command may still reach the pane.
+        let f = fake_herdr(&[
+            ("workspace create", &format!("echo '{CREATED}'")),
+            ("pane run", "sleep 3"),
+        ]);
+        let start = std::time::Instant::now();
+        let limit = std::time::Duration::from_secs(1);
+        let err = launch_within(&f.bin, "/b", "x {prompt}", "", "do x", limit).unwrap_err();
+        assert!(start.elapsed() < std::time::Duration::from_millis(2500));
+        assert!(
+            err.contains("herdr pane run did not answer within 1 s")
+                && err.contains("workspace w9 is left open"),
+            "{err}"
+        );
+        assert_eq!(heads(&f), ["workspace create", "pane run"]);
+    }
+
+    #[test]
+    fn the_limit_given_to_a_launch_bounds_its_first_call_too() {
+        let _g = serial();
+        let f = fake_herdr(&[("workspace create", "sleep 3")]);
+        let limit = std::time::Duration::from_secs(1);
+        let err = launch_within(&f.bin, "/b", "x {prompt}", "", "do x", limit).unwrap_err();
+        assert!(
+            err.contains("herdr workspace create did not answer within 1 s"),
+            "{err}"
+        );
+        assert_eq!(heads(&f), ["workspace create"]);
+    }
+
+    #[test]
     fn the_limit_on_a_herdr_call_is_ten_seconds() {
         assert_eq!(HERDR_TIMEOUT, std::time::Duration::from_secs(10));
     }

@@ -97,11 +97,11 @@ asset="agent-launch-$key-$triple"
 # Downloaded next to where it is installed, not under TMPDIR: the binary is run once before it is
 # installed, and a temporary directory can be mounted noexec.
 dest=$(dirname "$out")
-# One fixed name: what an interrupted install left behind is reused and removed by the next
-# install that downloads.
-# NOTE: two installs of this plugin at once share it and can overwrite each other's download.
-tmp="$dest/.fetch"
-mkdir -p "$tmp" 2>/dev/null || fallback "cannot create $tmp"
+# What an interrupted install left behind goes first. mktemp makes the directory for this run
+# private (0700) under a name nobody could prepare.
+rm -rf "$dest"/.fetch.* 2>/dev/null
+mkdir -p "$dest" 2>/dev/null && tmp=$(mktemp -d "$dest/.fetch.XXXXXX" 2>/dev/null) ||
+  fallback "cannot create a temporary directory in $dest"
 download "$base_url/$asset" "$tmp/$asset" || fallback "no prebuilt binary $asset"
 download "$base_url/$asset.sha256" "$tmp/$asset.sha256" || fallback "no checksum for $asset"
 want=$(awk '{print $1}' "$tmp/$asset.sha256")

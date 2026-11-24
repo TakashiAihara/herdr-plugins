@@ -78,7 +78,23 @@ accept
 
 check "nothing but the binary is left in the install directory" "$(ls -A "$(dirname "$AGENT_SEARCH_OUT")")" "agent-search"
 
-mkdir -p "$tmp/out$((n + 1))/.fetch" && echo junk > "$tmp/out$((n + 1))/.fetch/junk"
+# The fake mktemp records the mode of the directory the real one made.
+mkdir -p "$tmp/mk"
+real_mktemp=$(command -v mktemp)
+cat > "$tmp/mk/mktemp" <<FAKE
+#!/bin/sh
+d=\$("$real_mktemp" "\$@") || exit 1
+{ stat -c '%a' "\$d" 2>/dev/null || stat -f '%Lp' "\$d"; } > "$tmp/mk/mode"
+echo "\$d"
+FAKE
+chmod +x "$tmp/mk/mktemp"
+FETCH_PATH="$tmp/mk:$tmp/bin:$PATH" AGENT_SEARCH_KEY=abcdef1234567890 fetch
+check "the download directory is private to the user and inside the install directory" \
+  "$(cat "$out"; cat "$tmp/mk/mode")" \
+  "agent-search: installed prebuilt agent-search-abcdef123456-x86_64-unknown-linux-musl
+700"
+
+mkdir -p "$tmp/out$((n + 1))/.fetch.old" && echo junk > "$tmp/out$((n + 1))/.fetch.old/junk"
 AGENT_SEARCH_KEY=abcdef1234567890 fetch
 check "what an interrupted install left behind is removed by the next one" \
   "$(cat "$out"; ls -A "$(dirname "$AGENT_SEARCH_OUT")")" \
@@ -92,7 +108,7 @@ check "the download does not go through TMPDIR, which can be missing or noexec" 
 # Without curl the download goes through wget: a PATH holding what the script needs and no curl,
 # and a wget that records its arguments and copies the file:// URL.
 mkdir -p "$tmp/nocurl"
-for c in sh dirname cut awk sed chmod mkdir mv rm cp cat sha256sum shasum; do
+for c in sh dirname cut mktemp awk sed chmod mkdir mv rm cp cat sha256sum shasum; do
   p=$(command -v "$c") && ln -s "$p" "$tmp/nocurl/$c"
 done
 ln -s "$tmp/bin/uname" "$tmp/bin/cargo" "$tmp/nocurl/"
