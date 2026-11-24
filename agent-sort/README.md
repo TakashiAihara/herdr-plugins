@@ -17,17 +17,19 @@ Herdr does not let a plugin bind keys, so add bindings to your Herdr config:
 
 ```toml
 [[keys.command]]
-key = "prefix+o"
+key = "prefix+s"
 type = "plugin_action"
 command = "takashiaihara.agent-sort.next"
 description = "next agent sort"
 
 [[keys.command]]
-key = "prefix+O"
+key = "prefix+shift+s"
 type = "plugin_action"
 command = "takashiaihara.agent-sort.open"
 description = "pick an agent sort"
 ```
+
+`prefix+s` replaces Herdr's default `settings` binding. If your config sets `settings = "prefix+s"` explicitly (for example, a copy of the default config), Herdr keeps `settings` and disables this binding; `herdr config check` reports it. Move `settings` or pick another key for `next`.
 
 ## Built-in presets
 

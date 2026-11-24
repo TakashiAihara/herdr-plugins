@@ -17,7 +17,7 @@ Herdr does not let a plugin bind keys, so add one to your Herdr config:
 
 ```toml
 [[keys.command]]
-key = "prefix+s"
+key = "prefix+f"
 type = "plugin_action"
 command = "takashiaihara.agent-search.open"
 description = "search agents"
