@@ -5,7 +5,7 @@ Find a Claude Code session and pick it up again, including one whose pane is lon
 ## Requirements
 
 - Herdr 0.9.5+
-- Linux or macOS (x86_64 or arm64). Installing downloads a prebuilt binary; nothing else is needed at runtime. On another platform, or when the download fails, it builds from source and needs a Rust toolchain (1.89 or newer).
+- Linux or macOS (x86_64 or arm64). Installing downloads a prebuilt binary; nothing else is needed at runtime. On another CPU architecture, or when the download fails, it builds from source and needs a Rust toolchain (1.89 or newer). Other operating systems are not supported.
 - Claude Code transcripts under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`)
 
 ## Install
@@ -65,7 +65,7 @@ The list is always ordered by last activity; how well a session matches does not
 | `Enter` | resume the selected session |
 | `Esc`, `Ctrl-C`, `Ctrl-D` | close |
 
-A row shows, from the left: the marker (when configured), `●` when the session is running, how long ago it was last active (`5m`, `3h`, `2d`, `4w`), the last two components of its directory, and its title. The area below the list shows the id, directory, branch, last activity (in UTC), first prompt, and the match.
+A row shows, from the left: the marker (when configured), `●` when the session is running, how long ago it was last active (`5m`, `3h`, `2d`, `4w`), the last two components of its directory, and its title. The area below the list shows the id, directory, branch, last activity (in UTC), the match, and the first prompt.
 
 ## Markers
 

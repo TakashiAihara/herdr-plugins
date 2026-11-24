@@ -340,14 +340,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
                     "last activity: {}",
                     m.last_ms.map_or_else(String::new, format_ms)
                 )),
-                Line::from(format!("prompt: {}", launch::clean(&m.first_prompt))),
             ];
+            // Before the prompt: a long prompt wraps over several rows and would push it out.
             if let Some((tier, text)) = &app.snippet {
                 lines.push(Line::from(format!(
                     "match in {tier}: {}",
                     launch::clean(text)
                 )));
             }
+            lines.push(Line::from(format!(
+                "prompt: {}",
+                launch::clean(&m.first_prompt)
+            )));
             lines
         }
     };
@@ -994,6 +998,12 @@ mod tests {
             text.contains("match in assistant: assistant words"),
             "{text}"
         );
+        // The match comes before the prompt, which may wrap over the rows left.
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {text}"))
+        };
+        assert!(at("match in assistant") < at("prompt: "), "{text}");
         done(root);
     }
 
