@@ -105,7 +105,7 @@ In `resume`:
 Searching the conversation does not read the transcripts on every popup: the plugin keeps the text it extracted in `index/` under its state directory (`$HERDR_PLUGIN_STATE_DIR`, which Herdr sets for the plugin; otherwise `$XDG_STATE_HOME/herdr-session-resume` or `~/.local/state/herdr-session-resume`), per session.
 
 - The popup opens without waiting. Sessions whose index is current appear immediately; changed or new ones are read in the background, with `indexing 12/40` in the header, and join the list as they finish.
-- Transcripts only grow, so only the bytes added since the last read are parsed. A line Claude is still writing is read the next time, once it is complete. A transcript that became shorter is read again from the start.
+- Transcripts only grow, so only the bytes added since the last read are parsed. A line Claude is still writing is read the next time, once it is complete. A transcript found shorter than at the last read is read again from the start.
 - The conversation text of a scope is loaded the first time you widen the scope to it, so `meta` never reads the large files.
 - `session-resume index` brings the whole index up to date without a popup and prints how many sessions it lists, how many it had to read, and the time it took. Run it from a timer to keep the first popup fast.
 - The index holds the text of your conversations, so its directory is readable only by you (mode `0700`, files `0600`). It is rebuilt when the plugin changes the format, and the files of a session whose transcript is gone are removed. Its size is a small fraction of the transcripts' (about 6% on one set of several hundred transcripts, whose first indexing took a few seconds).
@@ -116,7 +116,8 @@ Searching the conversation does not read the transcripts on every popup: the plu
 - Transcript lines are recognised by Claude Code's compact JSON (`"type":"user"` and so on); lines written another way are skipped.
 - A match is shown in lowercase, because the index stores lowercase text.
 - Times are shown in UTC.
-- A popup and `session-resume index` running at the same time take turns writing the index (a lock file in it), so neither sees a half-written session. A popup that is already open keeps the text it loaded and does not notice a rewrite by the other until it is opened again.
+- A popup and `session-resume index` running at the same time take turns writing the index (a lock file in it), so their writes do not mix. Reading takes no lock: a popup that is already open reads a session's conversation the first time a search needs it, and if that session was rebuilt in between, the popup may search a mix of its old and new text until it is opened again.
+- A transcript that was cut and then grew past its old size before the index looked at it again is not noticed, and keeps its old text in the index.
 - Text that came from a transcript is stripped of control characters before it is drawn or used as a workspace label.
 - A failure in the popup (an invalid config, a projects directory that is not there, `workspace create` returning nothing, `pane run` failing) is shown there until you press `Enter` or `Esc` (or `Ctrl-C`), and the popup exits non-zero. A failure before the command is sent closes the workspace already created for it. A `herdr pane list` that fails when the popup opens is shown under the list and nothing is marked as running; when it fails at `Enter`, nothing is resumed.
 

@@ -136,6 +136,10 @@ impl Searcher {
     pub fn search(&mut self, query: &str, scope: Scope) -> Vec<usize> {
         let q = normalize(query);
         let terms: Vec<&str> = q.split(' ').filter(|t| !t.is_empty()).collect();
+        // The errors kept are those of this search: a body that reads now is not held against it.
+        for e in &mut self.entries {
+            e.read_error = None;
+        }
         // A query that only extends the last one, in the same scope, can only lose matches.
         let candidates: Vec<usize> = match &self.last {
             Some(l) if l.scope == scope && q.starts_with(&l.query) => l.hits.clone(),
@@ -412,18 +416,20 @@ mod tests {
         let path = f.root.join("index/s-mid.user");
         let saved = fs::read(&path).unwrap();
         fs::remove_file(&path).unwrap();
-        assert!(f.s.search("billing slow", Scope::User).is_empty());
+        // "y" is in s-old's title and only in s-mid's prompt, which cannot be read.
+        let hits = f.s.search("y", Scope::User);
+        assert_eq!(ids(&f, &hits), ["s-old"]);
         fs::write(&path, saved).unwrap();
-        // An extension of the failed query would narrow from its empty result if that were kept.
-        let ids = |f: &Fx, hits: Vec<usize>| -> Vec<String> {
-            hits.iter().map(|&i| f.s.entries[i].id.clone()).collect()
-        };
-        let hits = f.s.search("billing slow", Scope::User);
-        assert_eq!(ids(&f, hits), ["s-mid"]);
+        // The same query again would narrow from the incomplete result if that had been kept.
+        let hits = f.s.search("y", Scope::User);
+        assert_eq!(ids(&f, &hits), ["s-mid", "s-old"]);
+        assert!(f.s.take_errors().is_empty(), "the failed read is behind us");
+        // With every body read, the result is a base to narrow from again: a session that only
+        // joins afterwards by its file is not looked at for an extension of the query.
         fs::remove_file(&path).unwrap();
-        assert!(f.s.search("deploy", Scope::User).len() == 1);
-        let hits = f.s.search("billing slow", Scope::User);
-        assert_eq!(ids(&f, hits), ["s-mid"], "the body read once is kept");
+        let hits = f.s.search("y is", Scope::User);
+        assert_eq!(ids(&f, &hits), ["s-mid"], "the body read once is kept");
+        assert!(f.s.last.is_some());
     }
 
     #[test]

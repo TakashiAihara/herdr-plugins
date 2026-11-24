@@ -216,7 +216,14 @@ pub fn parse_ms(s: &str) -> Option<i64> {
     // A four-digit year keeps the arithmetic below far inside i64.
     let y = d.next().filter(|y| y.len() == 4).and_then(num)?;
     let (mo, da) = (num(d.next()?)?, num(d.next()?)?);
-    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let (hms, frac) = match time.split_once('.') {
+        // A point is followed by digits, however many; only the first three are kept.
+        Some((hms, frac)) if !frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit()) => {
+            (hms, frac)
+        }
+        Some(_) => return None,
+        None => (time, ""),
+    };
     let mut t = hms.split(':');
     let (h, mi, se) = (num(t.next()?)?, num(t.next()?)?, num(t.next()?)?);
     if d.next().is_some() || t.next().is_some() {
@@ -228,7 +235,6 @@ pub fn parse_ms(s: &str) -> Option<i64> {
     let ms = if frac.is_empty() {
         0
     } else {
-        num(frac)?;
         let digits: String = format!("{frac:0<3}").chars().take(3).collect();
         num(&digits)?
     };
@@ -468,6 +474,10 @@ mod tests {
             Some(1_793_803_461_665)
         );
         assert_eq!(parse_ms("2024-02-29T23:59:59.5Z"), Some(1_709_251_199_500));
+        assert_eq!(
+            parse_ms("2024-02-29T23:59:59.5000000000000000000001Z"),
+            Some(1_709_251_199_500)
+        );
         assert_eq!(format_ms(1_793_803_461_665), "2026-11-04 14:44 UTC");
         assert_eq!(format_ms(1_709_251_199_500), "2024-02-29 23:59 UTC");
         for bad in [
@@ -481,6 +491,7 @@ mod tests {
             "300000000-01-01T00:00:00Z",
             "026-11-04T14:44:21Z",
             "2026-11-04T14:44:21.123xyzZ",
+            "2026-11-04T14:44:21.Z",
         ] {
             assert_eq!(parse_ms(bad), None, "{bad}");
         }

@@ -168,15 +168,17 @@ impl Index {
 
     // Brings one session's cache up to date with its transcript and returns its meta and whether
     // anything was read. Only the bytes after the last complete line already read are parsed; a
-    // transcript that became shorter (cut by another tool), one found at another path, or a cache
-    // that cannot be trusted is rebuilt from the start.
+    // transcript found shorter than it was at the last read (cut by another tool), one found at
+    // another path, or a cache that cannot be trusted is rebuilt from the start. A transcript cut
+    // and grown past its old size between two reads is not noticed.
     pub fn refresh(&self, id: &str, transcript: &Path) -> Res<(Meta, bool)> {
+        let source = transcript.to_string_lossy().into_owned();
+        // The size and the meta are both read under the lock: another process may just have
+        // brought the cache up to date, and a size taken before that would look like a cut.
+        let _lock = self.lock()?;
         let size = fs::metadata(transcript)
             .map_err(|e| format!("cannot stat {}: {e}", transcript.display()))?
             .len();
-        let source = transcript.to_string_lossy().into_owned();
-        // The meta is read under the lock: another process may just have brought it up to date.
-        let _lock = self.lock()?;
         let mut meta = match self.meta(id) {
             Some(m) if m.source != source || !self.bodies_intact(id, &m) => Meta::default(),
             Some(m) if size == m.size => return Ok((m, false)),
@@ -605,6 +607,49 @@ mod tests {
         let done = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         worker.join().unwrap();
         assert_eq!(done, Ok(line("user", T1, r#""one""#).len() as u64));
+    }
+
+    #[test]
+    fn a_refresh_that_waited_for_another_writer_sees_the_transcript_as_it_is_then() {
+        let fx = Fx::new("waited");
+        let one = line("user", T1, r#""one""#);
+        let both = one.clone() + &line("user", T2, r#""two""#);
+        // What another process leaves after indexing the two-line transcript.
+        fx.write("s1", &both);
+        fx.refresh("s1");
+        let names = ["s1.meta.json", "s1.user", "s1.assistant", "s1.tools"];
+        let cache: Vec<Vec<u8>> = names
+            .iter()
+            .map(|n| fs::read(fx.index.dir.join(n)).unwrap())
+            .collect();
+        for n in names {
+            fs::remove_file(fx.index.dir.join(n)).unwrap();
+        }
+        fx.write("s1", &one);
+
+        let held = fx.index.lock().unwrap();
+        let (index, path) = (fx.index.clone(), fx.transcript("s1"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(index.refresh("s1", &path));
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err());
+        // While it waits, the transcript grows and the other writer indexes it.
+        fx.write("s1", &both);
+        for (n, bytes) in names.iter().zip(&cache) {
+            fs::write(fx.index.dir.join(n), bytes).unwrap();
+        }
+        drop(held);
+        let (m, did) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        assert!(!did, "it read again what the other writer had just indexed");
+        assert_eq!(m.offset, both.len() as u64);
+        assert_eq!(fx.body("s1", 0), "one\ntwo\n");
     }
 
     #[test]
