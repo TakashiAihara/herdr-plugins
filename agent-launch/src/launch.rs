@@ -13,9 +13,36 @@ pub fn herdr(bin: &str, args: &[&str]) -> Res<String> {
 }
 
 // `herdr` bounded by `limit`: past it the process is killed and an error names the command.
-// stdout and stderr drain on their own threads while waiting — `herdr pane list` writes more
-// than a pipe buffer, and a child blocked on a full pipe would look like one that never answers.
 pub fn herdr_within(bin: &str, args: &[&str], limit: Duration) -> Res<String> {
+    call(bin, args, limit).map_err(HerdrError::into_msg)
+}
+
+// Why a bounded herdr call failed; both variants carry the error text. `TimedOut` means the
+// process was killed for not answering in time and may still have taken effect.
+enum HerdrError {
+    TimedOut(String),
+    Failed(String),
+}
+
+impl HerdrError {
+    fn into_msg(self) -> String {
+        match self {
+            HerdrError::TimedOut(msg) | HerdrError::Failed(msg) => msg,
+        }
+    }
+}
+
+impl From<String> for HerdrError {
+    fn from(msg: String) -> HerdrError {
+        HerdrError::Failed(msg)
+    }
+}
+
+// One herdr call bounded by `limit`, with a timeout kept apart from other failures: a `pane
+// run` that times out may still have reached the pane. stdout and stderr drain on their own
+// threads while waiting — `herdr pane list` writes more than a pipe buffer, and a child
+// blocked on a full pipe would look like one that never answers.
+fn call(bin: &str, args: &[&str], limit: Duration) -> Result<String, HerdrError> {
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
@@ -45,13 +72,13 @@ pub fn herdr_within(bin: &str, args: &[&str], limit: Duration) -> Res<String> {
                 // waited for here; the reader threads end when the writers do.
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
+                return Err(HerdrError::TimedOut(format!(
                     "herdr {} did not answer within {} s and was stopped; it may still have taken effect",
                     args[..args.len().min(2)].join(" "),
                     limit.as_secs()
-                ));
+                )));
             }
-            Err(e) => return Err(format!("cannot run {bin}: {e}")),
+            Err(e) => return Err(HerdrError::Failed(format!("cannot run {bin}: {e}"))),
         }
     };
     let stdout = out
@@ -73,11 +100,11 @@ pub fn herdr_within(bin: &str, args: &[&str], limit: Duration) -> Res<String> {
         args[..args.len().min(2)].join(" "),
         status
     );
-    Err(if detail.is_empty() {
+    Err(HerdrError::Failed(if detail.is_empty() {
         what
     } else {
         format!("{what}: {detail}")
-    })
+    }))
 }
 
 // The first JSON value in Herdr's stdout; a line Herdr may print after it does not break parsing.
@@ -130,13 +157,26 @@ pub fn label(prompt: &str) -> String {
 // Creates a workspace in `cwd`, types the rendered command into its pane, then focuses it. Focus
 // moves last: the popup may close once it loses focus, and the command must be sent by then.
 pub fn launch(bin: &str, cwd: &str, template: &str, repo: &str, prompt: &str) -> Res<()> {
+    launch_within(bin, cwd, template, repo, prompt, HERDR_TIMEOUT)
+}
+
+// `launch` with `limit` on every herdr call. A `pane run` that times out may still have
+// reached the pane, so the workspace is left open and the error says so instead of closing it.
+pub fn launch_within(
+    bin: &str,
+    cwd: &str,
+    template: &str,
+    repo: &str,
+    prompt: &str,
+    limit: Duration,
+) -> Res<()> {
     let cmd = render(template, prompt, repo);
     if cmd.trim().is_empty() {
         return Err(format!(
             "the command template renders to nothing: {template}"
         ));
     }
-    let created = herdr(
+    let created = herdr_within(
         bin,
         &[
             "workspace",
@@ -147,6 +187,7 @@ pub fn launch(bin: &str, cwd: &str, template: &str, repo: &str, prompt: &str) ->
             &label(prompt),
             "--no-focus",
         ],
+        limit,
     )?;
     // Parsed as JSON: a quote inside the label or cwd is escaped, so no key can be misread from them.
     let reply = first_json(&created)
@@ -155,7 +196,7 @@ pub fn launch(bin: &str, cwd: &str, template: &str, repo: &str, prompt: &str) ->
         .ok_or_else(|| format!("herdr workspace create returned no workspace: {created}"))?;
     // A workspace made for this launch is not left behind when the command cannot be sent; a
     // failed close is reported, or the workspace would stay open without anyone knowing.
-    let close = |e: String| match herdr(bin, &["workspace", "close", ws]) {
+    let close = |e: String| match herdr_within(bin, &["workspace", "close", ws], limit) {
         Ok(_) => e,
         Err(close_err) => format!("{e}; workspace {ws} is left open: {close_err}"),
     };
@@ -164,9 +205,15 @@ pub fn launch(bin: &str, cwd: &str, template: &str, repo: &str, prompt: &str) ->
             "herdr workspace create returned no pane: {created}"
         ))
     })?;
-    herdr(bin, &["pane", "run", pane, &cmd]).map_err(close)?;
+    match call(bin, &["pane", "run", pane, &cmd], limit) {
+        Ok(_) => {}
+        Err(HerdrError::TimedOut(e)) => {
+            return Err(format!("{e}; workspace {ws} is left open"));
+        }
+        Err(HerdrError::Failed(e)) => return Err(close(e)),
+    }
     // The command already runs in the pane; a failed focus must not read as if nothing was sent.
-    herdr(bin, &["workspace", "focus", ws])
+    herdr_within(bin, &["workspace", "focus", ws], limit)
         .map_err(|e| format!("the command was sent to workspace {ws}, but {e}"))?;
     Ok(())
 }
