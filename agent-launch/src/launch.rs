@@ -411,6 +411,31 @@ pub mod tests {
     }
 
     #[test]
+    fn the_limit_given_to_a_launch_bounds_the_close_and_the_focus_too() {
+        let _g = serial();
+        let limit = std::time::Duration::from_secs(1);
+        let f = fake_herdr(&[
+            ("workspace create", &format!("echo '{CREATED}'")),
+            ("pane run", "exit 1"),
+            ("workspace close", "sleep 3"),
+        ]);
+        let err = launch_within(&f.bin, "/b", "x {prompt}", "", "do x", limit).unwrap_err();
+        assert!(
+            err.contains("left open: herdr workspace close did not answer within 1 s"),
+            "{err}"
+        );
+        let f = fake_herdr(&[
+            ("workspace create", &format!("echo '{CREATED}'")),
+            ("workspace focus", "sleep 3"),
+        ]);
+        let err = launch_within(&f.bin, "/b", "x {prompt}", "", "do x", limit).unwrap_err();
+        assert!(
+            err.contains("but herdr workspace focus did not answer within 1 s"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn the_limit_on_a_herdr_call_is_ten_seconds() {
         assert_eq!(HERDR_TIMEOUT, std::time::Duration::from_secs(10));
     }
