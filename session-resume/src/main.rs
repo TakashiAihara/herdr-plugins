@@ -211,9 +211,9 @@ fn open(env: &Env) -> Res<()> {
 fn index_all(env: &Env) -> Res<String> {
     let start = std::time::Instant::now();
     let cfg = ui::load_config(env)?;
-    let all = index::transcripts(std::path::Path::new(&cfg.projects))?;
+    let (all, mut problems) = index::transcripts(std::path::Path::new(&cfg.projects))?;
     let idx = index::Index::open(std::path::Path::new(&env.state_dir))?;
-    idx.sweep(&all.iter().map(|(id, _)| id.as_str()).collect())?;
+    idx.prune(&all, &mut problems);
     let (mut listed, mut refreshed) = (0, 0);
     let mut failures = vec![];
     for (id, path) in &all {
@@ -226,11 +226,18 @@ fn index_all(env: &Env) -> Res<String> {
         }
     }
     if let Some(first) = failures.first() {
-        return Err(format!(
-            "{} of {} sessions could not be indexed: {first}",
-            failures.len(),
-            all.len()
-        ));
+        problems.insert(
+            0,
+            format!(
+                "{} of {} sessions could not be indexed: {first}",
+                failures.len(),
+                all.len()
+            ),
+        );
+    }
+    // The sessions that could be read are indexed all the same; the command still fails.
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
     }
     Ok(format!(
         "sessions {listed}, refreshed {refreshed}, {} ms",
@@ -379,6 +386,43 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("s2.user"), "{err}");
+        // With a second problem both are named, the sessions first.
+        let knot = dir.join("claude/projects/-w-knot");
+        std::os::unix::fs::symlink("-w-knot", &knot).unwrap();
+        let err = index_all(&env_in(&dir, "/nonexistent/herdr")).unwrap_err();
+        assert!(
+            err.starts_with("1 of 2 sessions could not be indexed: ")
+                && err.contains(&format!("; cannot read {}: ", knot.display())),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unreadable_project_directory_fails_the_command_after_the_rest_is_indexed_and_kept() {
+        let _g = serial();
+        let dir = unique_dir("index-cmd-knot");
+        let proj = dir.join("claude/projects/-w-x");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("s1.jsonl"), user_line("one")).unwrap();
+        std::fs::write(proj.join("s2.jsonl"), user_line("two")).unwrap();
+        let env = env_in(&dir, "/nonexistent/herdr");
+        index_all(&env).unwrap();
+        // s2 disappears together with a directory that stops being readable: its cache stays.
+        std::fs::remove_file(proj.join("s2.jsonl")).unwrap();
+        std::fs::write(proj.join("s3.jsonl"), user_line("three")).unwrap();
+        let knot = dir.join("claude/projects/-w-knot");
+        std::os::unix::fs::symlink("-w-knot", &knot).unwrap();
+        let err = index_all(&env).unwrap_err();
+        assert!(
+            err.starts_with(&format!("cannot read {}: ", knot.display())),
+            "{err}"
+        );
+        let cached = |id: &str| dir.join(format!("state/index/{id}.meta.json")).exists();
+        assert!(cached("s2") && cached("s3"));
+        std::fs::remove_file(&knot).unwrap();
+        index_all(&env).unwrap();
+        assert!(!cached("s2"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

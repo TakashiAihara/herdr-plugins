@@ -65,7 +65,7 @@ The list is always ordered by last activity; how well a session matches does not
 | `Enter` | resume the selected session |
 | `Esc`, `Ctrl-C`, `Ctrl-D` | close |
 
-A row shows, from the left: the marker (when configured), `●` when the session is running, how long ago it was last active (`5m`, `3h`, `2d`, `4w`), the last two components of its directory, and its title. The area below the list shows the id, directory, branch, last activity (in UTC), the match, and the first prompt.
+A row shows, from the left: the marker (when configured), `●` when the session is running, how long ago it was last active (`5m`, `3h`, `2d`, `4w`; `?` when the transcript carries no usable time), the last two components of its directory, and its title. The area below the list shows the id, directory, branch, last activity (in UTC; `unknown` when the transcript carries no usable time), the match, and the first prompt.
 
 ## Markers
 
@@ -105,7 +105,7 @@ In `resume`:
 Searching the conversation does not read the transcripts on every popup: the plugin keeps the text it extracted in `index/` under its state directory (`$HERDR_PLUGIN_STATE_DIR`, which Herdr sets for the plugin; otherwise `$XDG_STATE_HOME/herdr-session-resume` or `~/.local/state/herdr-session-resume`), per session.
 
 - The popup opens without waiting. Sessions whose index is current appear immediately; changed or new ones are read in the background, with `indexing 12/40` in the header, and join the list as they finish.
-- Transcripts only grow, so only the bytes added since the last read are parsed. A line Claude is still writing is read the next time, once it is complete. A transcript found shorter than at the last read is read again from the start.
+- Transcripts only grow, so only the bytes added since the last read are parsed. A line Claude is still writing is read the next time, once it is complete. A transcript found shorter than at the last read, of the same length but written since, or replaced by another file, is read again from the start.
 - The conversation text of a scope is loaded the first time you widen the scope to it, so `meta` never reads the large files.
 - `session-resume index` brings the whole index up to date without a popup and prints how many sessions it lists, how many it had to read, and the time it took. Run it from a timer to keep the first popup fast.
 - The index holds the text of your conversations, so its directory is readable only by you (mode `0700`, files `0600`). It is rebuilt when the plugin changes the format, and the files of a session whose transcript is gone are removed. Its size is a small fraction of the transcripts' (about 6% on one set of several hundred transcripts, whose first indexing took a few seconds).
@@ -118,6 +118,7 @@ Searching the conversation does not read the transcripts on every popup: the plu
 - Times are shown in UTC.
 - A popup and `session-resume index` running at the same time take turns writing the index (a lock file in it), so their writes do not mix. Reading takes no lock: a popup that is already open reads a session's conversation the first time a search needs it, and if that session was rebuilt in between, the popup may search a mix of its old and new text until it is opened again.
 - A transcript that was cut and then grew past its old size before the index looked at it again is not noticed: the index keeps its old text and adds what it reads after the old end.
+- A transcript rewritten to the same length with its modification time left as it was is not noticed either.
 - Text that came from a transcript is stripped of control characters before it is drawn or used as a workspace label.
 - A failure in the popup (an invalid config, a projects directory that is not there, `workspace create` returning nothing, `pane run` failing) is shown there until you press `Enter` or `Esc` (or `Ctrl-C`), and the popup exits non-zero. A failure before the command is sent closes the workspace already created for it. A `herdr pane list` that fails when the popup opens is shown under the list and nothing is marked as running; when it fails at `Enter`, nothing is resumed.
 

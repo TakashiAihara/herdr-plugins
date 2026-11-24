@@ -3,12 +3,12 @@ use crate::Res;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 // A cache written by another version is rebuilt, never read.
-const FORMAT: u64 = 1;
+const FORMAT: u64 = 2;
 const BODY_EXT: [&str; 3] = ["user", "assistant", "tools"];
 
 fn to_json(m: &Meta) -> Value {
@@ -16,6 +16,8 @@ fn to_json(m: &Meta) -> Value {
         "version": FORMAT,
         "size": m.size,
         "offset": m.offset,
+        "ino": m.ino,
+        "mtime_ns": m.mtime_ns,
         "source": m.source,
         "custom_title": m.custom_title,
         "ai_title": m.ai_title,
@@ -36,6 +38,8 @@ fn from_json(v: &Value) -> Option<Meta> {
     Some(Meta {
         size: v["size"].as_u64()?,
         offset: v["offset"].as_u64()?,
+        ino: v["ino"].as_u64()?,
+        mtime_ns: v["mtime_ns"].as_i64()?,
         source: s("source")?,
         custom_title: s("custom_title")?,
         ai_title: s("ai_title")?,
@@ -54,8 +58,39 @@ fn from_json(v: &Value) -> Option<Meta> {
     })
 }
 
+// What tells one state of a transcript from another without reading it: size, inode, mtime (ns).
+fn stamp(md: &fs::Metadata) -> (u64, u64, i64) {
+    (
+        md.len(),
+        md.ino(),
+        // Only compared for equality, so a time too far from 1970 to fit may wrap.
+        md.mtime()
+            .wrapping_mul(1_000_000_000)
+            .wrapping_add(md.mtime_nsec()),
+    )
+}
+
+// The entries of a listing. One that fails part-way is named in `unread`: what it did not return
+// only looks absent.
+fn listed(entries: fs::ReadDir, of: &Path, unread: &mut Vec<String>) -> Vec<fs::DirEntry> {
+    let mut failed = false;
+    let all = entries
+        .filter_map(|e| e.map_err(|_| failed = true).ok())
+        .collect();
+    // Once, however many entries failed.
+    if failed {
+        unread.push(format!("cannot list all of {}", of.display()));
+    }
+    all
+}
+
+// Session ids with the transcript of each.
+pub type Sessions = Vec<(String, PathBuf)>;
+
 // Every `<projects>/<dir>/<id>.jsonl`, and nothing deeper: a subagent's transcript lives below.
-pub fn transcripts(projects: &Path) -> Res<Vec<(String, PathBuf)>> {
+// The second list names the project directories that could not be read; their sessions are missing
+// from the first.
+pub fn transcripts(projects: &Path) -> Res<(Sessions, Vec<String>)> {
     let dirs = fs::read_dir(projects).map_err(|e| {
         format!(
             "cannot read the projects directory {}: {e}",
@@ -64,11 +99,22 @@ pub fn transcripts(projects: &Path) -> Res<Vec<(String, PathBuf)>> {
     })?;
     // One session id in two directories is one session; the longer file has the later history.
     let mut best: HashMap<String, (u64, PathBuf)> = HashMap::new();
-    for dir in dirs.flatten() {
-        let Ok(files) = fs::read_dir(dir.path()) else {
-            continue;
+    let mut unread = vec![];
+    for dir in listed(dirs, projects, &mut unread) {
+        let files = match fs::read_dir(dir.path()) {
+            Ok(files) => files,
+            // A file beside the project directories is not one of them; neither is one gone since
+            // it was listed, or a link to nothing. Their sessions are gone like a removed
+            // transcript's, and the cache of a volume that comes back is read again.
+            Err(e) if matches!(e.kind(), ErrorKind::NotADirectory | ErrorKind::NotFound) => {
+                continue
+            }
+            Err(e) => {
+                unread.push(format!("cannot read {}: {e}", dir.path().display()));
+                continue;
+            }
         };
-        for f in files.flatten() {
+        for f in listed(files, &dir.path(), &mut unread) {
             let path = f.path();
             let Some(id) = path
                 .file_name()
@@ -78,8 +124,15 @@ pub fn transcripts(projects: &Path) -> Res<Vec<(String, PathBuf)>> {
             else {
                 continue;
             };
-            let Ok(md) = fs::metadata(&path) else {
-                continue;
+            let md = match fs::metadata(&path) {
+                Ok(md) => md,
+                // Gone since it was listed, or a link to nothing: not a session.
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                // There, but it cannot be told what it is: its cache is kept like the rest.
+                Err(e) => {
+                    unread.push(format!("cannot stat {}: {e}", path.display()));
+                    continue;
+                }
             };
             // Equal lengths go to the lower path, so the choice does not follow directory order.
             let wins =
@@ -91,7 +144,7 @@ pub fn transcripts(projects: &Path) -> Res<Vec<(String, PathBuf)>> {
     }
     let mut all: Vec<_> = best.into_iter().map(|(id, (_, p))| (id, p)).collect();
     all.sort();
-    Ok(all)
+    Ok((all, unread))
 }
 
 #[derive(Clone)]
@@ -149,14 +202,18 @@ impl Index {
         (0..3).all(|t| fs::metadata(self.body_file(id, t)).is_ok_and(|m| m.len() >= meta.lens[t]))
     }
 
-    // Up to date means nothing was appended since the last read; it takes stats and no reading.
+    // Up to date means the transcript is the file last read and was not written since; it takes
+    // stats and no reading.
     pub fn is_fresh(&self, id: &str, meta: &Meta, transcript: &Path) -> bool {
-        fs::metadata(transcript).is_ok_and(|m| m.len() == meta.size)
+        fs::metadata(transcript).is_ok_and(|md| stamp(&md) == (meta.size, meta.ino, meta.mtime_ns))
             && transcript.to_string_lossy() == meta.source
             && self.bodies_intact(id, meta)
     }
 
     // The first `len` bytes of one body file; what an index of that length recorded.
+    // NOTE: read without the lock, so a popup's search never waits for another process's refresh.
+    // Appends keep those bytes; only a rebuild by another process while the popup is open (its
+    // transcript was cut or replaced) can leave this session's matches wrong until it reopens.
     pub fn body(&self, id: &str, tier: usize, len: u64) -> Res<String> {
         let path = self.body_file(id, tier);
         let mut bytes = Vec::new();
@@ -168,30 +225,42 @@ impl Index {
 
     // Brings one session's cache up to date with its transcript and returns its meta and whether
     // anything was read. Only the bytes after the last complete line already read are parsed; a
-    // transcript found shorter than it was at the last read (cut by another tool), one found at
-    // another path, or a cache that cannot be trusted is rebuilt from the start. A transcript cut
-    // and grown past its old size between two reads is not noticed.
+    // transcript found shorter than it was at the last read (cut by another tool), of the same
+    // length but written since, at another path or inode, or a cache that cannot be trusted is
+    // rebuilt from the start. A transcript rewritten in place and grown past its old size between
+    // two reads is not noticed, nor is a same-length rewrite that leaves the modification time as
+    // it was (within the clock's granularity, or put back).
     pub fn refresh(&self, id: &str, transcript: &Path) -> Res<(Meta, bool)> {
         let source = transcript.to_string_lossy().into_owned();
         // The size and the meta are both read under the lock: another process may just have
         // brought the cache up to date, and a size taken before that would look like a cut.
         let _lock = self.lock()?;
-        let size = fs::metadata(transcript)
-            .map_err(|e| format!("cannot stat {}: {e}", transcript.display()))?
-            .len();
+        // The stamp is taken from the open file, so it is of the file that is read below even if
+        // another is renamed over the path meanwhile.
+        let mut file = File::open(transcript)
+            .map_err(|e| format!("cannot open {}: {e}", transcript.display()))?;
+        let (size, ino, mtime_ns) = stamp(
+            &file
+                .metadata()
+                .map_err(|e| format!("cannot stat {}: {e}", transcript.display()))?,
+        );
         let mut meta = match self.meta(id) {
-            Some(m) if m.source != source || !self.bodies_intact(id, &m) => Meta::default(),
-            Some(m) if size == m.size => return Ok((m, false)),
+            Some(m) if m.source != source || m.ino != ino || !self.bodies_intact(id, &m) => {
+                Meta::default()
+            }
+            Some(m) if size == m.size && mtime_ns == m.mtime_ns => return Ok((m, false)),
             Some(m) if size > m.size => m,
             _ => Meta::default(),
         };
+        let rebuild = meta.offset == 0;
         meta.source = source;
         let mut bodies = Bodies::default();
-        let mut file = File::open(transcript)
-            .map_err(|e| format!("cannot open {}: {e}", transcript.display()))?;
         file.seek(SeekFrom::Start(meta.offset))
             .map_err(|e| format!("cannot read {}: {e}", transcript.display()))?;
-        let mut reader = BufReader::with_capacity(1 << 20, file);
+        // Only what the stat above saw: the stamp kept below then says exactly what was read, and
+        // bytes appended meanwhile make the transcript longer than it, so they are read next time.
+        let mut reader =
+            BufReader::with_capacity(1 << 20, file.take(size.saturating_sub(meta.offset)));
         let mut buf = Vec::new();
         loop {
             buf.clear();
@@ -207,7 +276,18 @@ impl Index {
                 apply_line(&mut meta, &mut bodies, line);
             }
         }
-        meta.size = size.max(meta.offset);
+        (meta.size, meta.ino, meta.mtime_ns) = (size, ino, mtime_ns);
+        // A rebuild replaces the bodies, so the old meta goes first: were it left behind by a
+        // write failing below, a later append would be added to bodies it does not describe.
+        if rebuild {
+            let old = self.file(id, "meta.json");
+            match fs::remove_file(&old) {
+                Err(e) if e.kind() != ErrorKind::NotFound => {
+                    return Err(format!("cannot remove {}: {e}", old.display()))
+                }
+                _ => {}
+            }
+        }
         for (t, text) in bodies.text.iter().enumerate() {
             let path = self.body_file(id, t);
             let mut f = OpenOptions::new()
@@ -237,8 +317,20 @@ impl Index {
         Ok((meta, true))
     }
 
+    // Drops the cache of the sessions that are not in `all`, and adds what went wrong to
+    // `problems`. Nothing is dropped while a project directory could not be read: its sessions
+    // only look gone.
+    pub fn prune(&self, all: &[(String, PathBuf)], problems: &mut Vec<String>) {
+        if !problems.is_empty() {
+            return;
+        }
+        if let Err(e) = self.sweep(&all.iter().map(|(id, _)| id.as_str()).collect()) {
+            problems.push(e);
+        }
+    }
+
     // Removes the cache of every session whose transcript is gone; returns how many files went.
-    pub fn sweep(&self, live: &HashSet<&str>) -> Res<usize> {
+    fn sweep(&self, live: &HashSet<&str>) -> Res<usize> {
         const SUFFIXES: [&str; 5] = [
             ".meta.json.tmp",
             ".meta.json",
@@ -249,17 +341,30 @@ impl Index {
         let entries = fs::read_dir(&self.dir)
             .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?;
         let mut removed = 0;
+        let mut failed = vec![];
         for e in entries.flatten() {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
             let Some(stem) = SUFFIXES.iter().find_map(|s| name.strip_suffix(s)) else {
                 continue;
             };
-            if !live.contains(stem) && fs::remove_file(e.path()).is_ok() {
-                removed += 1;
+            if live.contains(stem) {
+                continue;
+            }
+            match fs::remove_file(e.path()) {
+                Ok(()) => removed += 1,
+                // Another process sweeping at the same time got there first.
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => failed.push(format!("{}: {err}", e.path().display())),
             }
         }
-        Ok(removed)
+        match failed.first() {
+            Some(first) => Err(format!(
+                "cannot remove {} stale index file(s): {first}",
+                failed.len()
+            )),
+            None => Ok(removed),
+        }
     }
 }
 
@@ -337,11 +442,186 @@ mod tests {
         fs::create_dir_all(fx.projects.join("-w-a/s1/subagents")).unwrap();
         fs::write(fx.projects.join("-w-a/s1/subagents/agent-x.jsonl"), "").unwrap();
         fs::write(fx.projects.join("top.jsonl"), "").unwrap();
+        std::os::unix::fs::symlink("nowhere", fx.projects.join("-w-unmounted")).unwrap();
         fs::create_dir_all(fx.projects.join("-w-b")).unwrap();
         fs::write(fx.projects.join("-w-b/s2.jsonl"), "").unwrap();
-        let got = transcripts(&fx.projects).unwrap();
+        let (got, unread) = transcripts(&fx.projects).unwrap();
         let ids: Vec<_> = got.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, ["s1", "s2"]);
+        // `top.jsonl` is a file among the project directories and `-w-unmounted` a link to
+        // nothing: neither is a directory that failed to list.
+        assert_eq!(unread, [] as [String; 0]);
+    }
+
+    #[test]
+    fn a_project_directory_that_cannot_be_read_is_named_and_nothing_is_swept_meanwhile() {
+        let fx = Fx::new("unread");
+        fx.write("s1", &line("user", T1, r#""a""#));
+        fx.refresh("s1");
+        // What is left of a session whose project directory is the one that cannot be read.
+        fs::write(fx.index.file("s9", "meta.json"), "x").unwrap();
+        // A link to itself fails to list whoever runs the test; a mode would not stop root.
+        let knot = fx.projects.join("-w-knot");
+        // The link's target is relative to the link's directory, so the name alone is itself.
+        std::os::unix::fs::symlink("-w-knot", &knot).unwrap();
+        let (all, mut problems) = transcripts(&fx.projects).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0].starts_with(&format!("cannot read {}: ", knot.display())),
+            "{problems:?}"
+        );
+        fx.index.prune(&all, &mut problems);
+        assert_eq!(problems.len(), 1);
+        assert!(fx.index.file("s9", "meta.json").exists());
+
+        fs::remove_file(&knot).unwrap();
+        let (all, mut problems) = transcripts(&fx.projects).unwrap();
+        fx.index.prune(&all, &mut problems);
+        assert_eq!(problems, [] as [String; 0]);
+        assert!(!fx.index.file("s9", "meta.json").exists());
+        assert!(fx.index.meta("s1").is_some());
+    }
+
+    #[test]
+    fn a_transcript_that_cannot_be_stat_ed_is_named_and_one_that_is_gone_is_not() {
+        let fx = Fx::new("unstat");
+        fx.write("s1", &line("user", T1, r#""a""#));
+        let knot = fx.projects.join("-w-a/s2.jsonl");
+        std::os::unix::fs::symlink("s2.jsonl", &knot).unwrap();
+        std::os::unix::fs::symlink("nowhere", fx.projects.join("-w-a/s3.jsonl")).unwrap();
+        let (all, unread) = transcripts(&fx.projects).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(unread.len(), 1, "{unread:?}");
+        assert!(
+            unread[0].starts_with(&format!("cannot stat {}: ", knot.display())),
+            "{unread:?}"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_that_failed_half_way_is_not_continued_from_the_old_meta() {
+        let fx = Fx::new("half");
+        let (old, new) = (line("user", T1, r#""old""#), line("user", T2, r#""new""#));
+        fx.write("s1", &old);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
+        fx.refresh("s1");
+        fx.write("s1", &new);
+        set_mtime(&fx.transcript("s1"), 1_000, 2);
+        // The user body is rewritten, then the assistant body cannot be opened.
+        fs::remove_file(fx.index.body_file("s1", 1)).unwrap();
+        fs::create_dir(fx.index.body_file("s1", 1)).unwrap();
+        let err = fx.index.refresh("s1", &fx.transcript("s1")).unwrap_err();
+        assert!(err.contains("s1.assistant"), "{err}");
+        fs::remove_dir(fx.index.body_file("s1", 1)).unwrap();
+        fs::write(fx.index.body_file("s1", 1), "").unwrap();
+        // Longer by the time it is tried again: an append, were the old meta still there.
+        fx.append("s1", &line("user", T2, r#""more""#));
+        let (m, _) = fx.refresh("s1");
+        assert_eq!(m.first_prompt, "new");
+        assert_eq!(fx.body("s1", 0), "new\nmore\n");
+    }
+
+    #[test]
+    fn an_append_that_failed_half_way_keeps_its_meta_and_is_continued() {
+        let fx = Fx::new("half-append");
+        fx.write("s1", &line("user", T1, r#""one""#));
+        let (m1, _) = fx.refresh("s1");
+        fx.append("s1", &line("user", T2, r#""two""#));
+        fs::remove_file(fx.index.body_file("s1", 1)).unwrap();
+        fs::create_dir(fx.index.body_file("s1", 1)).unwrap();
+        // Looked at as the failed write leaves it: the directory in the way reads as a body.
+        assert!(fx.index.refresh("s1", &fx.transcript("s1")).is_err());
+        assert_eq!(fx.index.meta("s1"), Some(m1));
+        fs::remove_dir(fx.index.body_file("s1", 1)).unwrap();
+        fs::write(fx.index.body_file("s1", 1), "").unwrap();
+        fx.refresh("s1");
+        assert_eq!(fx.body("s1", 0), "one\ntwo\n");
+    }
+
+    #[test]
+    fn a_stale_index_file_that_cannot_be_removed_is_reported_and_the_others_still_go() {
+        let fx = Fx::new("sweep-fail");
+        // A directory with something in it cannot be removed as a file, by anyone.
+        // Two of them: stopping at the first failure would count one.
+        fs::create_dir_all(fx.index.file("gone", "user").join("x")).unwrap();
+        fs::create_dir_all(fx.index.file("gone", "assistant").join("x")).unwrap();
+        fs::write(fx.index.file("gone", "tools"), "t").unwrap();
+        let mut problems = vec![];
+        fx.index.prune(&[], &mut problems);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with("cannot remove 2 stale index file(s): ")
+                && problems[0].contains("/gone."),
+            "{problems:?}"
+        );
+        assert!(!fx.index.file("gone", "tools").exists());
+    }
+
+    fn set_mtime(path: &Path, secs: u64, nanos: u32) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos);
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_transcript_rewritten_to_the_same_length_is_read_again_from_the_start() {
+        let fx = Fx::new("same-len");
+        let (old, new) = (line("user", T1, r#""old""#), line("user", T2, r#""new""#));
+        assert_eq!(old.len(), new.len());
+        fx.write("s1", &old);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
+        let (m1, _) = fx.refresh("s1");
+        // Written in place: the same inode and length, a later time.
+        fx.write("s1", &new);
+        // Later by a nanosecond only.
+        set_mtime(&fx.transcript("s1"), 1_000, 2);
+        assert!(!fx.index.is_fresh("s1", &m1, &fx.transcript("s1")));
+        let (m2, did) = fx.refresh("s1");
+        assert!(did);
+        assert_eq!(fx.body("s1", 0), "new\n");
+        assert_eq!((m2.ino, m2.mtime_ns), (m1.ino, 1_000_000_000_002));
+    }
+
+    // A file under /proc reports length 0 and still has content: what a transcript appended to
+    // between the stat and the read looks like.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bytes_past_the_length_seen_at_the_start_are_left_for_the_next_read() {
+        let fx = Fx::new("grown");
+        let path = Path::new("/proc/version");
+        assert_eq!(fs::metadata(path).unwrap().len(), 0);
+        assert!(fs::read(path).unwrap().ends_with(b"\n"));
+        let (m, _) = fx.index.refresh("s1", path).unwrap();
+        assert_eq!((m.offset, m.size), (0, 0));
+    }
+
+    #[test]
+    fn another_file_put_in_a_transcript_s_place_is_read_from_the_start_even_when_longer() {
+        let fx = Fx::new("replaced");
+        let old = line("user", T1, r#""old""#);
+        fx.write("s1", &old);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
+        let (m1, _) = fx.refresh("s1");
+        // Renamed over it with the old time kept, as a copy that preserves times would: only the
+        // inode tells. Both files exist at once, so the new one cannot get the old inode.
+        let other = fx.projects.join("-w-a/incoming");
+        fs::write(&other, &old).unwrap();
+        set_mtime(&other, 1_000, 1);
+        fs::rename(&other, fx.transcript("s1")).unwrap();
+        assert!(!fx.index.is_fresh("s1", &m1, &fx.transcript("s1")));
+        assert!(fx.refresh("s1").1);
+
+        // Longer than the file it replaces: not a continuation of it.
+        let longer = line("user", T2, r#""a different session""#) + &line("user", T2, r#""x""#);
+        fs::write(&other, &longer).unwrap();
+        fs::rename(&other, fx.transcript("s1")).unwrap();
+        fx.refresh("s1");
+        assert_eq!(fx.body("s1", 0), "a different session\nx\n");
     }
 
     #[test]
@@ -350,7 +630,7 @@ mod tests {
         fs::create_dir_all(fx.projects.join("-w-b")).unwrap();
         fs::write(fx.transcript("s1"), "ab").unwrap();
         fs::write(fx.projects.join("-w-b/s1.jsonl"), "abcd").unwrap();
-        let got = transcripts(&fx.projects).unwrap();
+        let (got, _) = transcripts(&fx.projects).unwrap();
         assert_eq!(got.len(), 1);
         assert!(got[0].1.ends_with("-w-b/s1.jsonl"), "{:?}", got[0].1);
     }
@@ -412,9 +692,11 @@ mod tests {
         let other = Fx::new("append-full");
         other.write("s1", &(first + &second));
         let (full, _) = other.refresh("s1");
-        // Only where it was read from differs.
+        // Only the file it was read from differs: its path, inode and time.
         let unplaced = |m: &Meta| Meta {
             source: String::new(),
+            ino: 0,
+            mtime_ns: 0,
             ..m.clone()
         };
         assert_ne!(m2.source, full.source);
@@ -538,7 +820,9 @@ mod tests {
         fx.refresh("s1");
         let meta_path = fx.index.file("s1", "meta.json");
         let text = fs::read_to_string(&meta_path).unwrap();
-        fs::write(&meta_path, text.replace("\"version\":1", "\"version\":99")).unwrap();
+        let current = format!("\"version\":{FORMAT}");
+        assert!(text.contains(&current), "{text}");
+        fs::write(&meta_path, text.replace(&current, "\"version\":99")).unwrap();
         assert_eq!(fx.index.meta("s1"), None);
         let (_, did) = fx.refresh("s1");
         assert!(did);
@@ -616,6 +900,7 @@ mod tests {
         let both = one.clone() + &line("user", T2, r#""two""#);
         // What another process leaves after indexing the two-line transcript.
         fx.write("s1", &both);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
         fx.refresh("s1");
         let names = ["s1.meta.json", "s1.user", "s1.assistant", "s1.tools"];
         let cache: Vec<Vec<u8>> = names
@@ -638,6 +923,7 @@ mod tests {
             .is_err());
         // While it waits, the transcript grows and the other writer indexes it.
         fx.write("s1", &both);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
         for (n, bytes) in names.iter().zip(&cache) {
             fs::write(fx.index.dir.join(n), bytes).unwrap();
         }
@@ -679,7 +965,7 @@ mod tests {
             fs::create_dir_all(fx.projects.join(dir)).unwrap();
             fs::write(fx.projects.join(dir).join("dup.jsonl"), "12345").unwrap();
         }
-        let all = transcripts(&fx.projects).unwrap();
+        let (all, _) = transcripts(&fx.projects).unwrap();
         let (_, path) = all.iter().find(|(id, _)| id == "dup").unwrap();
         assert_eq!(path, &fx.projects.join("-w-m").join("dup.jsonl"));
     }

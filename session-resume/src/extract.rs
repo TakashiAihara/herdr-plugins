@@ -10,6 +10,10 @@ pub struct Meta {
     // The transcript's size when it was last read, and the end of the last complete line read.
     pub size: u64,
     pub offset: u64,
+    // The transcript's inode and modification time (ns) at that read: a file put in its place, or
+    // rewritten to the same length, is another transcript.
+    pub ino: u64,
+    pub mtime_ns: i64,
     // The transcript these were read from; the same id found elsewhere is another file.
     pub source: String,
     pub custom_title: String,
@@ -28,6 +32,11 @@ impl Meta {
         self.last_ms.is_some()
     }
 
+    // The last activity, or None when no line carried a usable time (stored as 0 to sort last).
+    pub fn time(&self) -> Option<i64> {
+        self.last_ms.filter(|&ms| ms > 0)
+    }
+
     pub fn title(&self, id: &str) -> String {
         [&self.custom_title, &self.ai_title, &self.first_prompt]
             .into_iter()
@@ -42,15 +51,49 @@ pub struct Bodies {
     pub text: [String; 3],
 }
 
-// A record is one line of lowercase text, so a substring search is case-insensitive and a hit
-// never spans two records.
+// The form both the indexed text and a query are compared in.
+// NOTE: lowercase plus the Greek final sigma, not a full Unicode case fold (ß and ss, dotted İ);
+// use a case-folding crate when a language needs those.
+pub fn fold(s: &str) -> String {
+    s.to_lowercase().replace('ς', "σ")
+}
+
+// A record is one line of folded text, so a substring search is case-insensitive and a hit never
+// spans two records.
 fn record(s: &str) -> Option<String> {
     let flat: String = s
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let flat = flat.trim();
-    (!flat.is_empty()).then(|| flat.to_lowercase())
+    (!flat.is_empty()).then(|| fold(flat))
+}
+
+// Text Claude Code wraps in these tags is written by the harness (a slash command, its output, a
+// `!` command, a paste), not typed as a prompt. Text starting with any other tag is taken as one.
+const WRAPPERS: [&str; 13] = [
+    "command-name",
+    "command-message",
+    "command-args",
+    "local-command-stdout",
+    "local-command-stderr",
+    "local-command-caveat",
+    "bash-input",
+    "bash-stdout",
+    "bash-stderr",
+    "task-notification",
+    "system-reminder",
+    "user-prompt-submit-hook",
+    "pasted_content",
+];
+
+fn is_wrapper(t: &str) -> bool {
+    t.strip_prefix('<').is_some_and(|rest| {
+        WRAPPERS.iter().any(|w| {
+            rest.strip_prefix(w)
+                .is_some_and(|after| after.starts_with(['>', ' ']))
+        })
+    })
 }
 
 fn push(bodies: &mut Bodies, tier: usize, s: &str) {
@@ -89,7 +132,7 @@ fn user_text(meta: &mut Meta, bodies: &mut Bodies, text: &str, is_meta: bool) {
     }
     push(bodies, USER, text);
     let t = text.trim_start();
-    if meta.first_prompt.is_empty() && !t.is_empty() && !t.starts_with('<') {
+    if meta.first_prompt.is_empty() && !t.is_empty() && !is_wrapper(t) {
         meta.first_prompt = first_prompt(t);
     }
 }
@@ -409,6 +452,28 @@ mod tests {
             &user(r#""later""#),
         ]);
         assert_eq!(m.first_prompt, "あ".repeat(200));
+    }
+
+    #[test]
+    fn a_prompt_that_starts_with_a_tag_the_harness_does_not_write_is_the_first_prompt() {
+        let (m, _) = read(&[
+            &user(r#""<pasted_content id=\"1\">log</pasted_content>""#),
+            &user(r#""<bash-input>ls</bash-input>""#),
+            &user(r#""<div> breaks the layout""#),
+            &user(r#""later""#),
+        ]);
+        assert_eq!(m.first_prompt, "<div> breaks the layout");
+        // A tag that only begins with a wrapper's name is not that wrapper.
+        let (m, _) = read(&[&user(r#""<command-names> is misspelt""#)]);
+        assert_eq!(m.first_prompt, "<command-names> is misspelt");
+    }
+
+    #[test]
+    fn folding_lowercases_and_makes_both_greek_sigmas_one() {
+        assert_eq!(fold("ΟΔΟΣ Abc"), "οδοσ abc");
+        assert_eq!(fold("οδος"), fold("οδοσ"));
+        let (_, b) = read(&[&user(r#""ΟΔΟΣ""#)]);
+        assert_eq!(b.text[USER], "οδοσ\n");
     }
 
     #[test]
