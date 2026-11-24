@@ -38,8 +38,14 @@ pub enum Action {
     Resume(Target),
 }
 
-pub fn is_marked(marker: Option<&str>, id: &str) -> bool {
-    marker.is_some_and(|m| Path::new(&m.replace("{id}", id)).exists())
+// Whether the marker file of session `id` exists; an error when that cannot be told (a directory
+// on the way cannot be searched), which is not the same as unmarked.
+pub fn is_marked(marker: Option<&str>, id: &str) -> Res<bool> {
+    let Some(m) = marker else { return Ok(false) };
+    let path = m.replace("{id}", id);
+    Path::new(&path)
+        .try_exists()
+        .map_err(|e| format!("cannot look for the marker {path}: {e}"))
 }
 
 pub struct App {
@@ -141,11 +147,19 @@ impl App {
                 .selected()
                 .filter(|_| self.touched)
                 .map(|e| e.id.clone());
+            let mut problem = None;
             for (id, meta) in metas {
-                let marked = is_marked(self.marker.as_deref(), &id);
+                // Shown as unmarked, and said so.
+                let marked = is_marked(self.marker.as_deref(), &id).unwrap_or_else(|e| {
+                    problem = Some(e);
+                    false
+                });
                 self.s.upsert(Entry::new(id, meta, marked));
             }
             self.research(keep);
+            if let Some(e) = problem {
+                self.status = e;
+            }
         }
     }
 }
@@ -268,7 +282,10 @@ fn row(app: &App, e: &Entry, width: usize) -> String {
     } else {
         " "
     };
-    let when = age(app.now_ms, e.meta.last_ms.unwrap_or(0));
+    let when = e
+        .meta
+        .time()
+        .map_or_else(|| "?".into(), |ms| age(app.now_ms, ms));
     let path = pad(&tail2(&launch::clean(&e.meta.cwd)), PATH_WIDTH);
     let head = format!("{mark}{run} {when:>3} {path} ");
     let rest = width.saturating_sub(head.width());
@@ -338,7 +355,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 Line::from(format!("branch: {}", launch::clean(&m.branch))),
                 Line::from(format!(
                     "last activity: {}",
-                    m.last_ms.map_or_else(String::new, format_ms)
+                    m.time().map_or_else(|| "unknown".into(), format_ms)
                 )),
             ];
             // Before the prompt: a long prompt wraps over several rows and would push it out.
@@ -497,26 +514,27 @@ pub fn load_config(env: &Env) -> Res<Config> {
 // listed at once from their metas (stats only); the rest wait for the background refresh.
 pub fn prepare(env: &Env, now_ms: i64) -> Res<Prepared> {
     let cfg = load_config(env)?;
-    let all = index::transcripts(Path::new(&cfg.projects))?;
+    let (all, mut problems) = index::transcripts(Path::new(&cfg.projects))?;
     let index = Index::open(Path::new(&env.state_dir))?;
-    let mut status = String::new();
-    let live: HashSet<&str> = all.iter().map(|(id, _)| id.as_str()).collect();
-    if let Err(e) = index.sweep(&live) {
-        status = e;
-    }
+    index.prune(&all, &mut problems);
     let mut entries = vec![];
     let mut stale = vec![];
     for (id, path) in all {
         match index.meta(&id) {
             Some(m) if index.is_fresh(&id, &m, &path) => {
                 if m.listed() {
-                    let marked = is_marked(cfg.marker.as_deref(), &id);
+                    let marked = is_marked(cfg.marker.as_deref(), &id).unwrap_or_else(|e| {
+                        problems.push(e);
+                        false
+                    });
                     entries.push(Entry::new(id, m, marked));
                 }
             }
             _ => stale.push((id, path)),
         }
     }
+    // The one line under the list shows the first thing that went wrong.
+    let mut status = problems.into_iter().next().unwrap_or_default();
     // Without the running set nothing is marked as running; the failure is shown, not guessed past.
     let running = match launch::running(&env.herdr) {
         Ok(map) => map.into_keys().collect(),
@@ -868,10 +886,58 @@ mod tests {
         std::fs::create_dir(dir.join("s1")).unwrap();
         std::fs::write(dir.join("s1/archived"), "").unwrap();
         let tpl = format!("{}/{{id}}/archived", dir.display());
-        assert!(is_marked(Some(&tpl), "s1"));
-        assert!(!is_marked(Some(&tpl), "s2"));
-        assert!(!is_marked(None, "s1"));
+        assert_eq!(is_marked(Some(&tpl), "s1"), Ok(true));
+        assert_eq!(is_marked(Some(&tpl), "s2"), Ok(false));
+        assert_eq!(is_marked(None, "s1"), Ok(false));
         done(dir);
+    }
+
+    // A marker under a link to itself: looking for it fails whoever runs the test.
+    fn knotted_marker(dir: &Path) -> String {
+        std::os::unix::fs::symlink(dir.join("knot"), dir.join("knot")).unwrap();
+        format!("{}/knot/{{id}}", dir.display())
+    }
+
+    #[test]
+    fn a_marker_that_cannot_be_looked_for_is_an_error_not_unmarked() {
+        let dir = unique_dir("marker-knot");
+        let err = is_marked(Some(&knotted_marker(&dir)), "s1").unwrap_err();
+        assert!(
+            err.starts_with("cannot look for the marker ") && err.contains("/knot/s1: "),
+            "{err}"
+        );
+        done(dir);
+    }
+
+    #[test]
+    fn a_refreshed_session_whose_marker_cannot_be_looked_for_is_listed_unmarked_and_says_so() {
+        let dir = unique_dir("apply-knot");
+        let tpl = knotted_marker(&dir);
+        let (mut a, root) = app_from(corpus("apply-knot-app", &specs()), Some(&tpl), &[]);
+        let meta = Meta {
+            last_ms: Some(NOW),
+            ..Meta::default()
+        };
+        a.apply(vec![("s-fresh".into(), meta)], None);
+        assert_eq!(shown_ids(&a)[0], "s-fresh");
+        assert!(!a.s.entries[a.hits[0]].marked);
+        assert!(a.status.contains("/knot/s-fresh: "), "{}", a.status);
+        done(root);
+        done(dir);
+    }
+
+    #[test]
+    fn a_session_without_a_usable_time_shows_a_question_mark_not_an_age_counted_from_1970() {
+        let f = corpus("notime", &[("s0", 0, "Timeless", "", "", "")]);
+        let (a, root) = app_from(f, None, &[]);
+        let (lines, _term) = screen(&a, 80);
+        let row = lines.iter().find(|l| l.contains("Timeless")).unwrap();
+        assert!(row.contains("  ? w/s0"), "{row}");
+        assert!(
+            lines.iter().any(|l| l.contains("last activity: unknown")),
+            "{lines:?}"
+        );
+        done(root);
     }
 
     #[test]
@@ -1203,6 +1269,43 @@ mod tests {
     }
 
     const EMPTY_PANES: &str = r#"{"result":{"panes":[]}}"#;
+
+    #[test]
+    fn prepare_names_a_project_directory_it_cannot_read_and_a_marker_it_cannot_look_for() {
+        let _g = serial();
+        let dir = unique_dir("prepare-knot");
+        let proj = dir.join("claude/projects/-w-x");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("s1.jsonl"),
+            user_line("2026-11-04T10:00:00Z", "one"),
+        )
+        .unwrap();
+        let f = fake_herdr(&[("pane list", &format!("printf '%s' '{EMPTY_PANES}'"))]);
+        let env = env_in(&dir, &f.bin);
+        let index = Index::open(Path::new(&env.state_dir)).unwrap();
+        index.refresh("s1", &proj.join("s1.jsonl")).unwrap();
+        std::fs::create_dir_all(dir.join("cfg")).unwrap();
+        let cfg = serde_json::json!({ "marker": knotted_marker(&dir) });
+        std::fs::write(dir.join("cfg/config.json"), cfg.to_string()).unwrap();
+        let p = prepare(&env, NOW).unwrap();
+        assert_eq!(shown_ids(&p.app), ["s1"]);
+        assert!(p.app.status.contains("/knot/s1: "), "{}", p.app.status);
+
+        // The unreadable directory is found first, so it is the one the status line names.
+        let knot = dir.join("claude/projects/-w-knot");
+        std::os::unix::fs::symlink(&knot, &knot).unwrap();
+        let p = prepare(&env, NOW).unwrap();
+        assert_eq!(shown_ids(&p.app), ["s1"]);
+        assert!(
+            p.app
+                .status
+                .starts_with(&format!("cannot read {}: ", knot.display())),
+            "{}",
+            p.app.status
+        );
+        done(dir);
+    }
 
     #[test]
     fn prepare_lists_current_sessions_from_cached_metas_and_defers_the_changed_ones() {

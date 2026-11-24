@@ -1,5 +1,5 @@
 use crate::config::Scope;
-use crate::extract::Meta;
+use crate::extract::{fold, Meta};
 use crate::index::Index;
 
 const TIER_NAMES: [&str; 3] = ["user", "assistant", "tools"];
@@ -27,7 +27,7 @@ impl Entry {
             &meta.branch,
             &id,
         ]
-        .map(|s| s.to_lowercase())
+        .map(|s| fold(s))
         .join("\n");
         Entry {
             id,
@@ -74,11 +74,11 @@ pub struct Searcher {
     last: Option<Last>,
 }
 
-// The terms of a query, lowercase and single-spaced.
+// The terms of a query, folded as the indexed text is and single-spaced.
 fn normalize(query: &str) -> String {
     query
         .split_whitespace()
-        .map(str::to_lowercase)
+        .map(fold)
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -318,6 +318,13 @@ mod tests {
         assert_eq!(ids(&f, &hits), ["s-new"]);
         let hits = f.s.search("設定", Scope::Assistant);
         assert_eq!(ids(&f, &hits), ["s-new"]);
+    }
+
+    #[test]
+    fn a_greek_word_matches_whichever_sigma_the_query_or_the_title_ends_with() {
+        let mut f = fx("sigma", &[("s1", 5, "ΟΔΟΣ", "", "", "")]);
+        assert_eq!(f.s.search("οδοσ", Scope::Meta), [0]);
+        assert_eq!(f.s.search("οδος", Scope::Meta), [0]);
     }
 
     #[test]

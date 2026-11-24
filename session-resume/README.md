@@ -65,7 +65,7 @@ The list is always ordered by last activity; how well a session matches does not
 | `Enter` | resume the selected session |
 | `Esc`, `Ctrl-C`, `Ctrl-D` | close |
 
-A row shows, from the left: the marker (when configured), `●` when the session is running, how long ago it was last active (`5m`, `3h`, `2d`, `4w`), the last two components of its directory, and its title. The area below the list shows the id, directory, branch, last activity (in UTC), the match, and the first prompt.
+A row shows, from the left: the marker (when configured), `●` when the session is running, how long ago it was last active (`5m`, `3h`, `2d`, `4w`; `?` when the transcript carries no usable time), the last two components of its directory, and its title. The area below the list shows the id, directory, branch, last activity (in UTC), the match, and the first prompt.
 
 ## Markers
 
