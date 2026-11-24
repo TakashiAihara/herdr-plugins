@@ -287,6 +287,12 @@ mod tests {
         assert_eq!((i.text.as_str(), i.cursor), ("a🇺🇸b", 1));
         assert!(key(&mut i, KeyCode::Delete));
         assert_eq!((i.text.as_str(), i.cursor), ("ab", 1));
+        key(&mut i, KeyCode::Left);
+        key(&mut i, KeyCode::Left);
+        assert_eq!(i.cursor, 0);
+        key(&mut i, KeyCode::End);
+        key(&mut i, KeyCode::Right);
+        assert_eq!(i.cursor, 2);
     }
 
     #[test]

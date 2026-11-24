@@ -15,7 +15,10 @@ cat > "$tmp/bin/cargo" <<'FAKE'
 #!/bin/sh
 host=x86_64-unknown-linux-gnu
 if [ "$1" = -vV ]; then
+  echo "cargo 0.0.0"
+  echo "release: 0.0.0"
   [ -n "${FAKE_CARGO_NOHOST:-}" ] || echo "host: $host"
+  echo "os: test"
   exit 0
 fi
 echo "cargo $* in $(pwd) target=${CARGO_TARGET_DIR:-}" >> "$FAKE_CARGO_LOG"
@@ -78,27 +81,32 @@ session-resume 0.0.0
 
 check "nothing but the binary is left in the install directory" "$(ls -A "$(dirname "$SESSION_RESUME_OUT")")" "session-resume"
 
-# The fake mktemp records the mode of the directory the real one made.
+# The fake mktemp records the directory the real one made and its mode.
 mkdir -p "$tmp/mk"
 real_mktemp=$(command -v mktemp)
 cat > "$tmp/mk/mktemp" <<FAKE
 #!/bin/sh
 d=\$("$real_mktemp" "\$@") || exit 1
 { stat -c '%a' "\$d" 2>/dev/null || stat -f '%Lp' "\$d"; } > "$tmp/mk/mode"
+dirname "\$d" > "$tmp/mk/parent"
 echo "\$d"
 FAKE
 chmod +x "$tmp/mk/mktemp"
 FETCH_PATH="$tmp/mk:$tmp/bin:$PATH" SESSION_RESUME_KEY=abcdef1234567890 fetch
-check "the download directory is private to the user and inside the install directory" \
-  "$(cat "$out"; cat "$tmp/mk/mode")" \
+check "the download directory is made private to the user, inside the install directory" \
+  "$(cat "$out"; cat "$tmp/mk/mode"; [ "$(cat "$tmp/mk/parent")" = "$(dirname "$SESSION_RESUME_OUT")" ] && echo beside)" \
   "session-resume: installed prebuilt session-resume-abcdef123456-x86_64-unknown-linux-musl
-700"
+700
+beside"
 
 mkdir -p "$tmp/out$((n + 1))/.fetch.old" && echo junk > "$tmp/out$((n + 1))/.fetch.old/junk"
+echo mine > "$tmp/out$((n + 1))/.fetchx" && echo mine > "$tmp/out$((n + 1))/.keep"
 SESSION_RESUME_KEY=abcdef1234567890 fetch
-check "what an interrupted install left behind is removed by the next one" \
-  "$(cat "$out"; ls -A "$(dirname "$SESSION_RESUME_OUT")")" \
+check "what an interrupted install left behind is removed by the next one, and nothing else" \
+  "$(cat "$out"; LC_ALL=C ls -A "$(dirname "$SESSION_RESUME_OUT")")" \
   "session-resume: installed prebuilt session-resume-abcdef123456-x86_64-unknown-linux-musl
+.fetchx
+.keep
 session-resume"
 
 TMPDIR="$tmp/absent" SESSION_RESUME_KEY=abcdef1234567890 fetch

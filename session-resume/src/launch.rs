@@ -200,9 +200,10 @@ pub fn launch_within(
         .ok_or_else(|| format!("herdr workspace create returned no workspace: {created}"))?;
     // A workspace made for this resume is not left behind when the command cannot be sent; a
     // failed close is reported, or the workspace would stay open without anyone knowing.
-    let close = |e: String| match herdr_within(bin, &["workspace", "close", ws], limit) {
+    let close = |e: String| match call(bin, &["workspace", "close", ws], limit) {
         Ok(_) => e,
-        Err(close_err) => format!("{e}; workspace {ws} is left open: {close_err}"),
+        Err(HerdrError::TimedOut(c)) => format!("{e}; workspace {ws} may be left open: {c}"),
+        Err(HerdrError::Failed(c)) => format!("{e}; workspace {ws} is left open: {c}"),
     };
     let pane = str_at(&reply, &["result", "root_pane", "pane_id"]).ok_or_else(|| {
         close(format!(
@@ -490,7 +491,7 @@ mod tests {
         ]);
         let err = launch_within(&f.bin, "/b", "x {id}", "s", "t", limit).unwrap_err();
         assert!(
-            err.contains("left open: herdr workspace close did not answer within 1 s"),
+            err.contains("workspace w9 may be left open: herdr workspace close did not answer"),
             "{err}"
         );
         let f = fake_herdr(&[created(), ("workspace focus", "sleep 3")]);
@@ -509,7 +510,7 @@ mod tests {
     #[test]
     fn a_reply_larger_than_a_pipe_buffer_is_read_whole_on_both_streams() {
         let _g = serial();
-        // stderr first: a reader that drains stdout before stderr would block the fake forever.
+        // Each stream alone overflows a pipe: reading one to its end before the other blocks the fake.
         let f = fake_herdr(&[(
             "pane list",
             "head -c 200000 /dev/zero | tr '\\0' y >&2; head -c 200000 /dev/zero | tr '\\0' x",
