@@ -1,25 +1,77 @@
 use crate::render::render;
 use crate::Res;
 use serde_json::Value;
+use std::io::Read;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const HERDR_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Runs herdr with its output captured: the popup's terminal is live while this runs.
 pub fn herdr(bin: &str, args: &[&str]) -> Res<String> {
-    let out = Command::new(bin)
+    herdr_within(bin, args, HERDR_TIMEOUT)
+}
+
+// `herdr` bounded by `limit`: past it the process is killed and an error names the command.
+// stdout and stderr drain on their own threads while waiting — `herdr pane list` writes more
+// than a pipe buffer, and a child blocked on a full pipe would look like one that never answers.
+pub fn herdr_within(bin: &str, args: &[&str], limit: Duration) -> Res<String> {
+    let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("cannot run {bin}: {e}"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    if out.status.success() {
+    let mut out_pipe = child.stdout.take().unwrap();
+    let mut err_pipe = child.stderr.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        out_pipe.read_to_end(&mut buf).map(|_| buf)
+    });
+    let err = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        err_pipe.read_to_end(&mut buf).map(|_| buf)
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < limit => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(None) => {
+                // A child of the killed process can hold the pipes open, so they are not
+                // waited for here; the reader threads end when the writers do.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "herdr {} did not answer within {} s",
+                    args[..args.len().min(2)].join(" "),
+                    limit.as_secs()
+                ));
+            }
+            Err(e) => return Err(format!("cannot run {bin}: {e}")),
+        }
+    };
+    let stdout = out
+        .join()
+        .map_err(|_| "reading herdr's output failed".to_string())?
+        .map_err(|e| format!("cannot run {bin}: {e}"))?;
+    let stderr = err
+        .join()
+        .map_err(|_| "reading herdr's output failed".to_string())?
+        .map_err(|e| format!("cannot run {bin}: {e}"))?;
+    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+    if status.success() {
         return Ok(stdout);
     }
-    let detail = String::from_utf8_lossy(&out.stderr);
+    let detail = String::from_utf8_lossy(&stderr);
     let detail = detail.trim();
     let what = format!(
         "herdr {} failed ({})",
         args[..args.len().min(2)].join(" "),
-        out.status
+        status
     );
     Err(if detail.is_empty() {
         what
@@ -101,10 +153,11 @@ pub fn launch(bin: &str, cwd: &str, template: &str, repo: &str, prompt: &str) ->
         .ok_or_else(|| format!("herdr workspace create returned no workspace: {created}"))?;
     let ws = str_at(&reply, &["result", "workspace", "workspace_id"])
         .ok_or_else(|| format!("herdr workspace create returned no workspace: {created}"))?;
-    // A workspace made for this launch is not left behind when the command cannot be sent.
-    let close = |e: String| {
-        let _ = herdr(bin, &["workspace", "close", ws]);
-        e
+    // A workspace made for this launch is not left behind when the command cannot be sent; a
+    // failed close is reported, or the workspace would stay open without anyone knowing.
+    let close = |e: String| match herdr(bin, &["workspace", "close", ws]) {
+        Ok(_) => e,
+        Err(close_err) => format!("{e}; workspace {ws} is left open: {close_err}"),
     };
     let pane = str_at(&reply, &["result", "root_pane", "pane_id"]).ok_or_else(|| {
         close(format!(
@@ -112,7 +165,9 @@ pub fn launch(bin: &str, cwd: &str, template: &str, repo: &str, prompt: &str) ->
         ))
     })?;
     herdr(bin, &["pane", "run", pane, &cmd]).map_err(close)?;
-    herdr(bin, &["workspace", "focus", ws])?;
+    // The command already runs in the pane; a failed focus must not read as if nothing was sent.
+    herdr(bin, &["workspace", "focus", ws])
+        .map_err(|e| format!("the command was sent to workspace {ws}, but {e}"))?;
     Ok(())
 }
 

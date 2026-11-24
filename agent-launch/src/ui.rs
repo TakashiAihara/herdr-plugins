@@ -61,6 +61,34 @@ impl Input {
         self.text.chars().count()
     }
 
+    // The greatest grapheme-cluster boundary below the cursor, in chars: inside a cluster
+    // that is the cluster's start, on a boundary the start of the cluster ending there.
+    fn prev_boundary(&self) -> usize {
+        let mut edge = 0;
+        let mut prev = 0;
+        for g in self.text.graphemes(true) {
+            edge += g.chars().count();
+            if edge >= self.cursor {
+                return prev;
+            }
+            prev = edge;
+        }
+        prev
+    }
+
+    // The smallest grapheme-cluster boundary above the cursor, in chars: inside a cluster
+    // that is the cluster's end, on a boundary the end of the cluster starting there.
+    fn next_boundary(&self) -> usize {
+        let mut edge = 0;
+        for g in self.text.graphemes(true) {
+            edge += g.chars().count();
+            if edge > self.cursor {
+                return edge;
+            }
+        }
+        edge
+    }
+
     // Pasted text is one line here: each line break (CRLF counts as one) and other control
     // character becomes a space.
     fn paste(&mut self, s: &str) {
@@ -77,8 +105,8 @@ impl Input {
     // return false.
     fn edit(&mut self, key: KeyEvent) -> bool {
         match (key.code, key.modifiers) {
-            (KeyCode::Left, _) => self.cursor = self.cursor.saturating_sub(1),
-            (KeyCode::Right, _) => self.cursor = (self.cursor + 1).min(self.len()),
+            (KeyCode::Left, _) => self.cursor = self.prev_boundary(),
+            (KeyCode::Right, _) => self.cursor = self.next_boundary(),
             (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => self.cursor = 0,
             (KeyCode::Char('u'), KeyModifiers::CONTROL) if self.cursor > 0 => {
                 self.text.drain(..self.byte(self.cursor));
@@ -89,12 +117,16 @@ impl Input {
                 self.cursor = self.len()
             }
             (KeyCode::Backspace, _) if self.cursor > 0 => {
-                self.cursor -= 1;
-                self.text.remove(self.byte(self.cursor));
+                let from = self.prev_boundary();
+                let range = self.byte(from)..self.byte(self.cursor);
+                self.text.drain(range);
+                self.cursor = from;
                 return true;
             }
             (KeyCode::Delete, _) if self.cursor < self.len() => {
-                self.text.remove(self.byte(self.cursor));
+                let to = self.next_boundary();
+                let range = self.byte(self.cursor)..self.byte(to);
+                self.text.drain(range);
                 return true;
             }
             (KeyCode::Char(c), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
