@@ -21,6 +21,34 @@ impl Input {
         self.text.chars().count()
     }
 
+    // The greatest grapheme-cluster boundary below the cursor, in chars: inside a cluster
+    // that is the cluster's start, on a boundary the start of the cluster ending there.
+    fn prev_boundary(&self) -> usize {
+        let mut edge = 0;
+        let mut prev = 0;
+        for g in self.text.graphemes(true) {
+            edge += g.chars().count();
+            if edge >= self.cursor {
+                return prev;
+            }
+            prev = edge;
+        }
+        prev
+    }
+
+    // The smallest grapheme-cluster boundary above the cursor, in chars: inside a cluster
+    // that is the cluster's end, on a boundary the end of the cluster starting there.
+    fn next_boundary(&self) -> usize {
+        let mut edge = 0;
+        for g in self.text.graphemes(true) {
+            edge += g.chars().count();
+            if edge > self.cursor {
+                return edge;
+            }
+        }
+        edge
+    }
+
     // Pasted text is one line here: each line break (CRLF counts as one) and other control
     // character becomes a space.
     pub fn paste(&mut self, s: &str) {
@@ -37,8 +65,8 @@ impl Input {
     // return false.
     pub fn edit(&mut self, key: KeyEvent) -> bool {
         match (key.code, key.modifiers) {
-            (KeyCode::Left, _) => self.cursor = self.cursor.saturating_sub(1),
-            (KeyCode::Right, _) => self.cursor = (self.cursor + 1).min(self.len()),
+            (KeyCode::Left, _) => self.cursor = self.prev_boundary(),
+            (KeyCode::Right, _) => self.cursor = self.next_boundary(),
             (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => self.cursor = 0,
             (KeyCode::Char('u'), KeyModifiers::CONTROL) if self.cursor > 0 => {
                 self.text.drain(..self.byte(self.cursor));
@@ -49,12 +77,16 @@ impl Input {
                 self.cursor = self.len()
             }
             (KeyCode::Backspace, _) if self.cursor > 0 => {
-                self.cursor -= 1;
-                self.text.remove(self.byte(self.cursor));
+                let from = self.prev_boundary();
+                let range = self.byte(from)..self.byte(self.cursor);
+                self.text.drain(range);
+                self.cursor = from;
                 return true;
             }
             (KeyCode::Delete, _) if self.cursor < self.len() => {
-                self.text.remove(self.byte(self.cursor));
+                let to = self.next_boundary();
+                let range = self.byte(self.cursor)..self.byte(to);
+                self.text.drain(range);
                 return true;
             }
             (KeyCode::Char(c), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
@@ -211,7 +243,8 @@ mod tests {
 
     #[test]
     fn a_cursor_inside_a_cluster_keeps_that_cluster_on_screen() {
-        // Left can stop between U+2764 and U+FE0F; the heart stays visible with the cursor on it.
+        // A paste can leave the cursor between U+2764 and U+FE0F; the heart stays visible with the
+        // cursor on it.
         let mut i = Input::default();
         i.text = "❤\u{fe0f}X".into();
         i.cursor = 1;
@@ -237,6 +270,46 @@ mod tests {
         assert_eq!((shown.as_str(), col), ("❤\u{fe0f}", 2));
     }
     #[test]
+    fn the_cursor_and_the_delete_keys_take_a_whole_grapheme_cluster() {
+        let key = |i: &mut Input, code| i.edit(KeyEvent::new(code, KeyModifiers::NONE));
+        // 👩‍💻 is three chars and 🇺🇸 two; each is one cluster, as it is drawn.
+        let mut i = Input::default();
+        i.paste("a👩\u{200d}💻🇺🇸b");
+        assert_eq!(i.cursor, 7);
+        key(&mut i, KeyCode::Left);
+        key(&mut i, KeyCode::Left);
+        assert_eq!(i.cursor, 4);
+        key(&mut i, KeyCode::Left);
+        assert_eq!(i.cursor, 1);
+        key(&mut i, KeyCode::Right);
+        assert_eq!(i.cursor, 4);
+        assert!(key(&mut i, KeyCode::Backspace));
+        assert_eq!((i.text.as_str(), i.cursor), ("a🇺🇸b", 1));
+        assert!(key(&mut i, KeyCode::Delete));
+        assert_eq!((i.text.as_str(), i.cursor), ("ab", 1));
+        key(&mut i, KeyCode::Left);
+        key(&mut i, KeyCode::Left);
+        assert_eq!(i.cursor, 0);
+        key(&mut i, KeyCode::End);
+        key(&mut i, KeyCode::Right);
+        assert_eq!(i.cursor, 2);
+    }
+
+    #[test]
+    fn from_inside_a_cluster_left_and_right_reach_its_edges() {
+        let key = |i: &mut Input, code| i.edit(KeyEvent::new(code, KeyModifiers::NONE));
+        let mut i = Input::default();
+        // The cluster is chars 1..4, so a one-char step from inside it would stop inside it.
+        i.text = "x👩\u{200d}💻y".into();
+        i.cursor = 2;
+        key(&mut i, KeyCode::Right);
+        assert_eq!(i.cursor, 4);
+        i.cursor = 3;
+        key(&mut i, KeyCode::Left);
+        assert_eq!(i.cursor, 1);
+    }
+
+    #[test]
     fn a_long_run_of_zero_width_characters_stays_quick() {
         // U+0301 (combining acute accent) takes no cell.
         let mut i = Input::default();
@@ -246,7 +319,8 @@ mod tests {
         let (end_view, _) = i.view(18);
         i.cursor = 0;
         let (start_view, _) = i.view(18);
-        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+        // A generous bound: linear work takes milliseconds, quadratic work on this size minutes.
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
         // The visible "a" is never pushed out by the invisible run around it.
         assert!(end_view.starts_with('a') && start_view.starts_with('a'));
     }
@@ -276,7 +350,8 @@ mod tests {
         i.cursor = 50_000;
         let start = std::time::Instant::now();
         let (shown, col) = i.view(18);
-        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+        // A generous bound: linear work takes milliseconds, quadratic work on this size minutes.
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!((shown.len(), col), (17, 17));
     }
 

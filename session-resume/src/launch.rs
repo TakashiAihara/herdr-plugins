@@ -2,31 +2,110 @@ use crate::render::render;
 use crate::Res;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::Read;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const HERDR_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Runs herdr with its output captured: the popup's terminal is live while this runs.
 pub fn herdr(bin: &str, args: &[&str]) -> Res<String> {
-    let out = Command::new(bin)
+    herdr_within(bin, args, HERDR_TIMEOUT)
+}
+
+// `herdr` bounded by `limit`: past it the process is killed and an error names the command.
+pub fn herdr_within(bin: &str, args: &[&str], limit: Duration) -> Res<String> {
+    call(bin, args, limit).map_err(HerdrError::into_msg)
+}
+
+// Why a bounded herdr call failed; both variants carry the error text. `TimedOut` means the
+// process was killed for not answering in time and may still have taken effect.
+enum HerdrError {
+    TimedOut(String),
+    Failed(String),
+}
+
+impl HerdrError {
+    fn into_msg(self) -> String {
+        match self {
+            HerdrError::TimedOut(msg) | HerdrError::Failed(msg) => msg,
+        }
+    }
+}
+
+impl From<String> for HerdrError {
+    fn from(msg: String) -> HerdrError {
+        HerdrError::Failed(msg)
+    }
+}
+
+// One herdr call bounded by `limit`, with a timeout kept apart from other failures: a `pane
+// run` that times out may still have reached the pane. stdout and stderr drain on their own
+// threads while waiting — `herdr pane list` writes more than a pipe buffer, and a child
+// blocked on a full pipe would look like one that never answers.
+fn call(bin: &str, args: &[&str], limit: Duration) -> Result<String, HerdrError> {
+    let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("cannot run {bin}: {e}"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    if out.status.success() {
+    let mut out_pipe = child.stdout.take().unwrap();
+    let mut err_pipe = child.stderr.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        out_pipe.read_to_end(&mut buf).map(|_| buf)
+    });
+    let err = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        err_pipe.read_to_end(&mut buf).map(|_| buf)
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < limit => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(None) => {
+                // A child of the killed process can hold the pipes open, so they are not
+                // waited for here; the reader threads end when the writers do.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HerdrError::TimedOut(format!(
+                    "herdr {} did not answer within {} s and was stopped; it may still have taken effect",
+                    args[..args.len().min(2)].join(" "),
+                    limit.as_secs()
+                )));
+            }
+            Err(e) => return Err(HerdrError::Failed(format!("cannot run {bin}: {e}"))),
+        }
+    };
+    let stdout = out
+        .join()
+        .map_err(|_| "reading herdr's output failed".to_string())?
+        .map_err(|e| format!("cannot run {bin}: {e}"))?;
+    let stderr = err
+        .join()
+        .map_err(|_| "reading herdr's output failed".to_string())?
+        .map_err(|e| format!("cannot run {bin}: {e}"))?;
+    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+    if status.success() {
         return Ok(stdout);
     }
-    let detail = String::from_utf8_lossy(&out.stderr);
+    let detail = String::from_utf8_lossy(&stderr);
     let detail = detail.trim();
     let what = format!(
         "herdr {} failed ({})",
         args[..args.len().min(2)].join(" "),
-        out.status
+        status
     );
-    Err(if detail.is_empty() {
+    Err(HerdrError::Failed(if detail.is_empty() {
         what
     } else {
         format!("{what}: {detail}")
-    })
+    }))
 }
 
 // The first JSON value in Herdr's stdout; a line Herdr may print after it does not break parsing.
@@ -82,13 +161,26 @@ pub fn running(bin: &str) -> Res<HashMap<String, String>> {
 // Creates a workspace in `cwd`, types the rendered command into its pane, then focuses it. Focus
 // moves last: the popup may close once it loses focus, and the command must be sent by then.
 pub fn launch(bin: &str, cwd: &str, template: &str, id: &str, label: &str) -> Res<()> {
+    launch_within(bin, cwd, template, id, label, HERDR_TIMEOUT)
+}
+
+// `launch` with `limit` on every herdr call. A `pane run` that times out may still have
+// reached the pane, so the workspace is left open and the error says so instead of closing it.
+pub fn launch_within(
+    bin: &str,
+    cwd: &str,
+    template: &str,
+    id: &str,
+    label: &str,
+    limit: Duration,
+) -> Res<()> {
     let cmd = render(template, id, cwd);
     if cmd.trim().is_empty() {
         return Err(format!(
             "the command template renders to nothing: {template}"
         ));
     }
-    let created = herdr(
+    let created = herdr_within(
         bin,
         &[
             "workspace",
@@ -99,24 +191,35 @@ pub fn launch(bin: &str, cwd: &str, template: &str, id: &str, label: &str) -> Re
             label,
             "--no-focus",
         ],
+        limit,
     )?;
     // Parsed as JSON: a quote inside the label or cwd is escaped, so no key can be misread from them.
     let reply = first_json(&created)
         .ok_or_else(|| format!("herdr workspace create returned no workspace: {created}"))?;
     let ws = str_at(&reply, &["result", "workspace", "workspace_id"])
         .ok_or_else(|| format!("herdr workspace create returned no workspace: {created}"))?;
-    // A workspace made for this resume is not left behind when the command cannot be sent.
-    let close = |e: String| {
-        let _ = herdr(bin, &["workspace", "close", ws]);
-        e
+    // A workspace made for this resume is not left behind when the command cannot be sent; a
+    // failed close is reported, or the workspace would stay open without anyone knowing.
+    let close = |e: String| match call(bin, &["workspace", "close", ws], limit) {
+        Ok(_) => e,
+        Err(HerdrError::TimedOut(c)) => format!("{e}; workspace {ws} may be left open: {c}"),
+        Err(HerdrError::Failed(c)) => format!("{e}; workspace {ws} is left open: {c}"),
     };
     let pane = str_at(&reply, &["result", "root_pane", "pane_id"]).ok_or_else(|| {
         close(format!(
             "herdr workspace create returned no pane: {created}"
         ))
     })?;
-    herdr(bin, &["pane", "run", pane, &cmd]).map_err(close)?;
-    herdr(bin, &["workspace", "focus", ws])?;
+    match call(bin, &["pane", "run", pane, &cmd], limit) {
+        Ok(_) => {}
+        Err(HerdrError::TimedOut(e)) => {
+            return Err(format!("{e}; workspace {ws} is left open"));
+        }
+        Err(HerdrError::Failed(e)) => return Err(close(e)),
+    }
+    // The command already runs in the pane; a failed focus must not read as if nothing was sent.
+    herdr_within(bin, &["workspace", "focus", ws], limit)
+        .map_err(|e| format!("the command was sent to workspace {ws}, but {e}"))?;
     Ok(())
 }
 
@@ -288,12 +391,134 @@ mod tests {
         let _g = serial();
         let f = fake_herdr(&[created(), ("pane run", "exit 1")]);
         let err = launch(&f.bin, "/b", "x {id}", "s", "t").unwrap_err();
-        assert!(err.contains("pane run"), "{err}");
+        assert!(
+            err.contains("pane run") && !err.contains("workspace close"),
+            "{err}"
+        );
         assert_eq!(
             heads(&f),
             ["workspace create", "pane run", "workspace close"]
         );
         assert_eq!(f.calls()[2], ["workspace", "close", "w9"]);
+    }
+
+    #[test]
+    fn a_failed_close_after_a_failed_pane_run_is_reported_with_the_workspace_left_open() {
+        let _g = serial();
+        let f = fake_herdr(&[
+            created(),
+            ("pane run", "echo norun >&2; exit 1"),
+            ("workspace close", "echo noclose >&2; exit 1"),
+        ]);
+        let err = launch(&f.bin, "/b", "x {id}", "s", "t").unwrap_err();
+        assert!(err.contains("pane run") && err.contains("norun"), "{err}");
+        assert!(
+            err.contains("workspace w9 is left open")
+                && err.contains("workspace close")
+                && err.contains("noclose"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_herdr_that_does_not_answer_is_stopped_and_named() {
+        let _g = serial();
+        let dir = unique_dir("hang");
+        let marker = dir.join("answered");
+        // Left alone, the fake answers after 3 s; stopped, it never writes the marker.
+        let f = fake_herdr(&[(
+            "pane list",
+            &format!(
+                "sleep 3; touch {}",
+                crate::render::quote(marker.to_str().unwrap())
+            ),
+        )]);
+        let start = std::time::Instant::now();
+        let limit = std::time::Duration::from_secs(1);
+        let err = herdr_within(&f.bin, &["pane", "list"], limit).unwrap_err();
+        let took = start.elapsed();
+        assert!(
+            err.contains(
+                "herdr pane list did not answer within 1 s and was stopped; it may still have taken effect"
+            ),
+            "{err}"
+        );
+        assert!(took < std::time::Duration::from_millis(2500), "{took:?}");
+        std::thread::sleep(std::time::Duration::from_millis(3500).saturating_sub(took));
+        let answered = marker.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!answered, "the fake herdr was left running");
+    }
+
+    #[test]
+    fn a_pane_run_that_does_not_answer_leaves_the_workspace_open() {
+        let _g = serial();
+        // Left alone the fake answers after 3 s: the command may still reach the pane.
+        let f = fake_herdr(&[created(), ("pane run", "sleep 3")]);
+        let start = std::time::Instant::now();
+        let limit = std::time::Duration::from_secs(1);
+        let err = launch_within(&f.bin, "/b", "x {id}", "s", "t", limit).unwrap_err();
+        assert!(start.elapsed() < std::time::Duration::from_millis(2500));
+        assert!(
+            err.contains("herdr pane run did not answer within 1 s")
+                && err.contains("workspace w9 is left open"),
+            "{err}"
+        );
+        assert_eq!(heads(&f), ["workspace create", "pane run"]);
+    }
+
+    #[test]
+    fn the_limit_given_to_a_launch_bounds_its_first_call_too() {
+        let _g = serial();
+        let f = fake_herdr(&[("workspace create", "sleep 3")]);
+        let limit = std::time::Duration::from_secs(1);
+        let err = launch_within(&f.bin, "/b", "x {id}", "s", "t", limit).unwrap_err();
+        assert!(
+            err.contains("herdr workspace create did not answer within 1 s"),
+            "{err}"
+        );
+        assert_eq!(heads(&f), ["workspace create"]);
+    }
+
+    #[test]
+    fn the_limit_given_to_a_launch_bounds_the_close_and_the_focus_too() {
+        let _g = serial();
+        let limit = std::time::Duration::from_secs(1);
+        let f = fake_herdr(&[
+            created(),
+            ("pane run", "exit 1"),
+            ("workspace close", "sleep 3"),
+        ]);
+        let err = launch_within(&f.bin, "/b", "x {id}", "s", "t", limit).unwrap_err();
+        assert!(
+            err.contains("workspace w9 may be left open: herdr workspace close did not answer"),
+            "{err}"
+        );
+        let f = fake_herdr(&[created(), ("workspace focus", "sleep 3")]);
+        let err = launch_within(&f.bin, "/b", "x {id}", "s", "t", limit).unwrap_err();
+        assert!(
+            err.contains("but herdr workspace focus did not answer within 1 s"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_limit_on_a_herdr_call_is_ten_seconds() {
+        assert_eq!(HERDR_TIMEOUT, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_reply_larger_than_a_pipe_buffer_is_read_whole_on_both_streams() {
+        let _g = serial();
+        // Each stream alone overflows a pipe: reading one to its end before the other blocks the fake.
+        let f = fake_herdr(&[(
+            "pane list",
+            "head -c 200000 /dev/zero | tr '\\0' y >&2; head -c 200000 /dev/zero | tr '\\0' x",
+        )]);
+        let limit = std::time::Duration::from_secs(10);
+        let out = herdr_within(&f.bin, &["pane", "list"], limit).unwrap();
+        assert_eq!(out.len(), 200_000);
+        assert!(out.bytes().all(|b| b == b'x'));
     }
 
     #[test]
@@ -343,7 +568,10 @@ mod tests {
         let _g = serial();
         let f = fake_herdr(&[created(), ("workspace focus", "exit 1")]);
         let err = launch(&f.bin, "/b", "x {id}", "s", "t").unwrap_err();
-        assert!(err.contains("workspace focus"), "{err}");
+        assert!(
+            err.contains("the command was sent to workspace w9") && err.contains("workspace focus"),
+            "{err}"
+        );
         assert_eq!(
             heads(&f),
             ["workspace create", "pane run", "workspace focus"]

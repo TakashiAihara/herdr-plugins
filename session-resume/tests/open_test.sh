@@ -42,7 +42,7 @@ check "open fails with the herdr error when the popup cannot open" "$rc:$(grep -
 
 # index: transcripts made here, one of them with a line that is cut off.
 {
-  printf '%s\n' '{"type":"user","timestamp":"2026-11-04T10:00:00Z","cwd":"/w/x","message":{"content":"hello"}}'
+  printf '%s\n' '{"type":"user","timestamp":"2026-11-04T10:00:00Z","cwd":"/w/x","message":{"content":"Hello"}}'
   printf '%s' '{"type":"user","timestamp":"2026-11-04T10:'
 } > "$CLAUDE_CONFIG_DIR/projects/-w-x/s1.jsonl"
 printf '%s\n' '{"type":"attachment"}' > "$CLAUDE_CONFIG_DIR/projects/-w-x/s2.jsonl"
@@ -76,6 +76,7 @@ fi
 
 reset; "$bin" bogus 2>"$tmp/err"; rc=$?
 check "an unknown subcommand is a usage error" "$rc:$(grep -c usage "$tmp/err")" "1:1"
-check "version names the binary" "$("$bin" version | cut -d' ' -f1)" session-resume
+check "version prints the name and the package version" "$("$bin" version)" \
+  "session-resume $(sed -n 's/^version = "\(.*\)"$/\1/p' "$here/../Cargo.toml")"
 
 exit $fail
