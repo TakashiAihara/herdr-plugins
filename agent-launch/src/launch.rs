@@ -216,12 +216,75 @@ pub mod tests {
             ("pane run", "exit 1"),
         ]);
         let err = launch(&f.bin, "/b", "x {prompt}", "", "do x").unwrap_err();
-        assert!(err.contains("pane run"), "{err}");
+        assert!(
+            err.contains("pane run") && !err.contains("workspace close"),
+            "{err}"
+        );
         assert_eq!(
             heads(&f),
             ["workspace create", "pane run", "workspace close"]
         );
         assert_eq!(f.calls()[2], ["workspace", "close", "w9"]);
+    }
+
+    #[test]
+    fn a_failed_close_after_a_failed_pane_run_is_reported_with_the_workspace_left_open() {
+        let _g = serial();
+        let f = fake_herdr(&[
+            ("workspace create", &format!("echo '{CREATED}'")),
+            ("pane run", "echo norun >&2; exit 1"),
+            ("workspace close", "echo noclose >&2; exit 1"),
+        ]);
+        let err = launch(&f.bin, "/b", "x {prompt}", "", "do x").unwrap_err();
+        assert!(err.contains("pane run") && err.contains("norun"), "{err}");
+        assert!(
+            err.contains("workspace w9 is left open")
+                && err.contains("workspace close")
+                && err.contains("noclose"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_herdr_that_does_not_answer_is_stopped_and_named() {
+        let _g = serial();
+        let dir = crate::testutil::unique_dir("hang");
+        let marker = dir.join("answered");
+        // Left alone, the fake answers after 3 s; stopped, it never writes the marker.
+        let f = fake_herdr(&[(
+            "pane list",
+            &format!(
+                "sleep 3; touch {}",
+                crate::render::quote(marker.to_str().unwrap())
+            ),
+        )]);
+        let start = std::time::Instant::now();
+        let limit = std::time::Duration::from_millis(300);
+        let err = herdr_within(&f.bin, &["pane", "list"], limit).unwrap_err();
+        let took = start.elapsed();
+        assert!(
+            err.contains("herdr pane list") && err.contains("did not answer"),
+            "{err}"
+        );
+        assert!(took < std::time::Duration::from_millis(2500), "{took:?}");
+        std::thread::sleep(std::time::Duration::from_millis(3500).saturating_sub(took));
+        let answered = marker.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!answered, "the fake herdr was left running");
+    }
+
+    #[test]
+    fn a_reply_larger_than_a_pipe_buffer_is_read_whole_on_both_streams() {
+        let _g = serial();
+        // stderr first: a reader that drains stdout before stderr would block the fake forever.
+        let f = fake_herdr(&[(
+            "pane list",
+            "head -c 200000 /dev/zero | tr '\\0' y >&2; head -c 200000 /dev/zero | tr '\\0' x",
+        )]);
+        let limit = std::time::Duration::from_secs(10);
+        let out = herdr_within(&f.bin, &["pane", "list"], limit).unwrap();
+        assert_eq!(out.len(), 200_000);
+        assert!(out.bytes().all(|b| b == b'x'));
     }
 
     #[test]
@@ -310,7 +373,10 @@ pub mod tests {
             ("workspace focus", "exit 1"),
         ]);
         let err = launch(&f.bin, "/b", "x {prompt}", "", "do x").unwrap_err();
-        assert!(err.contains("workspace focus"), "{err}");
+        assert!(
+            err.contains("the command was sent to workspace w9") && err.contains("workspace focus"),
+            "{err}"
+        );
         assert_eq!(
             heads(&f),
             ["workspace create", "pane run", "workspace focus"]

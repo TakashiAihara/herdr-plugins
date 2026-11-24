@@ -13,14 +13,25 @@ case "$1" in -s) echo "${FAKE_OS:-Linux}" ;; -m) echo "${FAKE_ARCH:-x86_64}" ;; 
 FAKE
 cat > "$tmp/bin/cargo" <<'FAKE'
 #!/bin/sh
+host=x86_64-unknown-linux-gnu
+if [ "$1" = -vV ]; then
+  [ -n "${FAKE_CARGO_NOHOST:-}" ] || echo "host: $host"
+  exit 0
+fi
 echo "cargo $* in $(pwd) target=${CARGO_TARGET_DIR:-}" >> "$FAKE_CARGO_LOG"
-td=
-while [ $# -gt 0 ]; do [ "$1" = --target-dir ] && td=$2; shift; done
-# FAKE_CARGO_TRIPLE plays a build.target in the user's Cargo config; FAKE_CARGO_NOBIN a build that
-# writes nothing.
+# FAKE_CARGO_TRIPLE plays a build.target in the user's Cargo config, which --target overrides.
+td= tg=${FAKE_CARGO_TRIPLE:-}
+while [ $# -gt 0 ]; do
+  [ "$1" = --target-dir ] && td=$2
+  [ "$1" = --target ] && tg=$2
+  shift
+done
+# FAKE_CARGO_NOBIN is a build that writes nothing.
 [ -n "${FAKE_CARGO_NOBIN:-}" ] && exit 0
-d="$td/release"; [ -n "${FAKE_CARGO_TRIPLE:-}" ] && d="$td/$FAKE_CARGO_TRIPLE/release"
-[ -n "$td" ] && mkdir -p "$d" && echo built > "$d/session-resume" && chmod +x "$d/session-resume"
+d="$td/release"; [ -n "$tg" ] && d="$td/$tg/release"
+# Only a build for the host is a binary that runs here.
+body=built; [ -n "$tg" ] && [ "$tg" != "$host" ] && body=cross
+[ -n "$td" ] && mkdir -p "$d" && echo "$body" > "$d/session-resume" && chmod +x "$d/session-resume"
 # FAKE_CARGO_STALE leaves a newer binary for another target next to this one, as an earlier
 # cross build would; only the reported path is this build's.
 if [ -n "${FAKE_CARGO_STALE:-}" ]; then
@@ -28,8 +39,6 @@ if [ -n "${FAKE_CARGO_STALE:-}" ]; then
   echo stale > "$td/aarch64-unknown-linux-gnu/release/session-resume"
   chmod +x "$td/aarch64-unknown-linux-gnu/release/session-resume"
 fi
-# FAKE_CARGO_PHYSICAL reports the path with symlinks resolved, as cargo may.
-[ -n "${FAKE_CARGO_PHYSICAL:-}" ] && d=$(cd "$d" && pwd -P)
 printf '{"reason":"compiler-artifact","executable":"%s"}\n' "$d/session-resume"
 printf '{"reason":"build-finished","success":true}\n'
 exit 0
@@ -54,7 +63,7 @@ fetch() {
   out="$tmp/fetch$n.txt"
   mkdir -p "$SESSION_RESUME_ROOT"
   : > "$FAKE_CARGO_LOG"
-  HOME="$tmp/home" PATH="$tmp/bin:$PATH" SESSION_RESUME_BASE_URL="file://$tmp/rel" sh "$script" > "$out" 2>&1
+  HOME="$tmp/home" PATH="${FETCH_PATH:-$tmp/bin:$PATH}" SESSION_RESUME_BASE_URL="file://$tmp/rel" sh "$script" > "$out" 2>&1
 }
 cargo_calls() { wc -l < "$FAKE_CARGO_LOG" | tr -d ' '; }
 
@@ -66,11 +75,43 @@ session-resume: installed prebuilt session-resume-abcdef123456-x86_64-unknown-li
 session-resume 0.0.0
 0"
 
+check "nothing but the binary is left in the install directory" "$(ls -A "$(dirname "$SESSION_RESUME_OUT")")" "session-resume"
+
+TMPDIR="$tmp/absent" SESSION_RESUME_KEY=abcdef1234567890 fetch
+check "the download does not go through TMPDIR, which can be missing or noexec" "$(cat "$out")" \
+  "session-resume: installed prebuilt session-resume-abcdef123456-x86_64-unknown-linux-musl"
+
+# Without curl the download goes through wget: a PATH holding what the script needs and no curl,
+# and a wget that records its arguments and copies the file:// URL.
+mkdir -p "$tmp/nocurl"
+for c in sh dirname cut mktemp awk sed tail chmod mkdir mv rm cp cat sha256sum shasum; do
+  p=$(command -v "$c") && ln -s "$p" "$tmp/nocurl/$c"
+done
+ln -s "$tmp/bin/uname" "$tmp/bin/cargo" "$tmp/nocurl/"
+cat > "$tmp/nocurl/wget" <<'FAKE'
+#!/bin/sh
+echo "wget $*" >> "$FAKE_WGET_LOG"
+to= url=
+while [ $# -gt 0 ]; do
+  case "$1" in -O) to=$2; shift ;; -T) shift ;; -*) ;; *) url=$1 ;; esac
+  shift
+done
+cp "${url#file://}" "$to"
+FAKE
+chmod +x "$tmp/nocurl/wget"
+FETCH_PATH="$tmp/nocurl" FAKE_WGET_LOG="$tmp/wget.log" SESSION_RESUME_KEY=abcdef1234567890 fetch
+check "without curl, wget downloads the pair and is told not to retry" \
+  "$( (PATH="$tmp/nocurl"; command -v curl || echo no-curl); cat "$out"; grep -c -e ' --tries=1 ' "$tmp/wget.log")" \
+  "no-curl
+session-resume: installed prebuilt session-resume-abcdef123456-x86_64-unknown-linux-musl
+2"
+
 SESSION_RESUME_KEY=000000000000 fetch
-check "an unknown tree builds from source" \
-  "$(head -1 "$out"; cut -d' ' -f1-4 "$FAKE_CARGO_LOG")" \
+check "an unknown tree builds from source and installs what it built" \
+  "$(head -1 "$out"; cut -d' ' -f1-4 "$FAKE_CARGO_LOG"; cat "$SESSION_RESUME_OUT")" \
   "session-resume: no prebuilt binary session-resume-000000000000-x86_64-unknown-linux-musl; building from source.
-cargo build --release --locked"
+cargo build --release --locked
+built"
 
 good="$tmp/rel/session-resume-abcdef123456-x86_64-unknown-linux-musl.sha256"
 cp "$good" "$tmp/good.sha256"
@@ -89,16 +130,19 @@ check "a binary that does not run here builds from source and installs nothing" 
   "session-resume: session-resume-abcdef123456-aarch64-apple-darwin does not run here; building from source.
 built
 1"
+check "a download that is not installed is removed" "$(ls -A "$(dirname "$SESSION_RESUME_OUT")")" "session-resume"
 
 FAKE_OS=Linux FAKE_ARCH=riscv64 SESSION_RESUME_KEY=abcdef123456 fetch
-check "an unsupported platform builds from source" "$(head -1 "$out"; cargo_calls)" \
+check "an unsupported platform builds from source" "$(head -1 "$out"; cargo_calls; cat "$SESSION_RESUME_OUT")" \
   "session-resume: no prebuilt binary for Linux/riscv64; building from source.
-1"
+1
+built"
 
 fetch
-check "outside a git checkout it builds from source" "$(head -1 "$out"; cargo_calls)" \
+check "outside a git checkout it builds from source" "$(head -1 "$out"; cargo_calls; cat "$SESSION_RESUME_OUT")" \
   "session-resume: not a git checkout; building from source.
-1"
+1
+built"
 
 mkdir -p "$tmp/repo/session-resume" && echo x > "$tmp/repo/session-resume/f" && echo target/ > "$tmp/repo/session-resume/.gitignore" && echo y > "$tmp/repo/other"
 git -C "$tmp/repo" init -q && git -C "$tmp/repo" add -A &&
@@ -112,8 +156,9 @@ check "the key is the git tree hash of session-resume/, read from inside the plu
 echo z >> "$tmp/repo/session-resume/f"
 ROOT="$tmp/repo/session-resume" fetch
 check "a working copy with uncommitted changes builds from source instead of downloading" \
-  "$(head -1 "$out"; cargo_calls)" "session-resume: session-resume/ has uncommitted changes; building from source.
-1"
+  "$(head -1 "$out"; cargo_calls; cat "$SESSION_RESUME_OUT")" "session-resume: session-resume/ has uncommitted changes; building from source.
+1
+built"
 git -C "$tmp/repo" checkout -q -- session-resume/f
 echo new > "$tmp/repo/session-resume/untracked"
 printf '[status]\n\tshowUntrackedFiles = no\n' > "$tmp/gitconfig"
@@ -132,7 +177,7 @@ popd > /dev/null || exit 1
 check "a relative SESSION_RESUME_ROOT is resolved before the build" \
   "$(echo "rc=$rc"; sed -e 's/ in .*//' -e "s|$tmp/repo|REPO|" "$FAKE_CARGO_LOG"; cat "$SESSION_RESUME_OUT")" \
   "rc=0
-cargo build --release --locked --target-dir REPO/session-resume/target --message-format=json-render-diagnostics
+cargo build --release --locked --target x86_64-unknown-linux-gnu --target-dir REPO/session-resume/target --message-format=json-render-diagnostics
 built"
 echo y > "$tmp/repo/other" && echo w >> "$tmp/repo/other"
 ROOT="$tmp/repo/session-resume" fetch
@@ -142,7 +187,7 @@ CARGO_TARGET_DIR="$tmp/elsewhere" SESSION_RESUME_KEY=000000000000 fetch; rc=$?
 check "the source build pins the target dir and copies the binary to where the manifest points" \
   "$(echo "rc=$rc"; sed -e 's/ in .*//' -e "s|$SESSION_RESUME_ROOT|ROOT|" "$FAKE_CARGO_LOG"; cat "$SESSION_RESUME_OUT"; [ -e "$tmp/elsewhere" ] && echo moved)" \
   "rc=0
-cargo build --release --locked --target-dir ROOT/target --message-format=json-render-diagnostics
+cargo build --release --locked --target x86_64-unknown-linux-gnu --target-dir ROOT/target --message-format=json-render-diagnostics
 built"
 
 n=$((n + 1))
@@ -151,23 +196,17 @@ mkdir -p "$SESSION_RESUME_ROOT"
 env -u HOME PATH="$tmp/bin:$PATH" SESSION_RESUME_KEY=000000000000 SESSION_RESUME_BASE_URL="file://$tmp/rel" sh "$script" > "$tmp/fetch$n.txt" 2>&1; rc=$?
 check "the source build does not need HOME" "rc=$rc $(cat "$SESSION_RESUME_OUT")" "rc=0 built"
 
-FAKE_CARGO_TRIPLE=x86_64-unknown-linux-gnu SESSION_RESUME_KEY=000000000000 fetch; rc=$?
-check "a build.target in the user's Cargo config still installs the binary where the manifest points" \
+FAKE_CARGO_TRIPLE=aarch64-unknown-linux-gnu SESSION_RESUME_KEY=000000000000 fetch; rc=$?
+check "a cross build.target in the user's Cargo config is overridden: the installed binary is built for this host" \
   "rc=$rc $(cat "$SESSION_RESUME_OUT")" "rc=0 built"
+
+FAKE_CARGO_NOHOST=1 SESSION_RESUME_KEY=000000000000 fetch; rc=$?
+check "a cargo that names no host triple fails saying so and builds nothing" \
+  "rc=$rc $(grep -c 'cargo -vV names no host triple' "$out") $(cargo_calls)" "rc=1 1 0"
 
 FAKE_CARGO_STALE=1 SESSION_RESUME_KEY=000000000000 fetch; rc=$?
 check "the binary this build reported is installed, not a newer one for another target" \
   "rc=$rc $(cat "$SESSION_RESUME_OUT")" "rc=0 built"
-
-# The plugin reached through a symlink, installing to its default path: cargo's resolved spelling of
-# that path names the same file, which is not copied onto itself.
-n=$((n + 1))
-mkdir -p "$tmp/real$n" && ln -s "$tmp/real$n" "$tmp/link$n"
-env -u SESSION_RESUME_OUT HOME="$tmp/home" FAKE_CARGO_LOG="$tmp/cargo$n.log" SESSION_RESUME_ROOT="$tmp/link$n" FAKE_CARGO_PHYSICAL=1 \
-  PATH="$tmp/bin:$PATH" SESSION_RESUME_KEY=000000000000 SESSION_RESUME_BASE_URL="file://$tmp/rel" \
-  sh "$script" > "$tmp/fetch$n.txt" 2>&1; rc=$?
-check "a path cargo spells differently but that names the same file is left in place" \
-  "rc=$rc $(cat "$tmp/real$n/target/release/session-resume" 2>/dev/null)" "rc=0 built"
 
 FAKE_CARGO_NOBIN=1 SESSION_RESUME_KEY=000000000000 fetch; rc=$?
 check "a build that writes no binary fails naming it" \

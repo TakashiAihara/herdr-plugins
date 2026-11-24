@@ -53,8 +53,8 @@ mod testutil {
         let dir = unique_dir("fake");
         let log = dir.join("log");
         let mut script = format!(
-            "#!/bin/sh\n{{ printf '%s\\n' \"$@\"; echo '--'; }} >> '{}'\ncase \"$1 $2\" in\n",
-            log.display()
+            "#!/bin/sh\n{{ printf '%s\\n' \"$@\"; echo '--'; }} >> {}\ncase \"$1 $2\" in\n",
+            crate::render::quote(log.to_str().unwrap())
         );
         for (cmd, body) in handlers {
             script.push_str(&format!("'{cmd}') {body} ;;\n"));

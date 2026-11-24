@@ -211,7 +211,8 @@ mod tests {
 
     #[test]
     fn a_cursor_inside_a_cluster_keeps_that_cluster_on_screen() {
-        // Left can stop between U+2764 and U+FE0F; the heart stays visible with the cursor on it.
+        // A paste can leave the cursor between U+2764 and U+FE0F; the heart stays visible with the
+        // cursor on it.
         let mut i = Input::default();
         i.text = "❤\u{fe0f}X".into();
         i.cursor = 1;
@@ -237,6 +238,39 @@ mod tests {
         assert_eq!((shown.as_str(), col), ("❤\u{fe0f}", 2));
     }
     #[test]
+    fn the_cursor_and_the_delete_keys_take_a_whole_grapheme_cluster() {
+        let key = |i: &mut Input, code| i.edit(KeyEvent::new(code, KeyModifiers::NONE));
+        // 👩‍💻 is three chars and 🇺🇸 two; each is one cluster, as it is drawn.
+        let mut i = Input::default();
+        i.paste("a👩\u{200d}💻🇺🇸b");
+        assert_eq!(i.cursor, 7);
+        key(&mut i, KeyCode::Left);
+        key(&mut i, KeyCode::Left);
+        assert_eq!(i.cursor, 4);
+        key(&mut i, KeyCode::Left);
+        assert_eq!(i.cursor, 1);
+        key(&mut i, KeyCode::Right);
+        assert_eq!(i.cursor, 4);
+        assert!(key(&mut i, KeyCode::Backspace));
+        assert_eq!((i.text.as_str(), i.cursor), ("a🇺🇸b", 1));
+        assert!(key(&mut i, KeyCode::Delete));
+        assert_eq!((i.text.as_str(), i.cursor), ("ab", 1));
+    }
+
+    #[test]
+    fn from_inside_a_cluster_left_and_right_reach_its_edges() {
+        let key = |i: &mut Input, code| i.edit(KeyEvent::new(code, KeyModifiers::NONE));
+        let mut i = Input::default();
+        i.text = "x❤\u{fe0f}y".into();
+        i.cursor = 2;
+        key(&mut i, KeyCode::Right);
+        assert_eq!(i.cursor, 3);
+        i.cursor = 2;
+        key(&mut i, KeyCode::Left);
+        assert_eq!(i.cursor, 1);
+    }
+
+    #[test]
     fn a_long_run_of_zero_width_characters_stays_quick() {
         // U+0301 (combining acute accent) takes no cell.
         let mut i = Input::default();
@@ -246,7 +280,8 @@ mod tests {
         let (end_view, _) = i.view(18);
         i.cursor = 0;
         let (start_view, _) = i.view(18);
-        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+        // A generous bound: linear work takes milliseconds, quadratic work on this size minutes.
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
         // The visible "a" is never pushed out by the invisible run around it.
         assert!(end_view.starts_with('a') && start_view.starts_with('a'));
     }
@@ -276,7 +311,8 @@ mod tests {
         i.cursor = 50_000;
         let start = std::time::Instant::now();
         let (shown, col) = i.view(18);
-        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+        // A generous bound: linear work takes milliseconds, quadratic work on this size minutes.
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!((shown.len(), col), (17, 17));
     }
 

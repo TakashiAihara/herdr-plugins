@@ -64,6 +64,7 @@ fi
 
 reset; "$bin" bogus 2>"$tmp/err"; rc=$?
 check "an unknown subcommand is a usage error" "$rc:$(grep -c usage "$tmp/err")" "1:1"
-check "version names the binary" "$("$bin" version | cut -d' ' -f1)" agent-launch
+check "version prints the name and the package version" "$("$bin" version)" \
+  "agent-launch $(sed -n 's/^version = "\(.*\)"$/\1/p' "$here/../Cargo.toml")"
 
 exit $fail

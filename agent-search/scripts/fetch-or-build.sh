@@ -32,27 +32,30 @@ build_from_source() {
     echo "agent-search: no prebuilt binary and no cargo to build one. Install Rust from https://rustup.rs, then run: herdr plugin update" >&2
     exit 1
   fi
+  # --target with cargo's own host triple: the install build is for this machine, whatever a
+  # build.target in the user's Cargo config or CARGO_BUILD_TARGET says.
+  host=$(cargo -vV 2>/dev/null | sed -n 's/^host: //p')
+  [ -n "$host" ] || {
+    echo "agent-search: cargo -vV names no host triple to build for" >&2
+    exit 1
+  }
   # --target-dir pins the output next to the manifest's command path, whatever CARGO_TARGET_DIR says.
-  # The binary's path comes from cargo's own report of this build: a build.target in the user's
-  # Cargo config (or CARGO_BUILD_TARGET) puts it under target/<triple>/release, and after a later
-  # cross build a binary for another target can be newer than this one, which a build with nothing
-  # to do does not rewrite.
+  # The binary's path comes from cargo's own report of this build, not from a guess at the layout
+  # under target/, where an earlier build for another target can have left a newer binary.
   report="$root/target/.agent-search-build.json"
   mkdir -p "$root/target" &&
-    (cd "$root" && cargo build --release --locked --target-dir "$root/target" \
+    (cd "$root" && cargo build --release --locked --target "$host" --target-dir "$root/target" \
       --message-format=json-render-diagnostics > "$report") || exit 1
   built=$(sed -n 's/.*"executable":"\([^"]*\/agent-search\)".*/\1/p' "$report" | tail -n 1)
   [ -n "$built" ] && [ -x "$built" ] || {
     echo "agent-search: cargo build finished but its report ($report) names no runnable agent-search binary" >&2
     exit 1
   }
-  # cargo may spell the path differently from $out (a symlink in $root) while naming the same file.
-  if [ "$built" != "$out" ] && ! [ "$built" -ef "$out" ]; then
-    { mkdir -p "$(dirname "$out")" && cp -f "$built" "$out"; } || {
-      echo "agent-search: cannot copy $built to $out" >&2
-      exit 1
-    }
-  fi
+  # A --target build lands under target/<triple>/release, never where the manifest points.
+  { mkdir -p "$(dirname "$out")" && cp -f "$built" "$out"; } || {
+    echo "agent-search: cannot copy $built to $out" >&2
+    exit 1
+  }
   exit 0
 }
 
@@ -64,7 +67,7 @@ fallback() {
 
 download() {
   if have curl; then curl -fsSL --max-time 60 -o "$2" "$1" 2>/dev/null
-  elif have wget; then wget -q -T 60 -O "$2" "$1" 2>/dev/null
+  elif have wget; then wget -q -T 60 --tries=1 -O "$2" "$1" 2>/dev/null
   else return 127; fi
 }
 
@@ -96,7 +99,11 @@ fi
 key=$(printf '%s' "$key" | cut -c1-12)
 asset="agent-search-$key-$triple"
 
-tmp=$(mktemp -d 2>/dev/null) || fallback "cannot create a temporary directory"
+# Downloaded next to where it is installed, not under TMPDIR: the binary is run once before it is
+# installed, and a temporary directory can be mounted noexec.
+dest=$(dirname "$out")
+mkdir -p "$dest" 2>/dev/null && tmp=$(mktemp -d "$dest/.fetch.XXXXXX" 2>/dev/null) ||
+  fallback "cannot create a temporary directory in $dest"
 download "$base_url/$asset" "$tmp/$asset" || fallback "no prebuilt binary $asset"
 download "$base_url/$asset.sha256" "$tmp/$asset.sha256" || fallback "no checksum for $asset"
 want=$(awk '{print $1}' "$tmp/$asset.sha256")
@@ -105,6 +112,6 @@ got=$(sha256_of "$tmp/$asset") || fallback "no sha256 tool"
 chmod +x "$tmp/$asset"
 [ "$("$tmp/$asset" enter w0:p0 2>/dev/null)" = accept ] || fallback "$asset does not run here"
 
-mkdir -p "$(dirname "$out")" && mv -f "$tmp/$asset" "$out" || fallback "cannot install to $out"
+mv -f "$tmp/$asset" "$out" || fallback "cannot install to $out"
 rm -rf "$tmp"
 echo "agent-search: installed prebuilt $asset"

@@ -7,10 +7,17 @@ yml="$here/../../.github/workflows/agent-sort-binaries.yml"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# The publish step's `run: |` is the last one in the workflow; drop its 10-space step indent.
-awk '/^        run: \|$/ { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' "$yml" \
-  | sed 's/^          //' > "$tmp/publish.sh"
-[ -s "$tmp/publish.sh" ] || { echo "FAIL could not find the publish run block in $yml"; exit 1; }
+# The one `run: |` block of the publish job, up to the next line indented less than the block,
+# without its 10-space step indent. A second run block in that job fails here instead of silently
+# becoming the script under test.
+awk '
+  /^  [^ ]/ { job = $0 }
+  on && $0 != "" && substr($0, 1, 10) != "          " { on = 0 }
+  on { print substr($0, 11) }
+  job == "  publish:" && /^      (- |  )run: \|$/ { on = 1; blocks++ }
+  END { exit blocks != 1 }
+' "$yml" > "$tmp/publish.sh" && [ -s "$tmp/publish.sh" ] ||
+  { echo "FAIL the publish job in $yml does not have exactly one run block"; exit 1; }
 
 # The release is $FAKE_RELEASE: each asset is a `name<TAB>state` line in `state` plus its content
 # file under `files/`. `gh release view --json assets --jq ...` answers `name state` lines when
@@ -39,6 +46,11 @@ case "$1 ${2:-}" in
     [ -d "$FAKE_RELEASE" ] || exit 1
     mkdir -p "$files"; [ -f "$state" ] || : > "$state"
     shift 3 # release upload <tag>
+    # Like gh without --clobber, which the publish step never passes: an asset of the same name
+    # already on the release fails the whole upload before anything is sent.
+    for a in "$@"; do
+      awk -F'\t' -v n="$(basename -- "$a")" '$1 == n { found = 1 } END { exit !found }' "$state" && exit 1
+    done
     while [ $# -gt 0 ]; do
       case "$1" in
         --repo) shift 2 ;;
