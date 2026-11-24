@@ -28,6 +28,12 @@ jobs:
           cargo fmt --check
           cargo build --release --locked
           cargo test --locked
+      - name: Build and unit-test session-resume
+        working-directory: session-resume
+        run: |
+          cargo fmt --check
+          cargo build --release --locked
+          cargo test --locked
       - name: Build and unit-test agent-sort
         working-directory: agent-sort
         run: |
