@@ -78,6 +78,13 @@ ok
 
 check "nothing but the binary is left in the install directory" "$(ls -A "$(dirname "$AGENT_SORT_OUT")")" "agent-sort"
 
+mkdir -p "$tmp/out$((n + 1))/.fetch" && echo junk > "$tmp/out$((n + 1))/.fetch/junk"
+AGENT_SORT_KEY=abcdef1234567890 fetch
+check "what an interrupted install left behind is removed by the next one" \
+  "$(cat "$out"; ls -A "$(dirname "$AGENT_SORT_OUT")")" \
+  "agent-sort: installed prebuilt agent-sort-abcdef123456-x86_64-unknown-linux-musl
+agent-sort"
+
 TMPDIR="$tmp/absent" AGENT_SORT_KEY=abcdef1234567890 fetch
 check "the download does not go through TMPDIR, which can be missing or noexec" "$(cat "$out")" \
   "agent-sort: installed prebuilt agent-sort-abcdef123456-x86_64-unknown-linux-musl"

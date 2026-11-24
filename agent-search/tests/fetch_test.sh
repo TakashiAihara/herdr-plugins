@@ -26,6 +26,9 @@ while [ $# -gt 0 ]; do
   [ "$1" = --target ] && tg=$2
   shift
 done
+# Like cargo: without --target-dir the build goes to CARGO_TARGET_DIR, so a script that drops the
+# flag shows up as files under it.
+[ -z "$td" ] && td=${CARGO_TARGET_DIR:-}
 # FAKE_CARGO_NOBIN is a build that writes nothing.
 [ -n "${FAKE_CARGO_NOBIN:-}" ] && exit 0
 d="$td/release"; [ -n "$tg" ] && d="$td/$tg/release"
@@ -74,6 +77,13 @@ accept
 0"
 
 check "nothing but the binary is left in the install directory" "$(ls -A "$(dirname "$AGENT_SEARCH_OUT")")" "agent-search"
+
+mkdir -p "$tmp/out$((n + 1))/.fetch" && echo junk > "$tmp/out$((n + 1))/.fetch/junk"
+AGENT_SEARCH_KEY=abcdef1234567890 fetch
+check "what an interrupted install left behind is removed by the next one" \
+  "$(cat "$out"; ls -A "$(dirname "$AGENT_SEARCH_OUT")")" \
+  "agent-search: installed prebuilt agent-search-abcdef123456-x86_64-unknown-linux-musl
+agent-search"
 
 TMPDIR="$tmp/absent" AGENT_SEARCH_KEY=abcdef1234567890 fetch
 check "the download does not go through TMPDIR, which can be missing or noexec" "$(cat "$out")" \

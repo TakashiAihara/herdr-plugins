@@ -390,7 +390,9 @@ mod tests {
         let err = herdr_within(&f.bin, &["pane", "list"], limit).unwrap_err();
         let took = start.elapsed();
         assert!(
-            err.contains("herdr pane list did not answer within 1 s"),
+            err.contains(
+                "herdr pane list did not answer within 1 s and was stopped; it may still have taken effect"
+            ),
             "{err}"
         );
         assert!(took < std::time::Duration::from_millis(2500), "{took:?}");

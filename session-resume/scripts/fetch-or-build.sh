@@ -97,7 +97,9 @@ asset="session-resume-$key-$triple"
 # Downloaded next to where it is installed, not under TMPDIR: the binary is run once before it is
 # installed, and a temporary directory can be mounted noexec.
 dest=$(dirname "$out")
-# One fixed name: what an interrupted install left behind is reused and removed by the next one.
+# One fixed name: what an interrupted install left behind is reused and removed by the next
+# install that downloads.
+# NOTE: two installs of this plugin at once share it and can overwrite each other's download.
 tmp="$dest/.fetch"
 mkdir -p "$tmp" 2>/dev/null || fallback "cannot create $tmp"
 download "$base_url/$asset" "$tmp/$asset" || fallback "no prebuilt binary $asset"

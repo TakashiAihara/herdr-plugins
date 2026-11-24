@@ -1110,11 +1110,12 @@ mod tests {
     fn from_inside_a_cluster_left_and_right_reach_its_edges() {
         let key = |i: &mut Input, code| i.edit(KeyEvent::new(code, KeyModifiers::NONE));
         let mut i = Input::default();
-        i.text = "x❤\u{fe0f}y".into();
+        // The cluster is chars 1..4, so a one-char step from inside it would stop inside it.
+        i.text = "x👩\u{200d}💻y".into();
         i.cursor = 2;
         key(&mut i, KeyCode::Right);
-        assert_eq!(i.cursor, 3);
-        i.cursor = 2;
+        assert_eq!(i.cursor, 4);
+        i.cursor = 3;
         key(&mut i, KeyCode::Left);
         assert_eq!(i.cursor, 1);
     }
