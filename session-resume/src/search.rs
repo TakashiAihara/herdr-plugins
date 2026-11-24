@@ -159,7 +159,7 @@ impl Searcher {
         hits
     }
 
-    // Index files that could not be read since the last call.
+    // Index files the last search could not read; taking them empties the list.
     pub fn take_errors(&mut self) -> Vec<String> {
         self.entries
             .iter_mut()
@@ -423,13 +423,14 @@ mod tests {
         // The same query again would narrow from the incomplete result if that had been kept.
         let hits = f.s.search("y", Scope::User);
         assert_eq!(ids(&f, &hits), ["s-mid", "s-old"]);
+        // A search without a failed read is a base to narrow from again.
+        assert!(f.s.last.is_some());
         assert!(f.s.take_errors().is_empty(), "the failed read is behind us");
-        // With every body read, the result is a base to narrow from again: a session that only
-        // joins afterwards by its file is not looked at for an extension of the query.
+        // The body read on the retry stays in memory: its file is not needed again.
         fs::remove_file(&path).unwrap();
         let hits = f.s.search("y is", Scope::User);
-        assert_eq!(ids(&f, &hits), ["s-mid"], "the body read once is kept");
-        assert!(f.s.last.is_some());
+        assert_eq!(ids(&f, &hits), ["s-mid"]);
+        assert!(f.s.take_errors().is_empty());
     }
 
     #[test]

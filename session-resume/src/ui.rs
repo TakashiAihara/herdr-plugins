@@ -58,6 +58,8 @@ pub struct App {
     pub status: String,
     // Sessions read so far of those that needed it, while the background refresh runs.
     pub progress: Option<(usize, usize)>,
+    // Whether a key or a paste has arrived yet.
+    touched: bool,
 }
 
 impl App {
@@ -81,6 +83,7 @@ impl App {
             now_ms,
             status,
             progress: None,
+            touched: false,
         };
         app.research(None);
         app
@@ -130,11 +133,12 @@ impl App {
     pub fn apply(&mut self, metas: Vec<(String, Meta)>, progress: Option<(usize, usize)>) {
         self.progress = progress;
         if !metas.is_empty() {
-            // Read before the upserts: they move the entries the hits point at. An untouched
-            // cursor stays on the first row, where the newest session arrives.
+            // Read before the upserts: they move the entries the hits point at. Until the first
+            // key the cursor stays on the first row, where the newest session arrives; after it
+            // the cursor stays on its session, so Enter never lands on a row that slid in.
             let keep = self
                 .selected()
-                .filter(|_| self.cur > 0)
+                .filter(|_| self.touched)
                 .map(|e| e.id.clone());
             for (id, meta) in metas {
                 let marked = is_marked(self.marker.as_deref(), &id);
@@ -147,6 +151,7 @@ impl App {
 
 pub fn handle_paste(app: &mut App, s: &str) -> Action {
     app.status.clear();
+    app.touched = true;
     app.query.paste(s);
     app.research(None);
     Action::None
@@ -157,6 +162,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         return Action::None;
     }
     app.status.clear();
+    app.touched = true;
     // Ctrl-D closes as EOF would in a shell prompt.
     if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
         && key.modifiers == KeyModifiers::CONTROL
@@ -1078,6 +1084,32 @@ mod tests {
         a.apply(vec![("s-new".into(), newest)], None);
         assert_eq!(a.selected().unwrap().id, "s-new");
         done(root);
+    }
+
+    #[test]
+    fn after_a_key_the_cursor_on_the_first_row_stays_on_its_session_when_a_newer_one_arrives() {
+        for paste in [false, true] {
+            let (mut a, root) = app();
+            if paste {
+                handle_paste(&mut a, "");
+            } else {
+                press(&mut a, KeyCode::Down);
+                press(&mut a, KeyCode::Up);
+            }
+            assert_eq!((a.cur, a.selected().unwrap().id.as_str()), (0, "s-min"));
+            let newest = Meta {
+                custom_title: "Brand new".into(),
+                last_ms: Some(NOW),
+                ..Meta::default()
+            };
+            a.apply(vec![("s-new".into(), newest)], None);
+            assert_eq!(
+                (a.cur, a.selected().unwrap().id.as_str()),
+                (1, "s-min"),
+                "paste: {paste}"
+            );
+            done(root);
+        }
     }
 
     #[test]

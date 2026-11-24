@@ -117,7 +117,7 @@ Searching the conversation does not read the transcripts on every popup: the plu
 - A match is shown in lowercase, because the index stores lowercase text.
 - Times are shown in UTC.
 - A popup and `session-resume index` running at the same time take turns writing the index (a lock file in it), so their writes do not mix. Reading takes no lock: a popup that is already open reads a session's conversation the first time a search needs it, and if that session was rebuilt in between, the popup may search a mix of its old and new text until it is opened again.
-- A transcript that was cut and then grew past its old size before the index looked at it again is not noticed, and keeps its old text in the index.
+- A transcript that was cut and then grew past its old size before the index looked at it again is not noticed: the index keeps its old text and adds what it reads after the old end.
 - Text that came from a transcript is stripped of control characters before it is drawn or used as a workspace label.
 - A failure in the popup (an invalid config, a projects directory that is not there, `workspace create` returning nothing, `pane run` failing) is shown there until you press `Enter` or `Esc` (or `Ctrl-C`), and the popup exits non-zero. A failure before the command is sent closes the workspace already created for it. A `herdr pane list` that fails when the popup opens is shown under the list and nothing is marked as running; when it fails at `Enter`, nothing is resumed.
 
