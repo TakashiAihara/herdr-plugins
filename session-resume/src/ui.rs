@@ -134,8 +134,9 @@ impl App {
         self.progress = progress;
         if !metas.is_empty() {
             // Read before the upserts: they move the entries the hits point at. Until the first
-            // key the cursor stays on the first row, where the newest session arrives; after it
-            // the cursor stays on its session, so Enter never lands on a row that slid in.
+            // key or paste the cursor stays on the first row, where the newest session arrives;
+            // after it the cursor stays on its session while that session is listed, so Enter
+            // does not land on a row that slid in above it.
             let keep = self
                 .selected()
                 .filter(|_| self.touched)
