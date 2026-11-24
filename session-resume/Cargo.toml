@@ -1,0 +1,11 @@
+[package]
+name = "session-resume"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+
+[dependencies]
+ratatui = "0.30"
+serde_json = "1"
+unicode-segmentation = "1.13"
+unicode-width = "0.2"

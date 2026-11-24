@@ -1,0 +1,22 @@
+id = "takashiaihara.session-resume"
+name = "Session resume"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Search your Claude Code sessions, including ones that have stopped, and resume one in a new workspace or jump to the pane it already runs in"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "scripts/fetch-or-build.sh"]
+
+[[actions]]
+id = "open"
+title = "Resume a session"
+command = ["target/release/session-resume", "open"]
+
+[[panes]]
+id = "picker"
+title = "Session resume"
+placement = "popup"
+width = "90%"
+height = "85%"
+command = ["target/release/session-resume", "ui"]
