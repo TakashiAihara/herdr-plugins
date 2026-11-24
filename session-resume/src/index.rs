@@ -103,8 +103,12 @@ pub fn transcripts(projects: &Path) -> Res<(Sessions, Vec<String>)> {
     for dir in listed(dirs, projects, &mut unread) {
         let files = match fs::read_dir(dir.path()) {
             Ok(files) => files,
-            // A file beside the project directories is not one of them.
-            Err(e) if e.kind() == ErrorKind::NotADirectory => continue,
+            // A file beside the project directories is not one of them; neither is one gone since
+            // it was listed, or a link to nothing. Their sessions are gone like a removed
+            // transcript's, and the cache of a volume that comes back is read again.
+            Err(e) if matches!(e.kind(), ErrorKind::NotADirectory | ErrorKind::NotFound) => {
+                continue
+            }
             Err(e) => {
                 unread.push(format!("cannot read {}: {e}", dir.path().display()));
                 continue;
@@ -248,6 +252,7 @@ impl Index {
             Some(m) if size > m.size => m,
             _ => Meta::default(),
         };
+        let rebuild = meta.offset == 0;
         meta.source = source;
         let mut bodies = Bodies::default();
         file.seek(SeekFrom::Start(meta.offset))
@@ -272,6 +277,17 @@ impl Index {
             }
         }
         (meta.size, meta.ino, meta.mtime_ns) = (size, ino, mtime_ns);
+        // A rebuild replaces the bodies, so the old meta goes first: were it left behind by a
+        // write failing below, a later append would be added to bodies it does not describe.
+        if rebuild {
+            let old = self.file(id, "meta.json");
+            match fs::remove_file(&old) {
+                Err(e) if e.kind() != ErrorKind::NotFound => {
+                    return Err(format!("cannot remove {}: {e}", old.display()))
+                }
+                _ => {}
+            }
+        }
         for (t, text) in bodies.text.iter().enumerate() {
             let path = self.body_file(id, t);
             let mut f = OpenOptions::new()
@@ -426,12 +442,14 @@ mod tests {
         fs::create_dir_all(fx.projects.join("-w-a/s1/subagents")).unwrap();
         fs::write(fx.projects.join("-w-a/s1/subagents/agent-x.jsonl"), "").unwrap();
         fs::write(fx.projects.join("top.jsonl"), "").unwrap();
+        std::os::unix::fs::symlink("nowhere", fx.projects.join("-w-unmounted")).unwrap();
         fs::create_dir_all(fx.projects.join("-w-b")).unwrap();
         fs::write(fx.projects.join("-w-b/s2.jsonl"), "").unwrap();
         let (got, unread) = transcripts(&fx.projects).unwrap();
         let ids: Vec<_> = got.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, ["s1", "s2"]);
-        // `top.jsonl` is a file among the project directories, not one that failed to list.
+        // `top.jsonl` is a file among the project directories and `-w-unmounted` a link to
+        // nothing: neither is a directory that failed to list.
         assert_eq!(unread, [] as [String; 0]);
     }
 
@@ -479,6 +497,46 @@ mod tests {
             unread[0].starts_with(&format!("cannot stat {}: ", knot.display())),
             "{unread:?}"
         );
+    }
+
+    #[test]
+    fn a_rebuild_that_failed_half_way_is_not_continued_from_the_old_meta() {
+        let fx = Fx::new("half");
+        let (old, new) = (line("user", T1, r#""old""#), line("user", T2, r#""new""#));
+        fx.write("s1", &old);
+        set_mtime(&fx.transcript("s1"), 1_000, 1);
+        fx.refresh("s1");
+        fx.write("s1", &new);
+        set_mtime(&fx.transcript("s1"), 1_000, 2);
+        // The user body is rewritten, then the assistant body cannot be opened.
+        fs::remove_file(fx.index.body_file("s1", 1)).unwrap();
+        fs::create_dir(fx.index.body_file("s1", 1)).unwrap();
+        let err = fx.index.refresh("s1", &fx.transcript("s1")).unwrap_err();
+        assert!(err.contains("s1.assistant"), "{err}");
+        fs::remove_dir(fx.index.body_file("s1", 1)).unwrap();
+        fs::write(fx.index.body_file("s1", 1), "").unwrap();
+        // Longer by the time it is tried again: an append, were the old meta still there.
+        fx.append("s1", &line("user", T2, r#""more""#));
+        let (m, _) = fx.refresh("s1");
+        assert_eq!(m.first_prompt, "new");
+        assert_eq!(fx.body("s1", 0), "new\nmore\n");
+    }
+
+    #[test]
+    fn an_append_that_failed_half_way_keeps_its_meta_and_is_continued() {
+        let fx = Fx::new("half-append");
+        fx.write("s1", &line("user", T1, r#""one""#));
+        let (m1, _) = fx.refresh("s1");
+        fx.append("s1", &line("user", T2, r#""two""#));
+        fs::remove_file(fx.index.body_file("s1", 1)).unwrap();
+        fs::create_dir(fx.index.body_file("s1", 1)).unwrap();
+        // Looked at as the failed write leaves it: the directory in the way reads as a body.
+        assert!(fx.index.refresh("s1", &fx.transcript("s1")).is_err());
+        assert_eq!(fx.index.meta("s1"), Some(m1));
+        fs::remove_dir(fx.index.body_file("s1", 1)).unwrap();
+        fs::write(fx.index.body_file("s1", 1), "").unwrap();
+        fx.refresh("s1");
+        assert_eq!(fx.body("s1", 0), "one\ntwo\n");
     }
 
     #[test]

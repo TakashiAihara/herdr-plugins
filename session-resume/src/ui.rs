@@ -165,10 +165,11 @@ impl App {
                     });
                 self.s.upsert(Entry::new(id, meta, marked));
             }
-            self.research(keep);
+            // Before the search: the marker failed first.
             if let Some(e) = problem {
                 self.note(e);
             }
+            self.research(keep);
         }
     }
 }
@@ -944,6 +945,26 @@ mod tests {
         // A session that is not listed has no marker to look for.
         a.apply(vec![("s-unlisted".into(), Meta::default())], None);
         assert_eq!(a.status, "");
+        done(root);
+        done(dir);
+    }
+
+    #[test]
+    fn a_marker_failure_is_shown_before_the_search_failure_of_the_same_refresh() {
+        let dir = unique_dir("apply-knot-search");
+        let tpl = knotted_marker(&dir);
+        let (mut a, root) = app_from(corpus("apply-knot-search-app", &specs()), Some(&tpl), &[]);
+        press(&mut a, KeyCode::Tab);
+        std::fs::remove_file(root.join("index/s-day.user")).unwrap();
+        type_str(&mut a, "z");
+        press(&mut a, KeyCode::Down);
+        assert_eq!(a.status, "");
+        let meta = Meta {
+            last_ms: Some(NOW),
+            ..Meta::default()
+        };
+        a.apply(vec![("s-fresh".into(), meta)], None);
+        assert!(a.status.contains("/knot/s-fresh: "), "{}", a.status);
         done(root);
         done(dir);
     }
