@@ -62,7 +62,7 @@ fallback() {
 
 download() {
   if have curl; then curl -fsSL --max-time 60 -o "$2" "$1" 2>/dev/null
-  elif have wget; then wget -q -T 60 --tries=1 -O "$2" "$1" 2>/dev/null
+  elif have wget; then wget -q -T 60 -t 1 -O "$2" "$1" 2>/dev/null
   else return 127; fi
 }
 

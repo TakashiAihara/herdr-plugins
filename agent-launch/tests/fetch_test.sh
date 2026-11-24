@@ -125,7 +125,7 @@ cat > "$tmp/nocurl/wget" <<'FAKE'
 echo "wget $*" >> "$FAKE_WGET_LOG"
 to= url=
 while [ $# -gt 0 ]; do
-  case "$1" in -O) to=$2; shift ;; -T) shift ;; -*) ;; *) url=$1 ;; esac
+  case "$1" in -O) to=$2; shift ;; -T|-t) shift ;; -*) ;; *) url=$1 ;; esac
   shift
 done
 cp "${url#file://}" "$to"
@@ -133,7 +133,7 @@ FAKE
 chmod +x "$tmp/nocurl/wget"
 FETCH_PATH="$tmp/nocurl" FAKE_WGET_LOG="$tmp/wget.log" AGENT_LAUNCH_KEY=abcdef1234567890 fetch
 check "without curl, wget downloads the pair and is told not to retry" \
-  "$( (PATH="$tmp/nocurl"; command -v curl || echo no-curl); cat "$out"; grep -c -e ' --tries=1 ' "$tmp/wget.log")" \
+  "$( (PATH="$tmp/nocurl"; command -v curl || echo no-curl); cat "$out"; grep -c -e ' -t 1 ' "$tmp/wget.log")" \
   "no-curl
 agent-launch: installed prebuilt agent-launch-abcdef123456-x86_64-unknown-linux-musl
 2"
