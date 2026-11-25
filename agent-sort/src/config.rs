@@ -9,6 +9,11 @@ use std::io::ErrorKind;
 const MAX_NAME_CHARS: usize = 32;
 const MAX_SORT_ENTRIES: usize = 8;
 
+// The entry after the presets, in the popup and in `next`'s cycle, that takes the plugin's sort
+// down so Herdr's own `ui.agent_panel_sort` applies. It is a reserved name, not a preset: the
+// state for it is `{"preset":null}`.
+pub const HERDR: &str = "herdr";
+
 // The built-in sort fields agent.view.set accepts; `{"token": "<name>"}` sorts by a pane metadata
 // token instead.
 pub const FIELDS: [&str; 8] = [
@@ -174,6 +179,9 @@ fn parse(path: &str, text: &str) -> Result<Config, String> {
 
     let default = match doc.get("default") {
         None => None,
+        // Naming the Herdr entry is the same as naming nothing: no preset applies until one is
+        // picked.
+        Some(toml::Value::String(s)) if s == HERDR => None,
         Some(toml::Value::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(v) => {
             return Err(format!(
@@ -259,6 +267,11 @@ fn preset(path: &str, i: usize, v: &toml::Value) -> Result<Preset, String> {
         }
         None => return Err(format!("{path}: sort preset #{i} has no name")),
     };
+    if name == HERDR {
+        return Err(format!(
+            "{path}: preset name {name:?} is reserved for Herdr's own sort"
+        ));
+    }
     if name.chars().count() > MAX_NAME_CHARS {
         return Err(format!(
             "{path}: preset name {name:?} is longer than {MAX_NAME_CHARS} characters"
@@ -626,6 +639,15 @@ sort = [{ token = "repo" }]
                 "{text:?}: {e}"
             );
         }
+    }
+
+    #[test]
+    fn the_herdr_entry_is_a_valid_default_meaning_none_and_a_reserved_preset_name() {
+        let cfg = parse("config.toml", "default = \"herdr\"").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.default, None);
+        assert_eq!(cfg.presets.len(), 3, "the built-ins stay");
+        let e = err("[[sort_presets]]\nname = \"herdr\"\nsort = [{ field = \"agent\" }]");
+        assert!(e.contains("preset name \"herdr\" is reserved"), "{e}");
     }
 
     #[test]

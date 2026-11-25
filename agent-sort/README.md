@@ -1,6 +1,6 @@
 # agent-sort
 
-Switch the sort of Herdr's built-in Agents view between named presets. A preset is a list of sort keys — Herdr's built-in fields like `attention`, or metadata tokens reported on a pane, like `prio` — plus an optional filter, all from a small TOML config. `next` cycles the presets, the `open` action opens a popup picker, and the last preset is re-applied when Herdr starts.
+Switch the sort of Herdr's built-in Agents view between named presets. A preset is a list of sort keys — Herdr's built-in fields like `attention`, or metadata tokens reported on a pane, like `prio` — plus an optional filter, all from a small TOML config. `next` cycles the presets and then Herdr's own sort, the `open` action opens a popup picker, and the last choice is re-applied when Herdr starts.
 
 ## Requirements
 
@@ -41,7 +41,7 @@ Without a config file, `next` cycles these three, in this order:
 | `recent` | `state_change_seq` desc | The agent whose state changed most recently (started, finished, got blocked), whatever that state is |
 | `workspace` | `workspace_order`, `tab_order`, `pane_order`, all asc | Herdr's own layout order: workspaces, then tabs, then panes as they are arranged |
 
-`0` in the popup (or clearing) drops the plugin's sort, and Herdr's own `ui.agent_panel_sort` applies again.
+After the presets — these three or your own — comes one more entry, `herdr`: it takes the plugin's sort down, so Herdr's own `ui.agent_panel_sort` (`spaces`, `workspaces` or `priority` in Herdr's config) applies again. It is the last row of the popup and the last step of the cycle: `attention` → `recent` → `workspace` → `herdr` → `attention`. While it is the current entry, changing `ui.agent_panel_sort` shows in the Agents view. `0` in the popup and `agent-sort clear` do the same from anywhere.
 
 ## Fields
 
@@ -100,15 +100,16 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - Token values compare as strings, so pad to the same number of digits whenever values can have different lengths (for 1–12 write `01`–`12`, or `"10"` sorts before `"3"`).
 - `filter` is the filter object of the socket API's `agent.view.set`, converted from TOML to JSON untouched; it must be a table.
 - Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset.
-- A `[[sort_presets]]` list replaces the built-ins whole; copy the ones you still want from [Built-in presets](#built-in-presets).
+- `herdr` is reserved for the entry that hands the sort back to Herdr and cannot be a preset name. `default = "herdr"` is accepted and means the same as no `default`: nothing is applied until you pick a preset.
+- A `[[sort_presets]]` list replaces the built-ins whole; copy the ones you still want from [Built-in presets](#built-in-presets). The `herdr` entry always follows the list.
 
 ## Keys in the popup
 
 | Key | Action |
 |---|---|
-| `Up`, `k` | previous preset |
-| `Down`, `j` | next preset |
-| `Enter` | apply the highlighted preset and close |
+| `Up`, `k` | previous row |
+| `Down`, `j` | next row |
+| `Enter` | apply the highlighted preset and close; on the `herdr` row, clear the plugin's sort like `0` |
 | `0` | clear the plugin's sort and close |
 | `e` | edit `config.toml`, then reload and re-apply |
 | `Esc`, `q`, `Ctrl-C` | close |
@@ -178,7 +179,7 @@ sort = [{ token = "started" }, { field = "pane_order" }]
 
 ## State
 
-`state.json` in the plugin state directory holds only `{"preset": "<name>"}` or `{"preset": null}`. It is written atomically, and only after Herdr accepted the view.
+`state.json` in the plugin state directory holds only `{"preset": "<name>"}` or `{"preset": null}`. `null` is the `herdr` entry: the popup marks it as current, `next` continues from the first preset, and `restore` applies nothing at startup. It is written atomically, and only after Herdr accepted the view.
 
 ## Limits
 

@@ -200,27 +200,35 @@ fn presets(env: &Env) -> Res<()> {
         text.push_str(&p.name);
         text.push('\n');
     }
+    text.push_str(config::HERDR);
+    text.push('\n');
     out(&text);
     Ok(())
 }
 
-// The preset `next` applies: the one after the current, wrapping; the first when the current is
-// none. The current is the state's name when it is in the config, else the config's default.
-fn next_preset<'a>(cfg: &'a Config, saved: &Saved) -> &'a Preset {
-    let i = match current(cfg, saved).and_then(|n| cfg.index(n)) {
-        Some(i) => (i + 1) % cfg.presets.len(),
-        None => 0,
-    };
-    &cfg.presets[i]
+// The preset `next` applies: the one after the current; the first when the current is none.
+// After the last preset comes the Herdr entry (None): nothing of ours applied. The current is the
+// state's name when it is in the config, else the config's default.
+fn next_preset<'a>(cfg: &'a Config, saved: &Saved) -> Option<&'a Preset> {
+    match current(cfg, saved).and_then(|n| cfg.index(n)) {
+        Some(i) => cfg.presets.get(i + 1),
+        None => cfg.presets.first(),
+    }
 }
 
 fn next(env: &Env) -> Res<()> {
     let cfg = env.config().map_err(|e| notified(env, e))?;
     let saved = state::read(&env.state_path);
-    apply(env, next_preset(&cfg, &saved))
+    match next_preset(&cfg, &saved) {
+        Some(preset) => apply(env, preset),
+        None => clear(env),
+    }
 }
 
 fn set(env: &Env, name: &str) -> Res<()> {
+    if name == config::HERDR {
+        return clear(env);
+    }
     let cfg = env.config().map_err(|e| notified(env, e))?;
     let Some(preset) = cfg.preset(name) else {
         return Err(notified(env, format!("unknown preset {name:?}")));
@@ -505,13 +513,19 @@ mod tests {
     #[test]
     fn next_cycles_wraps_and_starts_from_the_first_preset() {
         let c = cfg(&["a", "b", "c"], None);
-        assert_eq!(next_preset(&c, &Saved::Unset).name, "a");
-        assert_eq!(next_preset(&c, &Saved::Cleared).name, "a");
-        assert_eq!(next_preset(&c, &Saved::Named("a".into())).name, "b");
-        assert_eq!(next_preset(&c, &Saved::Named("c".into())).name, "a");
+        let next = |s: Saved| next_preset(&c, &s).map(|p| p.name.as_str());
+        assert_eq!(next(Saved::Unset), Some("a"));
+        assert_eq!(next(Saved::Cleared), Some("a"));
+        assert_eq!(next(Saved::Named("a".into())), Some("b"));
+        assert_eq!(next(Saved::Named("b".into())), Some("c"));
         assert_eq!(
-            next_preset(&c, &Saved::Named("gone".into())).name,
-            "a",
+            next(Saved::Named("c".into())),
+            None,
+            "after the last preset comes the Herdr entry"
+        );
+        assert_eq!(
+            next(Saved::Named("gone".into())),
+            Some("a"),
             "a gone preset with no default starts from the first"
         );
     }
@@ -519,10 +533,11 @@ mod tests {
     #[test]
     fn next_starts_from_the_config_default_when_the_state_is_unset_or_gone() {
         let c = cfg(&["prio", "repo"], Some("prio"));
-        assert_eq!(next_preset(&c, &Saved::Unset).name, "repo");
+        let next = |s: Saved| next_preset(&c, &s).map(|p| p.name.as_str());
+        assert_eq!(next(Saved::Unset), Some("repo"));
         assert_eq!(
-            next_preset(&c, &Saved::Named("gone".into())).name,
-            "repo",
+            next(Saved::Named("gone".into())),
+            Some("repo"),
             "a gone preset counts as the default, so next continues after it"
         );
     }
