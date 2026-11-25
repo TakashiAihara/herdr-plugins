@@ -207,8 +207,8 @@ fn presets(env: &Env) -> Res<()> {
 }
 
 // The preset `next` applies: the one after the current; the first when the current is none.
-// After the last preset comes the Herdr entry (None): nothing of ours applied. The current is the
-// state's name when it is in the config, else the config's default.
+// After the last preset comes the Herdr entry (None): nothing of ours applied. The current is
+// what `current` says, so a cleared state starts from the first preset even with a default.
 fn next_preset<'a>(cfg: &'a Config, saved: &Saved) -> Option<&'a Preset> {
     match current(cfg, saved).and_then(|n| cfg.index(n)) {
         Some(i) => cfg.presets.get(i + 1),
@@ -535,6 +535,11 @@ mod tests {
         let c = cfg(&["prio", "repo"], Some("prio"));
         let next = |s: Saved| next_preset(&c, &s).map(|p| p.name.as_str());
         assert_eq!(next(Saved::Unset), Some("repo"));
+        assert_eq!(
+            next(Saved::Cleared),
+            Some("prio"),
+            "the Herdr entry is not the default: next wraps to the first preset"
+        );
         assert_eq!(
             next(Saved::Named("gone".into())),
             Some("repo"),
