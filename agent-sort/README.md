@@ -155,6 +155,7 @@ name = "started"
 sort = [{ token = "started" }, { field = "pane_order" }]
 ```
 
+- The script needs `python3`, and assumes the native install, where the process is named `claude`. With the npm install the process is named `node`, the loop finds nothing, and no token is reported.
 - The value is UTC in a fixed-width form, so comparing it as text gives the time order. Local time would break across a daylight-saving change.
 - Avoid `PreToolUse`: the hook runs synchronously before every tool call, and walking the process tree adds tens of milliseconds each time. A token that is not reported again keeps its value, so reporting once per prompt is enough.
 - A session reopened with `claude --resume`, or restored after a Herdr restart, gets the time it was reopened.
