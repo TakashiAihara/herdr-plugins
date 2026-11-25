@@ -134,12 +134,15 @@ Herdr 0.9.5 has no field for when a pane or agent was created, so report the sta
 ```bash
 #!/bin/bash
 # Report the start time of the claude process above this hook as the `started` token.
-[ -n "${HERDR_PANE_ID:-}" ] || exit 0
+# CLAUDE_CODE_ENTRYPOINT=cli skips `claude -p` runs that inherit the pane's environment.
+[ -n "${HERDR_PANE_ID:-}" ] && [ "${CLAUDE_CODE_ENTRYPOINT:-}" = cli ] || exit 0
 sessions="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
 pid=$PPID
 while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
-  # Files of exited sessions stay behind and pids are reused, so take only a process named claude.
-  if [ "$(basename -- "$(ps -o comm= -p "$pid")")" = claude ] && [ -f "$sessions/$pid.json" ]; then
+  # Files of exited sessions stay behind and pids are reused, so take only a process named claude,
+  # and stop at the nearest one so an outer claude's time is never reported.
+  if [ "$(basename -- "$(ps -o comm= -p "$pid")")" = claude ]; then
+    [ -f "$sessions/$pid.json" ] || exit 0
     started=$(python3 -c 'import json, sys, time; ms = int(json.load(open(sys.argv[1]))["startedAt"]); print(time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ms // 1000)) + ".%03dZ" % (ms % 1000))' "$sessions/$pid.json") || exit 0
     herdr pane report-metadata "$HERDR_PANE_ID" --source started-at --token "started=$started" >/dev/null 2>&1
     exit 0
@@ -151,7 +154,7 @@ done
 A token stays on the pane until it is replaced or cleared, so clear it from a `SessionEnd` hook. Otherwise another agent started later in the same pane sorts by the old time:
 
 ```bash
-[ -n "${HERDR_PANE_ID:-}" ] || exit 0
+[ -n "${HERDR_PANE_ID:-}" ] && [ "${CLAUDE_CODE_ENTRYPOINT:-}" = cli ] || exit 0
 herdr pane report-metadata "$HERDR_PANE_ID" --source started-at --clear-token started >/dev/null 2>&1
 exit 0
 ```
@@ -166,6 +169,7 @@ sort = [{ token = "started" }, { field = "pane_order" }]
 
 - The script needs `python3`, and assumes the native install, where the process is named `claude`. With the npm install the process is named `node`, the loop finds nothing, and no token is reported.
 - The value is UTC in a fixed-width form with milliseconds, so comparing it as text gives the time order, even for agents started in the same second. Local time would break across a daylight-saving change.
+- An interactive `claude` started inside another one in the same pane reports its own time over the outer one's, and clears it when it exits. The outer one gets it back on its next prompt.
 - Clearing on `SessionEnd` is best effort. When Claude Code is killed or crashes, `SessionEnd` does not run and the old value stays on the pane until the next Claude Code session there reports a new one.
 - Avoid `PreToolUse`: the hook runs synchronously before every tool call, and walking the process tree adds tens of milliseconds each time. A token that is not reported again keeps its value, so reporting once per prompt is enough.
 - A session reopened with `claude --resume`, or restored after a Herdr restart, gets the time it was reopened.
