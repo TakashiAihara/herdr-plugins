@@ -129,22 +129,29 @@ Herdr drops all tokens when its server restarts, so whatever reports them should
 
 ### Order agents by start time
 
-Herdr 0.9.5 has no field for when a pane or agent was created, so report the start time as a token and sort by it. For Claude Code, the process start time is `startedAt` (epoch milliseconds) in `~/.claude/sessions/<pid>.json`, and a hook runs a few processes below the `claude` process. A hook wired to `SessionStart` and `UserPromptSubmit` can report it:
+Herdr 0.9.5 has no field for when a pane or agent was created, so report the start time as a token and sort by it. For Claude Code, the process start time is `startedAt` (epoch milliseconds) in `sessions/<pid>.json` under the config directory (`$CLAUDE_CONFIG_DIR`, or `~/.claude` when it is unset), and a hook runs a few processes below the `claude` process. A hook wired to `SessionStart` and `UserPromptSubmit` can report it:
 
 ```bash
 #!/bin/bash
 # Report the start time of the claude process above this hook as the `started` token.
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
+sessions="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
 pid=$PPID
 while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
   # Files of exited sessions stay behind and pids are reused, so take only a process named claude.
-  if [ "$(basename -- "$(ps -o comm= -p "$pid")")" = claude ] && [ -f "$HOME/.claude/sessions/$pid.json" ]; then
-    started=$(python3 -c 'import json, sys, time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(json.load(open(sys.argv[1]))["startedAt"] / 1000)))' "$HOME/.claude/sessions/$pid.json") || exit 0
+  if [ "$(basename -- "$(ps -o comm= -p "$pid")")" = claude ] && [ -f "$sessions/$pid.json" ]; then
+    started=$(python3 -c 'import json, sys, time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(json.load(open(sys.argv[1]))["startedAt"] / 1000)))' "$sessions/$pid.json") || exit 0
     herdr pane report-metadata "$HERDR_PANE_ID" --source started-at --token "started=$started" >/dev/null 2>&1
     exit 0
   fi
   pid=$(ps -o ppid= -p "$pid" | tr -d ' ')
 done
+```
+
+A token stays on the pane until it is replaced or cleared, so clear it from a `SessionEnd` hook. Otherwise another agent started later in the same pane sorts by the old time:
+
+```bash
+[ -n "${HERDR_PANE_ID:-}" ] && herdr pane report-metadata "$HERDR_PANE_ID" --source started-at --clear-token started >/dev/null 2>&1
 ```
 
 Then add a preset that sorts by it, oldest first:
