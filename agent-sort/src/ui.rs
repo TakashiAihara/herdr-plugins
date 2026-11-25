@@ -154,7 +154,13 @@ fn load(env: &Env) -> Loaded {
     };
     let (sets, key_err) = key_sets(&env.config_path, &cfg);
     let status = key_err.clone().unwrap_or_default();
-    let current = current(&cfg, &state::read(&env.state_path)).map(String::from);
+    let saved = state::read(&env.state_path);
+    // A saved name the config no longer has (and no default to take over) may still be the live
+    // view; keep the name so no row, the Herdr entry included, is marked current.
+    let current = current(&cfg, &saved).map(String::from).or(match saved {
+        state::Saved::Named(n) => Some(n),
+        _ => None,
+    });
     Loaded {
         binds: Binds::new(&sets),
         app: App::new(cfg.presets, current, status, help_line(&sets)),
@@ -733,6 +739,31 @@ mod tests {
         );
         assert_eq!(wrapped_height("aaa\nbbb", 10), 2);
         assert_eq!(wrapped_height("anything", 0), 0);
+    }
+
+    #[test]
+    fn a_saved_preset_gone_from_the_config_marks_no_row_but_a_cleared_state_marks_herdr() {
+        let dir = crate::testutil::unique_dir("ui-gone");
+        let cfg_dir = dir.join("cfg");
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&cfg_dir).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::create_dir_all(&state_dir).unwrap_or_else(|e| panic!("{e}"));
+        let env = Env::test(&cfg_dir.to_string_lossy(), &state_dir.to_string_lossy());
+
+        std::fs::write(state_dir.join("state.json"), "{\"preset\":\"gone\"}")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut app = load(&env).app;
+        assert_eq!(app.cur, 0, "the cursor falls back to the first row");
+        let all = screen(&mut app);
+        assert!(all.contains("herdr"), "{all}");
+        assert!(!all.contains("(current)"), "{all}");
+
+        std::fs::write(state_dir.join("state.json"), "{\"preset\":null}")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut app = load(&env).app;
+        assert_eq!(app.cur, 3, "the cursor starts on the Herdr entry");
+        assert!(screen(&mut app).contains("herdr (current)"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
