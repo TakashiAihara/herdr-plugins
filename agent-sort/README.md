@@ -125,6 +125,42 @@ herdr pane report-metadata "$HERDR_PANE_ID" --source my-metric --token prio=3
 
 Herdr drops all tokens when its server restarts, so whatever reports them should report again from a hook or a periodic refresh, or the token sort goes flat.
 
+## Tips
+
+### Order agents by start time
+
+Herdr 0.9.5 has no field for when a pane or agent was created, so report the start time as a token and sort by it. For Claude Code, the process start time is `startedAt` (epoch milliseconds) in `~/.claude/sessions/<pid>.json`, and a hook runs a few processes below the `claude` process. A hook wired to `SessionStart` and `UserPromptSubmit` can report it:
+
+```bash
+#!/bin/bash
+# Report the start time of the claude process above this hook as the `started` token.
+[ -n "${HERDR_PANE_ID:-}" ] || exit 0
+pid=$PPID
+while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+  # Files of exited sessions stay behind and pids are reused, so take only a process named claude.
+  if [ "$(basename -- "$(ps -o comm= -p "$pid")")" = claude ] && [ -f "$HOME/.claude/sessions/$pid.json" ]; then
+    started=$(python3 -c 'import json, sys, time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(json.load(open(sys.argv[1]))["startedAt"] / 1000)))' "$HOME/.claude/sessions/$pid.json") || exit 0
+    herdr pane report-metadata "$HERDR_PANE_ID" --source started-at --token "started=$started" >/dev/null 2>&1
+    exit 0
+  fi
+  pid=$(ps -o ppid= -p "$pid" | tr -d ' ')
+done
+```
+
+Then add a preset that sorts by it, oldest first:
+
+```toml
+[[sort_presets]]
+name = "started"
+sort = [{ token = "started" }, { field = "pane_order" }]
+```
+
+- The value is UTC in a fixed-width form, so comparing it as text gives the time order. Local time would break across a daylight-saving change.
+- Avoid `PreToolUse`: the hook runs synchronously before every tool call, and walking the process tree adds tens of milliseconds each time. A token that is not reported again keeps its value, so reporting once per prompt is enough.
+- A session reopened with `claude --resume`, or restored after a Herdr restart, gets the time it was reopened.
+- Herdr drops the token when its server restarts. Reporting from a hook that fires on every prompt puts it back on the next one.
+- Agents without the token (other agent kinds, or a pane whose hook has not fired yet) sort after the ones that have it.
+
 ## State
 
 `state.json` in the plugin state directory holds only `{"preset": "<name>"}` or `{"preset": null}`. It is written atomically, and only after Herdr accepted the view.
