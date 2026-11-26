@@ -95,7 +95,6 @@ reset
 run presets
 check "without a config Herdr's sorts are listed, then the built-in presets" "$(cat "$tmp/out")" "spaces
 priority
-attention
 recent
 workspace"
 
@@ -112,12 +111,12 @@ fresh; run next
 check "next moves on to Herdr's priority" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
 \"priority\""
 fresh; run next
-check "next moves from Herdr's sorts to the first preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
-\"attention\""
-fresh; run next
-check "next moves to the following preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
+check "next moves from Herdr's sorts to the first preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
 \"recent\""
-fresh; run next; fresh; run next
+fresh; run next
+check "next moves to the following preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"workspace\",$WORKSPACE,$SRC}
+\"workspace\""
+fresh; run next
 check "next wraps around after the last preset to Herdr's spaces" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
 \"spaces\""
 fresh; run restore
@@ -303,7 +302,6 @@ commented"
 run presets
 check "the template holds the built-in presets" "$(cat "$tmp/out")" "spaces
 priority
-attention
 recent
 workspace"
 echo '# my own line' >> "$cfg"

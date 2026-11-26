@@ -152,10 +152,6 @@ fn builtins() -> Vec<Preset> {
         filter: None,
     };
     vec![
-        preset(
-            "attention",
-            vec![field("attention", true), field("state_change_seq", true)],
-        ),
         preset("recent", vec![field("state_change_seq", true)]),
         preset(
             "workspace",
@@ -430,7 +426,7 @@ pub const TEMPLATE: &str = r#"# agent-sort configuration.
 # orders, "spaces" and "priority", are always listed before the presets below;
 # they can be the default too, and no preset can take their names.
 #
-# default = "attention"
+# default = "recent"
 #
 # [keys]: keys of the preset picker popup. Each action takes a key name or a
 # list of key names (fzf-style: ctrl-c, alt-x, shift-tab, f2, or a plain
@@ -457,13 +453,6 @@ pub const TEMPLATE: &str = r#"# agent-sort configuration.
 #
 # An optional filter table is sent to Herdr as-is, for example:
 # filter = { op = "in", field = "status", values = ["blocked", "done"] }
-
-[[sort_presets]]
-name = "attention"
-sort = [
-  { field = "attention", order = "desc" },
-  { field = "state_change_seq", order = "desc" },
-]
 
 [[sort_presets]]
 name = "recent"
@@ -500,14 +489,10 @@ mod tests {
     #[test]
     fn the_builtin_presets_match_the_documented_order() {
         let names: Vec<String> = builtins().iter().map(|p| p.name.clone()).collect();
-        assert_eq!(names, ["attention", "recent", "workspace"]);
+        assert_eq!(names, ["recent", "workspace"]);
+        assert_eq!(builtins()[0].describe(), "state_change_seq desc");
         assert_eq!(
-            builtins()[0].describe(),
-            "attention desc, state_change_seq desc"
-        );
-        assert_eq!(builtins()[1].describe(), "state_change_seq desc");
-        assert_eq!(
-            builtins()[2].describe(),
+            builtins()[1].describe(),
             "workspace_order asc, tab_order asc, pane_order asc"
         );
     }
@@ -515,10 +500,7 @@ mod tests {
     #[test]
     fn herdrs_own_sorts_come_first_and_reproduce_its_orders() {
         let names: Vec<String> = listed(builtins()).iter().map(|p| p.name.clone()).collect();
-        assert_eq!(
-            names,
-            ["spaces", "priority", "attention", "recent", "workspace"]
-        );
+        assert_eq!(names, ["spaces", "priority", "recent", "workspace"]);
         let herdr = herdr_sorts();
         assert_eq!(herdr[0].describe(), "workspace_order asc");
         assert_eq!(herdr[1].describe(), "attention desc, state_change_seq desc");

@@ -38,17 +38,16 @@ The list always starts with Herdr's own two orders, the values of `ui.agent_pane
 | Entry | Sort | What you see |
 |---|---|---|
 | `spaces` | `workspace_order` asc | Herdr's `"spaces"`: agents as workspaces, tabs and panes are arranged |
-| `priority` | `attention` desc, then `state_change_seq` desc | Herdr's `"priority"`: agents that need you first, the most recent change first within each state |
+| `priority` | `attention` desc, then `state_change_seq` desc | Herdr's `"priority"`: agents that need you: blocked first, then done (finished, not looked at yet), then working, then idle you have already seen. Within each, the one whose state changed most recently |
 
-Then come the presets. Without a config file they are these three, so `next` cycles `spaces` → `priority` → `attention` → `recent` → `workspace` → `spaces`:
+Then come the presets. Without a config file they are these two, so `next` cycles `spaces` → `priority` → `recent` → `workspace` → `spaces`:
 
 | Preset | Sort | What you see on top |
 |---|---|---|
-| `attention` | `attention` desc, then `state_change_seq` desc | Agents that need you: blocked first, then done (finished, not looked at yet), then working, then idle you have already seen. Within each, the one whose state changed most recently |
 | `recent` | `state_change_seq` desc | The agent whose state changed most recently (started, finished, got blocked), whatever that state is |
 | `workspace` | `workspace_order`, `tab_order`, `pane_order`, all asc | Herdr's own layout order: workspaces, then tabs, then panes as they are arranged |
 
-`spaces` and `priority` are views the plugin applies, like any preset: they show Herdr's order whatever `ui.agent_panel_sort` is set to, and `restore` puts the chosen one back at every start. `attention` sorts the same way as `priority`. `0` in the popup (or `agent-sort clear`) drops the plugin's view altogether, and the value of `ui.agent_panel_sort` in Herdr's config applies again.
+`spaces` and `priority` are views the plugin applies, like any preset: they show Herdr's order whatever `ui.agent_panel_sort` is set to, and `restore` puts the chosen one back at every start. `0` in the popup (or `agent-sort clear`) drops the plugin's view altogether, and the value of `ui.agent_panel_sort` in Herdr's config applies again.
 
 ## Fields
 
@@ -66,7 +65,7 @@ What each built-in field sorts by (Herdr 0.9.5, `agent.view.set`):
 
 ## Custom presets
 
-Write your own presets when the built-ins are not the order you want: for example a priority token first, then urgency, then recency. Press `e` in the popup to open the config; on first use it is a commented template holding the three built-ins, so you can copy one and change it. When you save and close the editor, the popup reloads the presets and re-applies the active one with its new definition.
+Write your own presets when the built-ins are not the order you want: for example a priority token first, then urgency, then recency. Press `e` in the popup to open the config; on first use it is a commented template holding the two built-in presets, so you can copy one and change it. When you save and close the editor, the popup reloads the presets and re-applies the active one with its new definition.
 
 ## Configuration
 
@@ -108,7 +107,7 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - `filter` is the filter object of the socket API's `agent.view.set`, converted from TOML to JSON untouched; it must be a table.
 - Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset or one of Herdr's two (`spaces`, `priority`).
 - `spaces` and `priority` are taken: a preset with one of those names is a duplicate-name error.
-- A `[[sort_presets]]` list replaces the three built-in presets whole; copy the ones you still want from [Built-in presets](#built-in-presets). `spaces` and `priority` stay in front of your list.
+- A `[[sort_presets]]` list replaces the two built-in presets whole; copy the ones you still want from [Built-in presets](#built-in-presets). `spaces` and `priority` stay in front of your list.
 
 ## Keys in the popup
 
