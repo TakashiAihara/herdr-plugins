@@ -171,10 +171,19 @@ fn current<'a>(cfg: &'a Config, saved: &'a Saved) -> Option<&'a str> {
     }
 }
 
-// The state file as this config reads it: a saved name goes through `Config::resolve`.
+// The state file as this config reads it: a saved name goes through `Config::resolve`. A name
+// that resolved to another is saved under the new one, so the old name is read this way once and
+// a preset given that name later does not take the state over. A failed write changes nothing:
+// the next read resolves it again.
 fn saved(env: &Env, cfg: &Config) -> Saved {
     match state::read(&env.state_path) {
-        Saved::Named(n) => Saved::Named(cfg.resolve(&n).to_string()),
+        Saved::Named(n) => {
+            let name = cfg.resolve(&n);
+            if name != n {
+                let _ = state::write(&env.state_dir, &env.state_path, Some(name));
+            }
+            Saved::Named(name.to_string())
+        }
         other => other,
     }
 }

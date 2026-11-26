@@ -123,10 +123,14 @@ fresh; run restore
 check "restore re-applies a saved Herdr sort like any preset" "$(reqs)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}"
 
 fresh; echo '{"preset":"attention"}' > "$state"; run restore; rc=$?
-check "a saved attention, the old built-in name, restores as priority without a notification" \
-  "$(echo "rc=$rc"; reqs; grep -c 'notification show' "$tmp/calls")" "rc=0
+check "a saved attention, the old built-in name, restores as priority without a notification and is saved as priority" \
+  "$(echo "rc=$rc"; reqs; grep -c 'notification show' "$tmp/calls"; preset_in_state)" "rc=0
 agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
-0"
+0
+\"priority\""
+fresh; printf '{ "preset" : "recent" }' > "$state"; run restore
+check "a saved name that needs no rewriting leaves the state file untouched" "$(cat "$state")" '{ "preset" : "recent" }'
+echo '{"preset":"priority"}' > "$state"
 fresh; run next
 check "next from a saved attention continues after priority" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
 \"recent\""
