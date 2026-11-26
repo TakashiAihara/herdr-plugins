@@ -408,9 +408,7 @@ fn to_json(v: &toml::Value) -> Value {
 pub const TEMPLATE: &str = r#"# agent-sort configuration.
 #
 # default = "<name>": the preset used when no preset was picked yet, or when
-# the picked one is no longer in this file. Uncomment to use. "herdr" is not a
-# preset name: it is the entry after the presets that hands the sort back to
-# Herdr's own ui.agent_panel_sort, and as the default it means no default.
+# the picked one is no longer in this file. Uncomment to use.
 #
 # default = "attention"
 #
