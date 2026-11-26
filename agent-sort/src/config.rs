@@ -469,6 +469,22 @@ pub const TEMPLATE: &str = r#"# agent-sort configuration.
 #
 # An optional filter table is sent to Herdr as-is, for example:
 # filter = { op = "in", field = "status", values = ["blocked", "done"] }
+#
+# Herdr's own two orders are built in, so they are not written here. For
+# reference, as presets they would read as below (Herdr 0.9.5; Herdr may change
+# how it sorts). Their names are taken: to change one, copy it under another
+# name.
+#
+# [[sort_presets]]
+# name = "spaces"
+# sort = [{ field = "workspace_order" }]
+#
+# [[sort_presets]]
+# name = "priority"
+# sort = [
+#   { field = "attention", order = "desc" },
+#   { field = "state_change_seq", order = "desc" },
+# ]
 
 [[sort_presets]]
 name = "recent"
@@ -573,6 +589,27 @@ mod tests {
         let cfg = parse("config.toml", TEMPLATE).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(cfg.presets, listed(builtins()));
         assert_eq!(cfg.default, None);
+    }
+
+    #[test]
+    fn the_templates_commented_sample_of_herdrs_sorts_matches_the_built_in_ones() {
+        // The sample is the comment lines from its first [[sort_presets]] to the first line
+        // that is not a comment; uncommented, and under free names, it must parse to the same
+        // sorts.
+        let sample: String = TEMPLATE
+            .lines()
+            .skip_while(|l| *l != "# [[sort_presets]]")
+            .take_while(|l| l.starts_with('#'))
+            .map(|l| l.trim_start_matches('#').trim_start_matches(' '))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("\"spaces\"", "\"s\"")
+            .replace("\"priority\"", "\"p\"");
+        let cfg = parse("config.toml", &sample).unwrap_or_else(|e| panic!("{e}\n{sample}"));
+        let sorts = |ps: &[Preset]| ps.iter().map(|p| p.sort.clone()).collect::<Vec<_>>();
+        let names: Vec<&str> = cfg.presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["spaces", "priority", "s", "p"]);
+        assert_eq!(sorts(&cfg.presets[2..]), sorts(&herdr_sorts()));
     }
 
     #[test]
