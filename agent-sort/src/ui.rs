@@ -63,11 +63,10 @@ pub struct App {
 
 impl App {
     pub fn new(presets: Vec<Preset>, current: Option<String>, status: String, help: String) -> App {
-        // No current preset means Herdr's own sort: the row after the presets.
-        let cur = match &current {
-            Some(n) => presets.iter().position(|p| &p.name == n).unwrap_or(0),
-            None => presets.len(),
-        };
+        let cur = current
+            .as_ref()
+            .and_then(|n| presets.iter().position(|p| &p.name == n))
+            .unwrap_or(0);
         let mut list = ListState::default();
         list.select((!presets.is_empty()).then_some(cur));
         App {
@@ -84,8 +83,7 @@ impl App {
         if self.presets.is_empty() {
             return;
         }
-        // The Herdr entry is the row after the presets.
-        let last = self.presets.len();
+        let last = self.presets.len() - 1;
         self.cur = (self.cur as isize + delta).clamp(0, last as isize) as usize;
         self.list.select(Some(self.cur));
     }
@@ -191,11 +189,7 @@ pub fn handle_key(app: &mut App, binds: &Binds, key: KeyEvent) -> Action {
         Op::Clear if app.presets.is_empty() => Action::None,
         Op::Select => {
             app.status.clear();
-            if app.cur == app.presets.len() {
-                Action::Clear
-            } else {
-                Action::Apply(app.cur)
-            }
+            Action::Apply(app.cur)
         }
         Op::Clear => {
             app.status.clear();
@@ -258,7 +252,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(area);
 
-    let mut items: Vec<ListItem> = app
+    let items: Vec<ListItem> = app
         .presets
         .iter()
         .map(|p| {
@@ -269,26 +263,16 @@ fn draw(frame: &mut Frame, app: &mut App) {
             ListItem::new(text)
         })
         .collect();
-    // A config that did not load shows an empty list: no Herdr entry either.
-    if !app.presets.is_empty() {
-        let mark = if app.current.is_none() {
-            " (current)"
-        } else {
-            ""
-        };
-        items.push(ListItem::new(format!("{}{mark}", crate::config::HERDR)));
-    }
     let list = List::new(items)
         .block(Block::bordered().title("agent sort"))
         .highlight_symbol("> ")
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(list, list_area, &mut app.list);
 
-    let desc = match app.presets.get(app.cur) {
-        Some(p) => format!("sort: {}", p.describe()),
-        None if app.presets.is_empty() => String::new(),
-        None => "sort: Herdr's ui.agent_panel_sort".to_string(),
-    };
+    let desc = app
+        .presets
+        .get(app.cur)
+        .map_or(String::new(), |p| format!("sort: {}", p.describe()));
     frame.render_widget(
         Paragraph::new(desc).style(Style::new().add_modifier(Modifier::DIM)),
         desc_area,
@@ -461,18 +445,7 @@ mod tests {
             &binds,
             key(KeyCode::Char('j'), KeyModifiers::NONE),
         );
-        assert_eq!(app.cur, 3, "the Herdr entry is the row after the presets");
-        handle_key(
-            &mut app,
-            &binds,
-            key(KeyCode::Char('j'), KeyModifiers::NONE),
-        );
-        assert_eq!(app.cur, 3, "the cursor stays at the last row");
-        handle_key(
-            &mut app,
-            &binds,
-            key(KeyCode::Char('k'), KeyModifiers::NONE),
-        );
+        assert_eq!(app.cur, 2, "the cursor stays at the last row");
         handle_key(
             &mut app,
             &binds,
@@ -500,57 +473,6 @@ mod tests {
         );
         assert_eq!(app.cur, 0);
         assert_eq!(app.list.selected(), Some(0));
-    }
-
-    fn screen(app: &mut App) -> String {
-        let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap_or_else(|e| panic!("{e}"));
-        term.draw(|f| draw(f, app))
-            .unwrap_or_else(|e| panic!("{e}"));
-        let buf = term.backend().buffer();
-        (0..buf.area.height)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    #[test]
-    fn with_no_current_preset_the_herdr_entry_is_current_and_selecting_it_clears() {
-        let mut app = App::new(
-            vec![preset("a", false), preset("b", false)],
-            None,
-            String::new(),
-            String::new(),
-        );
-        assert_eq!(app.cur, 2, "the cursor starts on the Herdr entry");
-        let all = screen(&mut app);
-        assert!(all.contains("herdr (current)"), "{all}");
-        assert!(!all.contains("a (current)"), "{all}");
-        assert!(all.contains("sort: Herdr's ui.agent_panel_sort"), "{all}");
-        assert_eq!(
-            handle_key(&mut app, &binds(), key(KeyCode::Enter, KeyModifiers::NONE)),
-            Action::Clear
-        );
-    }
-
-    #[test]
-    fn with_a_current_preset_the_herdr_entry_is_listed_without_the_mark() {
-        let all = screen(&mut app());
-        assert!(all.contains("recent (current)"), "{all}");
-        assert!(all.contains("herdr"), "{all}");
-        assert!(!all.contains("herdr (current)"), "{all}");
-    }
-
-    #[test]
-    fn a_broken_config_list_has_no_herdr_entry() {
-        let mut empty = App::new(vec![], None, "bad config".into(), String::new());
-        assert_eq!(empty.list.selected(), None);
-        let all = screen(&mut empty);
-        assert!(!all.contains("herdr"), "{all}");
-        assert!(!all.contains("sort:"), "{all}");
     }
 
     #[test]
@@ -742,7 +664,7 @@ mod tests {
         std::fs::create_dir_all(&cfg_dir).unwrap_or_else(|e| panic!("{e}"));
         std::fs::write(
             cfg_dir.join("config.toml"),
-            "default = \"x\"\n[keys]\nselect = \"ctrl-nonsense\"\n[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]",
+            "[keys]\nselect = \"ctrl-nonsense\"\n[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]",
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let env = Env::test(

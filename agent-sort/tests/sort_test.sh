@@ -92,10 +92,9 @@ check "probe answers ok without touching Herdr" "$(cat "$tmp/out"; reqs; cat "$t
 
 reset
 run presets
-check "without a config the built-in presets are listed, then the Herdr entry" "$(cat "$tmp/out")" "attention
+check "without a config the built-in presets are listed" "$(cat "$tmp/out")" "attention
 recent
-workspace
-herdr"
+workspace"
 
 reset
 run next; rc=$?
@@ -109,23 +108,9 @@ check "next tells the user which preset is active" "$(grep -c 'notification show
 fresh; run next
 check "next moves to the following preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
 \"recent\""
-fresh; run next; fresh; run next; rc=$?
-check "next after the last preset hands the view back to Herdr and says so" \
-  "$(echo "rc=$rc"; reqs; preset_in_state; grep -c 'notification show.*cleared' "$tmp/calls")" "rc=0
-agent.view.clear {$SRC}
-null
-1"
-fresh; run restore; rc=$?
-check "restore after next reached the Herdr entry sends nothing" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
-null"
-fresh; run next
-check "next from the Herdr entry wraps to the first preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
+fresh; run next; fresh; run next
+check "next wraps around after the last preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
 \"attention\""
-
-fresh; run set herdr; rc=$?
-check "set herdr clears like the Herdr entry" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
-agent.view.clear {$SRC}
-null"
 
 fresh; run set workspace; rc=$?
 check "set applies the named preset" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
@@ -188,9 +173,8 @@ name = "repo"
 sort = [{ token = "repo" }]
 TOML
 run presets
-check "a config replaces the built-in presets and keeps the Herdr entry" "$(cat "$tmp/out")" "prio
-repo
-herdr"
+check "a config replaces the built-in presets" "$(cat "$tmp/out")" "prio
+repo"
 run restore; rc=$?
 check "restore with no state applies the config default, mixing tokens and fields, order defaulting to asc, filter passed through" \
   "$(echo "rc=$rc"; reqs)" \
@@ -241,9 +225,6 @@ sort = [{ field = "agent" }]
 [[sort_presets]]
 name = "x"
 sort = [{ field = "seen" }]' 'duplicate'
-bad "a preset named like the Herdr entry is a config error" '[[sort_presets]]
-name = "herdr"
-sort = [{ field = "agent" }]' 'preset name "herdr" is reserved'
 bad "a default that names no preset is a config error" 'default = "y"
 [[sort_presets]]
 name = "x"
@@ -306,8 +287,7 @@ commented"
 run presets
 check "the template holds the built-in presets" "$(cat "$tmp/out")" "attention
 recent
-workspace
-herdr"
+workspace"
 echo '# my own line' >> "$cfg"
 cp "$cfg" "$tmp/template"
 fresh; EDITOR=true VISUAL= run edit
