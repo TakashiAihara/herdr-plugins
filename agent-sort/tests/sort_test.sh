@@ -122,6 +122,23 @@ check "next wraps around after the last preset to Herdr's spaces" "$(reqs; prese
 fresh; run restore
 check "restore re-applies a saved Herdr sort like any preset" "$(reqs)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}"
 
+fresh; echo '{"preset":"attention"}' > "$state"; run restore; rc=$?
+check "a saved attention, the old built-in name, restores as priority without a notification" \
+  "$(echo "rc=$rc"; reqs; grep -c 'notification show' "$tmp/calls")" "rc=0
+agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
+0"
+fresh; run next
+check "next from a saved attention continues after priority" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
+\"recent\""
+fresh; run set attention; rc=$?
+check "set attention applies priority" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
+agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
+\"priority\""
+fresh; rm -f "$state"; echo 'default = "attention"' > "$cfg"; run restore; rc=$?
+check "a config that only sets default = attention still loads and means priority" "$(echo "rc=$rc"; reqs)" "rc=0
+agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}"
+rm -f "$cfg"
+
 fresh; run set workspace; rc=$?
 check "set applies the named preset" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
 agent.view.set {\"label\":\"workspace\",$WORKSPACE,$SRC}
@@ -239,7 +256,7 @@ name = "x"
 sort = [{ field = "seen" }]' 'duplicate'
 bad "a preset named like one of Herdr's sorts is a config error" '[[sort_presets]]
 name = "priority"
-sort = [{ field = "agent" }]' 'duplicate preset name "priority"'
+sort = [{ field = "agent" }]' 'preset name "priority" is taken by Herdr'
 bad "a default that names no preset is a config error" 'default = "y"
 [[sort_presets]]
 name = "x"
@@ -309,16 +326,23 @@ cp "$cfg" "$tmp/template"
 fresh; EDITOR=true VISUAL= run edit
 check "edit leaves an existing config alone" "$(cmp -s "$cfg" "$tmp/template" && echo same)" "same"
 
+fresh; echo '{"preset":"attention"}' > "$state"; EDITOR=true VISUAL= run edit; rc=$?
+check "edit with a saved attention re-applies priority instead of reporting it gone" \
+  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*gone' "$tmp/calls"; [ -e "$state" ] && echo "state kept")" "rc=0
+agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
+0
+state kept"
+
 reset
-echo '{"preset":"attention"}' > "$state"
+echo '{"preset":"mine"}' > "$state"
 cat > "$tmp/editor" <<'SH'
 #!/bin/sh
-printf '[[sort_presets]]\nname = "attention"\nsort = [{ token = "prio", order = "desc" }]\n' > "$1"
+printf '[[sort_presets]]\nname = "mine"\nsort = [{ token = "prio", order = "desc" }]\n' > "$1"
 SH
 chmod +x "$tmp/editor"
 VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit runs \$VISUAL over \$EDITOR, then reapplies the active preset from the new config" "$(echo "rc=$rc"; reqs)" "rc=0
-agent.view.set {\"label\":\"attention\",\"sort\":[{\"field\":{\"token\":\"prio\"},\"order\":\"desc\"}],$SRC}"
+agent.view.set {\"label\":\"mine\",\"sort\":[{\"field\":{\"token\":\"prio\"},\"order\":\"desc\"}],$SRC}"
 
 fresh
 cat > "$tmp/editor" <<'SH'
@@ -327,7 +351,7 @@ printf '[[sort_presets]]\nname = "other"\nsort = [{ field = "agent" }]\n' > "$1"
 SH
 VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit that drops the active preset with no default takes our view down and says so" \
-  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*attention.*gone' "$tmp/calls"; [ -e "$state" ] && echo "state kept" || echo "state removed")" "rc=0
+  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*mine.*gone' "$tmp/calls"; [ -e "$state" ] && echo "state kept" || echo "state removed")" "rc=0
 agent.view.clear {$SRC}
 1
 state removed"
@@ -341,14 +365,14 @@ VISUAL=false run edit; rc=$?
 check "an editor that fails is an error and applies nothing" "$(echo "rc=$rc"; reqs; grep -c 'editor' "$tmp/err")" "rc=1
 1"
 
-fresh; echo '{"preset":"attention"}' > "$state"
+fresh; echo '{"preset":"mine"}' > "$state"
 cat > "$tmp/editor" <<'SH'
 #!/bin/sh
 printf 'default = "other"\n[[sort_presets]]\nname = "first"\nsort = [{ field = "seen" }]\n[[sort_presets]]\nname = "other"\nsort = [{ field = "agent" }]\n' > "$1"
 SH
 VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit that drops the active preset applies the default, says both, and forgets the name" \
-  "$(echo "rc=$rc"; reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show.*attention.*gone.*other' "$tmp/calls"; preset_in_state)" "rc=0
+  "$(echo "rc=$rc"; reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show.*mine.*gone.*other' "$tmp/calls"; preset_in_state)" "rc=0
 \"label\":\"other\"
 1
 no state"

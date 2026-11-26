@@ -171,6 +171,14 @@ fn current<'a>(cfg: &'a Config, saved: &'a Saved) -> Option<&'a str> {
     }
 }
 
+// The state file as this config reads it: a saved name goes through `Config::resolve`.
+fn saved(env: &Env, cfg: &Config) -> Saved {
+    match state::read(&env.state_path) {
+        Saved::Named(n) => Saved::Named(cfg.resolve(&n).to_string()),
+        other => other,
+    }
+}
+
 // Sends the set request, then saves the preset now that Herdr accepted it.
 fn apply_raw(env: &Env, preset: &Preset) -> Res<()> {
     env.call(&request::set(&env.plugin_id, preset))?;
@@ -216,13 +224,13 @@ fn next_preset<'a>(cfg: &'a Config, saved: &Saved) -> &'a Preset {
 
 fn next(env: &Env) -> Res<()> {
     let cfg = env.config().map_err(|e| notified(env, e))?;
-    let saved = state::read(&env.state_path);
+    let saved = saved(env, &cfg);
     apply(env, next_preset(&cfg, &saved))
 }
 
 fn set(env: &Env, name: &str) -> Res<()> {
     let cfg = env.config().map_err(|e| notified(env, e))?;
-    let Some(preset) = cfg.preset(name) else {
+    let Some(preset) = cfg.preset(cfg.resolve(name)) else {
         return Err(notified(env, format!("unknown preset {name:?}")));
     };
     apply(env, preset)
@@ -302,7 +310,7 @@ fn restore_plan<'a>(cfg: &'a Config, saved: &Saved) -> (Option<&'a Preset>, Opti
 // state file is removed, then the config default is applied when there is one.
 fn restore(env: &Env) -> Res<()> {
     let cfg = env.config().map_err(|e| notified(env, e))?;
-    let saved = state::read(&env.state_path);
+    let saved = saved(env, &cfg);
     let (preset, warn) = restore_plan(&cfg, &saved);
     if let Some(w) = warn {
         env.notify_error(&w);
@@ -383,7 +391,7 @@ fn edit_flow(env: &Env) -> Res<EditResult> {
     }
     run_editor(env)?;
     let cfg = env.config()?;
-    let saved = state::read(&env.state_path);
+    let saved = saved(env, &cfg);
     // current() falls back to the default for a dropped state name; report the drop itself.
     let dropped = match &saved {
         Saved::Named(n) if cfg.preset(n).is_none() => Some(n.clone()),

@@ -95,6 +95,17 @@ impl Config {
         self.presets.iter().find(|p| p.name == name)
     }
 
+    // The name to look up for a name from a config default, a saved state or `set`: "attention"
+    // was a built-in preset with the sort Herdr's "priority" has, so where no preset carries
+    // that name anymore it means "priority".
+    pub fn resolve<'a>(&self, name: &'a str) -> &'a str {
+        if name == "attention" && self.preset(name).is_none() {
+            "priority"
+        } else {
+            name
+        }
+    }
+
     pub fn index(&self, name: &str) -> Option<usize> {
         self.presets.iter().position(|p| p.name == name)
     }
@@ -213,20 +224,23 @@ fn parse(path: &str, text: &str) -> Result<Config, String> {
             if items.is_empty() {
                 return Err(format!("{path}: sort_presets must not be empty"));
             }
-            let presets = listed(
-                items
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| preset(path, i + 1, v))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
-            // Herdr's sorts are in the list, so a preset named like one is a duplicate too.
+            let presets = items
+                .iter()
+                .enumerate()
+                .map(|(i, v)| preset(path, i + 1, v))
+                .collect::<Result<Vec<_>, _>>()?;
             for (i, p) in presets.iter().enumerate() {
+                if herdr_sorts().iter().any(|h| h.name == p.name) {
+                    return Err(format!(
+                        "{path}: preset name {:?} is taken by Herdr's own sort, which is always listed; rename the preset",
+                        p.name
+                    ));
+                }
                 if presets[..i].iter().any(|o| o.name == p.name) {
                     return Err(format!("{path}: duplicate preset name {:?}", p.name));
                 }
             }
-            presets
+            listed(presets)
         }
         Some(v) => {
             return Err(format!(
@@ -236,17 +250,19 @@ fn parse(path: &str, text: &str) -> Result<Config, String> {
         }
     };
 
-    if let Some(d) = &default {
-        if !presets.iter().any(|p| &p.name == d) {
-            return Err(format!("{path}: default {d:?} is not a sort preset"));
-        }
-    }
-
-    Ok(Config {
-        default,
+    let mut cfg = Config {
+        default: None,
         presets,
         keys: doc.get("keys").cloned(),
-    })
+    };
+    if let Some(d) = default {
+        let d = cfg.resolve(&d).to_string();
+        if cfg.preset(&d).is_none() {
+            return Err(format!("{path}: default {d:?} is not a sort preset"));
+        }
+        cfg.default = Some(d);
+    }
+    Ok(cfg)
 }
 
 fn preset(path: &str, i: usize, v: &toml::Value) -> Result<Preset, String> {
@@ -508,16 +524,36 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_named_like_one_of_herdrs_sorts_is_a_duplicate() {
+    fn a_preset_named_like_one_of_herdrs_sorts_is_an_error_saying_the_name_is_taken() {
         for name in ["spaces", "priority"] {
             let e = err(&format!(
                 "[[sort_presets]]\nname = \"{name}\"\nsort = [{{ field = \"agent\" }}]"
             ));
             assert!(
-                e.contains(&format!("duplicate preset name \"{name}\"")),
+                e.contains(&format!(
+                    "preset name \"{name}\" is taken by Herdr's own sort"
+                )),
                 "{name}: {e}"
             );
         }
+        let e = err("[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]\n[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"seen\" }]");
+        assert!(e.contains("duplicate preset name \"x\""), "{e}");
+    }
+
+    #[test]
+    fn the_old_builtin_name_attention_means_priority_unless_a_preset_carries_it() {
+        let cfg = parse("config.toml", "default = \"attention\"").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.default.as_deref(), Some("priority"));
+        assert_eq!(cfg.resolve("attention"), "priority");
+        assert_eq!(cfg.resolve("recent"), "recent");
+        assert_eq!(cfg.resolve("gone"), "gone");
+        let own = parse(
+            "config.toml",
+            "default = \"attention\"\n[[sort_presets]]\nname = \"attention\"\nsort = [{ field = \"agent\" }]",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(own.default.as_deref(), Some("attention"));
+        assert_eq!(own.resolve("attention"), "attention");
     }
 
     #[test]
@@ -584,7 +620,7 @@ sort = [{ token = "repo" }]
             cfg.presets[2].filter,
             Some(json!({"op": "in", "field": "status", "values": ["blocked", "done"]}))
         );
-        assert_eq!(cfg.presets[1].filter, None);
+        assert_eq!(cfg.presets[3].filter, None);
     }
 
     #[test]

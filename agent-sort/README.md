@@ -47,7 +47,7 @@ Then come the presets. Without a config file they are these two, so `next` cycle
 | `recent` | `state_change_seq` desc | The agent whose state changed most recently (started, finished, got blocked), whatever that state is |
 | `workspace` | `workspace_order`, `tab_order`, `pane_order`, all asc | Herdr's own layout order: workspaces, then tabs, then panes as they are arranged |
 
-`spaces` and `priority` are views the plugin applies, like any preset: they show Herdr's order whatever `ui.agent_panel_sort` is set to, and `restore` puts the chosen one back at every start. `0` in the popup (or `agent-sort clear`) drops the plugin's view altogether, and the value of `ui.agent_panel_sort` in Herdr's config applies again.
+`spaces` and `priority` are views the plugin applies, like any preset: they show Herdr's order (as Herdr 0.9.5 sorts it) whatever `ui.agent_panel_sort` is set to, and `restore` puts the chosen one back at every start. `0` in the popup (or `agent-sort clear`) drops the plugin's view altogether, and the value of `ui.agent_panel_sort` in Herdr's config applies again.
 
 ## Fields
 
@@ -106,7 +106,8 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - Token values compare as strings, so pad to the same number of digits whenever values can have different lengths (for 1–12 write `01`–`12`, or `"10"` sorts before `"3"`).
 - `filter` is the filter object of the socket API's `agent.view.set`, converted from TOML to JSON untouched; it must be a table.
 - Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset or one of Herdr's two (`spaces`, `priority`).
-- `spaces` and `priority` are taken: a preset with one of those names is a duplicate-name error.
+- `spaces` and `priority` are taken: a preset with one of those names is a config error; rename it.
+- `attention` used to be a built-in preset with the same sort as `priority`. Where no preset of yours has that name, `default = "attention"`, a saved `attention` and `agent-sort set attention` mean `priority`.
 - A `[[sort_presets]]` list replaces the two built-in presets whole; copy the ones you still want from [Built-in presets](#built-in-presets). `spaces` and `priority` stay in front of your list.
 
 ## Keys in the popup
