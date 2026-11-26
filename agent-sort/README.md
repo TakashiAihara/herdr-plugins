@@ -1,6 +1,6 @@
 # agent-sort
 
-Switch the sort of Herdr's built-in Agents view between named presets. A preset is a list of sort keys — Herdr's built-in fields like `attention`, or metadata tokens reported on a pane, like `prio` — plus an optional filter, all from a small TOML config. `next` cycles the presets, the `open` action opens a popup picker, and the last preset is re-applied when Herdr starts.
+Switch the sort of Herdr's built-in Agents view between named presets. A preset is a list of sort keys — Herdr's built-in fields like `attention`, or metadata tokens reported on a pane, like `prio` — plus an optional filter, all from a small TOML config. Herdr's own two orders, `spaces` and `priority`, are always in the list next to the presets. `next` cycles the list, the `open` action opens a popup picker, and the last choice is re-applied when Herdr starts.
 
 ## Requirements
 
@@ -33,7 +33,14 @@ description = "pick an agent sort"
 
 ## Built-in presets
 
-Without a config file, `next` cycles these three, in this order:
+The list always starts with Herdr's own two orders, the values of `ui.agent_panel_sort`; a config cannot remove or redefine them:
+
+| Entry | Sort | What you see |
+|---|---|---|
+| `spaces` | `workspace_order` asc | Herdr's `"spaces"`: agents as workspaces, tabs and panes are arranged |
+| `priority` | `attention` desc, then `state_change_seq` desc | Herdr's `"priority"`: agents that need you first, the most recent change first within each state |
+
+Then come the presets. Without a config file they are these three, so `next` cycles `spaces` → `priority` → `attention` → `recent` → `workspace` → `spaces`:
 
 | Preset | Sort | What you see on top |
 |---|---|---|
@@ -41,7 +48,7 @@ Without a config file, `next` cycles these three, in this order:
 | `recent` | `state_change_seq` desc | The agent whose state changed most recently (started, finished, got blocked), whatever that state is |
 | `workspace` | `workspace_order`, `tab_order`, `pane_order`, all asc | Herdr's own layout order: workspaces, then tabs, then panes as they are arranged |
 
-`0` in the popup (or clearing) drops the plugin's sort, and Herdr's own `ui.agent_panel_sort` applies again.
+`spaces` and `priority` are views the plugin applies, like any preset: they show Herdr's order whatever `ui.agent_panel_sort` is set to, and `restore` puts the chosen one back at every start. `attention` sorts the same way as `priority`. `0` in the popup (or `agent-sort clear`) drops the plugin's view altogether, and the value of `ui.agent_panel_sort` in Herdr's config applies again.
 
 ## Fields
 
@@ -99,8 +106,9 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - A token name is 1–32 of `[A-Za-z0-9_-]`, the same rule Herdr uses for `pane report-metadata --token`.
 - Token values compare as strings, so pad to the same number of digits whenever values can have different lengths (for 1–12 write `01`–`12`, or `"10"` sorts before `"3"`).
 - `filter` is the filter object of the socket API's `agent.view.set`, converted from TOML to JSON untouched; it must be a table.
-- Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset.
-- A `[[sort_presets]]` list replaces the built-ins whole; copy the ones you still want from [Built-in presets](#built-in-presets).
+- Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset or one of Herdr's two (`spaces`, `priority`).
+- `spaces` and `priority` are taken: a preset with one of those names is a duplicate-name error.
+- A `[[sort_presets]]` list replaces the three built-in presets whole; copy the ones you still want from [Built-in presets](#built-in-presets). `spaces` and `priority` stay in front of your list.
 
 ## Keys in the popup
 
