@@ -225,6 +225,15 @@ fresh; echo '{"preset":"gone"}' > "$state"; run next
 check "next from a preset the config no longer has continues from the default" "$(reqs | grep -o '"label":"[a-z]*"'; preset_in_state)" "\"label\":\"repo\"
 \"repo\""
 
+reset; echo 'sort_presets = []' > "$cfg"
+run presets; rc=$?
+check "an empty sort_presets list leaves only Herdr's sorts" "$(echo "rc=$rc"; cat "$tmp/out")" "rc=0
+spaces
+priority"
+run next; fresh; run next; fresh; run next
+check "next cycles through Herdr's two sorts alone and wraps to spaces" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
+\"spaces\""
+
 bad() { # bad <description> <config> <text the error must contain>
   reset; echo '{"preset":"x"}' > "$state"; printf '%s\n' "$2" > "$cfg"
   for cmd in next restore "set x"; do
