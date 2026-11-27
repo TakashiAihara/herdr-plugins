@@ -95,6 +95,25 @@ impl Config {
         self.presets.iter().find(|p| p.name == name)
     }
 
+    // The name to look up for a name from a config default or `set`. "attention" and "workspace"
+    // were built-in presets: the first sorted exactly like Herdr's "priority", the second by tab
+    // and pane number, the layout order "spaces" shows up to panes split out of creation order.
+    // A config could name them as the default without defining them; where no preset carries the
+    // name it means Herdr's sort. A saved state is not read this way: an old name there goes the
+    // way of any preset gone from the config.
+    pub fn resolve<'a>(&self, name: &'a str) -> &'a str {
+        let herdr = match name {
+            "attention" => "priority",
+            "workspace" => "spaces",
+            _ => return name,
+        };
+        if self.preset(name).is_none() {
+            herdr
+        } else {
+            name
+        }
+    }
+
     pub fn index(&self, name: &str) -> Option<usize> {
         self.presets.iter().position(|p| p.name == name)
     }
@@ -116,7 +135,14 @@ impl Config {
     }
 }
 
-fn builtins() -> Vec<Preset> {
+// Herdr's own two orders (`ui.agent_panel_sort`), always first in the list: a config replaces the
+// presets after them, never these. Each is the view that reproduces Herdr's order whatever the
+// config says (Herdr 0.9.5 `apply_agent_view`): "priority" is Herdr's own two keys, and "spaces"
+// is the order agents are collected in — workspaces, then tabs, then panes by their place in the
+// layout — which a stable sort on the workspace alone leaves as it is. Adding `tab_order` and
+// `pane_order` would not be the same order: a pane's number is the order it was created in, so a
+// pane split off an earlier one sits before later-numbered panes on screen and in "spaces".
+fn herdr_sorts() -> Vec<Preset> {
     let field = SortEntry::field;
     let preset = |name: &str, sort: Vec<SortEntry>| Preset {
         name: name.to_string(),
@@ -124,26 +150,35 @@ fn builtins() -> Vec<Preset> {
         filter: None,
     };
     vec![
+        preset("spaces", vec![field("workspace_order", false)]),
         preset(
-            "attention",
+            "priority",
             vec![field("attention", true), field("state_change_seq", true)],
         ),
-        preset("recent", vec![field("state_change_seq", true)]),
-        preset(
-            "workspace",
-            vec![
-                field("workspace_order", false),
-                field("tab_order", false),
-                field("pane_order", false),
-            ],
-        ),
     ]
+}
+
+// Herdr's sorts, then the given presets.
+fn listed(rest: Vec<Preset>) -> Vec<Preset> {
+    let mut all = herdr_sorts();
+    all.extend(rest);
+    all
+}
+
+fn builtins() -> Vec<Preset> {
+    let field = SortEntry::field;
+    let preset = |name: &str, sort: Vec<SortEntry>| Preset {
+        name: name.to_string(),
+        sort,
+        filter: None,
+    };
+    vec![preset("recent", vec![field("state_change_seq", true)])]
 }
 
 fn builtin() -> Config {
     Config {
         default: None,
-        presets: builtins(),
+        presets: listed(builtins()),
         keys: None,
     }
 }
@@ -184,7 +219,7 @@ fn parse(path: &str, text: &str) -> Result<Config, String> {
     };
 
     let presets = match doc.get("sort_presets") {
-        None => builtins(),
+        None => listed(builtins()),
         Some(toml::Value::Array(items)) => {
             if items.is_empty() {
                 return Err(format!("{path}: sort_presets must not be empty"));
@@ -195,11 +230,17 @@ fn parse(path: &str, text: &str) -> Result<Config, String> {
                 .map(|(i, v)| preset(path, i + 1, v))
                 .collect::<Result<Vec<_>, _>>()?;
             for (i, p) in presets.iter().enumerate() {
+                if herdr_sorts().iter().any(|h| h.name == p.name) {
+                    return Err(format!(
+                        "{path}: preset name {:?} is taken by Herdr's own sort, which is always listed; rename the preset",
+                        p.name
+                    ));
+                }
                 if presets[..i].iter().any(|o| o.name == p.name) {
                     return Err(format!("{path}: duplicate preset name {:?}", p.name));
                 }
             }
-            presets
+            listed(presets)
         }
         Some(v) => {
             return Err(format!(
@@ -209,17 +250,19 @@ fn parse(path: &str, text: &str) -> Result<Config, String> {
         }
     };
 
-    if let Some(d) = &default {
-        if !presets.iter().any(|p| &p.name == d) {
-            return Err(format!("{path}: default {d:?} is not a sort preset"));
-        }
-    }
-
-    Ok(Config {
-        default,
+    let mut cfg = Config {
+        default: None,
         presets,
         keys: doc.get("keys").cloned(),
-    })
+    };
+    if let Some(d) = default {
+        let d = cfg.resolve(&d).to_string();
+        if cfg.preset(&d).is_none() {
+            return Err(format!("{path}: default {d:?} is not a sort preset"));
+        }
+        cfg.default = Some(d);
+    }
+    Ok(cfg)
 }
 
 fn preset(path: &str, i: usize, v: &toml::Value) -> Result<Preset, String> {
@@ -395,9 +438,11 @@ fn to_json(v: &toml::Value) -> Value {
 pub const TEMPLATE: &str = r#"# agent-sort configuration.
 #
 # default = "<name>": the preset used when no preset was picked yet, or when
-# the picked one is no longer in this file. Uncomment to use.
+# the picked one is no longer in this file. Uncomment to use. Herdr's own two
+# orders, "spaces" and "priority", are always listed before the presets below;
+# they can be the default too, and no preset can take their names.
 #
-# default = "attention"
+# default = "recent"
 #
 # [keys]: keys of the preset picker popup. Each action takes a key name or a
 # list of key names (fzf-style: ctrl-c, alt-x, shift-tab, f2, or a plain
@@ -424,25 +469,26 @@ pub const TEMPLATE: &str = r#"# agent-sort configuration.
 #
 # An optional filter table is sent to Herdr as-is, for example:
 # filter = { op = "in", field = "status", values = ["blocked", "done"] }
-
-[[sort_presets]]
-name = "attention"
-sort = [
-  { field = "attention", order = "desc" },
-  { field = "state_change_seq", order = "desc" },
-]
+#
+# Herdr's own two orders are built in, so they are not written here. For
+# reference, as presets they would read as below (Herdr 0.9.5; Herdr may change
+# how it sorts). Their names are taken and the two stay listed: for a variation
+# of one, copy it under another name.
+#
+# [[sort_presets]]
+# name = "spaces"
+# sort = [{ field = "workspace_order" }]
+#
+# [[sort_presets]]
+# name = "priority"
+# sort = [
+#   { field = "attention", order = "desc" },
+#   { field = "state_change_seq", order = "desc" },
+# ]
 
 [[sort_presets]]
 name = "recent"
 sort = [{ field = "state_change_seq", order = "desc" }]
-
-[[sort_presets]]
-name = "workspace"
-sort = [
-  { field = "workspace_order" },
-  { field = "tab_order" },
-  { field = "pane_order" },
-]
 "#;
 
 #[cfg(test)]
@@ -459,7 +505,7 @@ mod tests {
         let dir = crate::testutil::unique_dir("missing");
         let cfg =
             load(&dir.join("config.toml").to_string_lossy()).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(cfg.presets, builtins());
+        assert_eq!(cfg.presets, listed(builtins()));
         assert_eq!(cfg.default, None);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -467,23 +513,108 @@ mod tests {
     #[test]
     fn the_builtin_presets_match_the_documented_order() {
         let names: Vec<String> = builtins().iter().map(|p| p.name.clone()).collect();
-        assert_eq!(names, ["attention", "recent", "workspace"]);
+        assert_eq!(names, ["recent"]);
+        assert_eq!(builtins()[0].describe(), "state_change_seq desc");
+    }
+
+    #[test]
+    fn herdrs_own_sorts_come_first_and_reproduce_its_orders() {
+        let names: Vec<String> = listed(builtins()).iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names, ["spaces", "priority", "recent"]);
+        let herdr = herdr_sorts();
+        assert_eq!(herdr[0].sort, [SortEntry::field("workspace_order", false)]);
         assert_eq!(
-            builtins()[0].describe(),
-            "attention desc, state_change_seq desc"
+            herdr[1].sort,
+            [
+                SortEntry::field("attention", true),
+                SortEntry::field("state_change_seq", true)
+            ]
         );
-        assert_eq!(builtins()[1].describe(), "state_change_seq desc");
-        assert_eq!(
-            builtins()[2].describe(),
-            "workspace_order asc, tab_order asc, pane_order asc"
-        );
+        assert_eq!(herdr[0].describe(), "workspace_order asc");
+        assert_eq!(herdr[1].describe(), "attention desc, state_change_seq desc");
+        assert!(herdr.iter().all(|p| p.filter.is_none()));
+    }
+
+    #[test]
+    fn a_preset_named_like_one_of_herdrs_sorts_is_an_error_saying_the_name_is_taken() {
+        for name in ["spaces", "priority"] {
+            let e = err(&format!(
+                "[[sort_presets]]\nname = \"{name}\"\nsort = [{{ field = \"agent\" }}]"
+            ));
+            assert!(
+                e.contains(&format!(
+                    "preset name \"{name}\" is taken by Herdr's own sort"
+                )),
+                "{name}: {e}"
+            );
+        }
+        let e = err("[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]\n[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"seen\" }]");
+        assert!(e.contains("duplicate preset name \"x\""), "{e}");
+    }
+
+    #[test]
+    fn the_old_builtin_name_attention_means_priority_unless_a_preset_carries_it() {
+        let cfg = parse("config.toml", "default = \"attention\"").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.default.as_deref(), Some("priority"));
+        assert_eq!(cfg.resolve("attention"), "priority");
+        assert_eq!(cfg.resolve("recent"), "recent");
+        assert_eq!(cfg.resolve("workspace"), "spaces");
+        let ws = parse("config.toml", "default = \"workspace\"").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(ws.default.as_deref(), Some("spaces"));
+        let own_ws = parse(
+            "config.toml",
+            "default = \"workspace\"\n[[sort_presets]]\nname = \"workspace\"\nsort = [{ field = \"agent\" }]",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(own_ws.default.as_deref(), Some("workspace"));
+        assert_eq!(cfg.resolve("gone"), "gone");
+        let own = parse(
+            "config.toml",
+            "default = \"attention\"\n[[sort_presets]]\nname = \"attention\"\nsort = [{ field = \"agent\" }]",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(own.default.as_deref(), Some("attention"));
+        assert_eq!(own.resolve("attention"), "attention");
+    }
+
+    #[test]
+    fn herdrs_sorts_can_be_the_default_with_or_without_sort_presets() {
+        let cfg = parse("config.toml", "default = \"spaces\"").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.default.as_deref(), Some("spaces"));
+        let cfg = parse(
+            "config.toml",
+            "default = \"priority\"\n[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(cfg.default.as_deref(), Some("priority"));
     }
 
     #[test]
     fn the_template_parses_to_exactly_the_builtins() {
         let cfg = parse("config.toml", TEMPLATE).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(cfg.presets, builtins());
+        assert_eq!(cfg.presets, listed(builtins()));
         assert_eq!(cfg.default, None);
+    }
+
+    #[test]
+    fn the_templates_commented_sample_of_herdrs_sorts_matches_the_built_in_ones() {
+        // The sample is the comment lines from its first [[sort_presets]] to the first line
+        // that is not a comment; uncommented, and under free names, it must parse to the same
+        // sorts.
+        let sample: String = TEMPLATE
+            .lines()
+            .skip_while(|l| *l != "# [[sort_presets]]")
+            .take_while(|l| l.starts_with('#'))
+            .map(|l| l.trim_start_matches('#').trim_start_matches(' '))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("\"spaces\"", "\"s\"")
+            .replace("\"priority\"", "\"p\"");
+        let cfg = parse("config.toml", &sample).unwrap_or_else(|e| panic!("{e}\n{sample}"));
+        let sorts = |ps: &[Preset]| ps.iter().map(|p| p.sort.clone()).collect::<Vec<_>>();
+        let names: Vec<&str> = cfg.presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["spaces", "priority", "s", "p"]);
+        assert_eq!(sorts(&cfg.presets[2..]), sorts(&herdr_sorts()));
     }
 
     #[test]
@@ -521,13 +652,17 @@ sort = [{ token = "repo" }]
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(cfg.default.as_deref(), Some("prio"));
         let names: Vec<&str> = cfg.presets.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["prio", "repo"]);
-        assert_eq!(cfg.presets[0].describe(), "prio desc, attention asc");
         assert_eq!(
-            cfg.presets[0].filter,
+            names,
+            ["spaces", "priority", "prio", "repo"],
+            "the config replaces the presets after Herdr's sorts"
+        );
+        assert_eq!(cfg.presets[2].describe(), "prio desc, attention asc");
+        assert_eq!(
+            cfg.presets[2].filter,
             Some(json!({"op": "in", "field": "status", "values": ["blocked", "done"]}))
         );
-        assert_eq!(cfg.presets[1].filter, None);
+        assert_eq!(cfg.presets[3].filter, None);
     }
 
     #[test]
@@ -663,7 +798,7 @@ sort = [{ token = "repo" }]
             "default = \"recent\"\n[keys]\nup = \"ctrl-p\"",
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(cfg.presets, builtins());
+        assert_eq!(cfg.presets, listed(builtins()));
         assert_eq!(cfg.default.as_deref(), Some("recent"));
     }
 }

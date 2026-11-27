@@ -1,6 +1,6 @@
 # agent-sort
 
-Switch the sort of Herdr's built-in Agents view between named presets. A preset is a list of sort keys — Herdr's built-in fields like `attention`, or metadata tokens reported on a pane, like `prio` — plus an optional filter, all from a small TOML config. `next` cycles the presets, the `open` action opens a popup picker, and the last preset is re-applied when Herdr starts.
+Switch the sort of Herdr's built-in Agents view between named presets. A preset is a list of sort keys — Herdr's built-in fields like `attention`, or metadata tokens reported on a pane, like `prio` — plus an optional filter, all from a small TOML config. Herdr's own two orders, `spaces` and `priority`, are always in the list next to the presets. `next` cycles the list, the `open` action opens a popup picker, and the last choice is re-applied when Herdr starts.
 
 ## Requirements
 
@@ -33,15 +33,20 @@ description = "pick an agent sort"
 
 ## Built-in presets
 
-Without a config file, `next` cycles these three, in this order:
+The list always starts with Herdr's own two orders, the values of `ui.agent_panel_sort`; a config cannot remove or redefine them:
+
+| Entry | Sort | What you see |
+|---|---|---|
+| `spaces` | `workspace_order` asc | Herdr's `"spaces"`: agents as workspaces, tabs and panes are arranged. Only the workspace is a sort key, so tabs and panes keep the order Herdr lists them in |
+| `priority` | `attention` desc, then `state_change_seq` desc | Herdr's `"priority"`: agents that need you: blocked first, then done (finished, not looked at yet), then working, then idle you have already seen. Within each, the one whose state changed most recently |
+
+Then come the presets. Without a config file there is one, so `next` cycles `spaces` → `priority` → `recent` → `spaces`:
 
 | Preset | Sort | What you see on top |
 |---|---|---|
-| `attention` | `attention` desc, then `state_change_seq` desc | Agents that need you: blocked first, then done (finished, not looked at yet), then working, then idle you have already seen. Within each, the one whose state changed most recently |
 | `recent` | `state_change_seq` desc | The agent whose state changed most recently (started, finished, got blocked), whatever that state is |
-| `workspace` | `workspace_order`, `tab_order`, `pane_order`, all asc | Herdr's own layout order: workspaces, then tabs, then panes as they are arranged |
 
-`0` in the popup (or clearing) drops the plugin's sort, and Herdr's own `ui.agent_panel_sort` applies again.
+`spaces` and `priority` are views the plugin applies, like any preset: they show Herdr's order (as Herdr 0.9.5 sorts it) whatever `ui.agent_panel_sort` is set to, and `restore` puts the chosen one back at every start. `0` in the popup (or `agent-sort clear`) drops the plugin's view altogether, and the value of `ui.agent_panel_sort` in Herdr's config applies again (unless another source has set the view; see [Limits](#limits)).
 
 ## Fields
 
@@ -59,7 +64,7 @@ What each built-in field sorts by (Herdr 0.9.5, `agent.view.set`):
 
 ## Custom presets
 
-Write your own presets when the built-ins are not the order you want: for example a priority token first, then urgency, then recency. Press `e` in the popup to open the config; on first use it is a commented template holding the three built-ins, so you can copy one and change it. When you save and close the editor, the popup reloads the presets and re-applies the active one with its new definition.
+Write your own presets when the built-ins are not the order you want: for example a priority token first, then urgency, then recency. Press `e` in the popup to open the config; on first use it is a commented template holding the built-in preset, so you can copy it and change it. When you save and close the editor, the popup reloads the presets and re-applies the active one with its new definition.
 
 ## Configuration
 
@@ -99,8 +104,10 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - A token name is 1–32 of `[A-Za-z0-9_-]`, the same rule Herdr uses for `pane report-metadata --token`.
 - Token values compare as strings, so pad to the same number of digits whenever values can have different lengths (for 1–12 write `01`–`12`, or `"10"` sorts before `"3"`).
 - `filter` is the filter object of the socket API's `agent.view.set`, converted from TOML to JSON untouched; it must be a table.
-- Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset.
-- A `[[sort_presets]]` list replaces the built-ins whole; copy the ones you still want from [Built-in presets](#built-in-presets).
+- Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset or one of Herdr's two (`spaces`, `priority`).
+- `spaces` and `priority` are taken: a preset with one of those names is a config error; rename it.
+- `attention` and `workspace` used to be built-in presets. `attention` sorted exactly like `priority`; `workspace` sorted by tab and pane number, which is the `spaces` order except where a pane was split off an earlier one (`spaces` follows the layout, pane numbers follow creation). Where no preset of yours has the name, `default = "attention"` and `agent-sort set attention` mean `priority`, and `workspace` means `spaces` the same way. A saved `attention` or `workspace` is treated like any preset removed from the config: the next start says so once and applies the `default`, if there is one.
+- A `[[sort_presets]]` list replaces the built-in preset; copy it from [Built-in presets](#built-in-presets) if you still want it. `spaces` and `priority` stay in front of your list.
 
 ## Keys in the popup
 
@@ -159,7 +166,7 @@ herdr pane report-metadata "$HERDR_PANE_ID" --source started-at --clear-token st
 exit 0
 ```
 
-Then add a preset that sorts by it, oldest first. A `[[sort_presets]]` list replaces the built-in presets whole (see [Configuration](#configuration)), so copy the built-ins you still want next to it:
+Then add a preset that sorts by it, oldest first. A `[[sort_presets]]` list replaces the built-in preset (see [Configuration](#configuration)), so copy it next to this one if you still want it:
 
 ```toml
 [[sort_presets]]

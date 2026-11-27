@@ -83,7 +83,8 @@ preset_in_state() { python3 -c 'import json,sys; print(json.dumps(json.load(open
 
 ATTENTION='"sort":[{"field":"attention","order":"desc"},{"field":"state_change_seq","order":"desc"}]'
 RECENT='"sort":[{"field":"state_change_seq","order":"desc"}]'
-WORKSPACE='"sort":[{"field":"workspace_order","order":"asc"},{"field":"tab_order","order":"asc"},{"field":"pane_order","order":"asc"}]'
+SPACES='"sort":[{"field":"workspace_order","order":"asc"}]'
+
 SRC='"source":"plugin:test.agent-sort"'
 
 reset
@@ -92,35 +93,58 @@ check "probe answers ok without touching Herdr" "$(cat "$tmp/out"; reqs; cat "$t
 
 reset
 run presets
-check "without a config the built-in presets are listed" "$(cat "$tmp/out")" "attention
-recent
-workspace"
+check "without a config Herdr's sorts are listed, then the built-in preset" "$(cat "$tmp/out")" "spaces
+priority
+recent"
 
 reset
 run next; rc=$?
-check "next without state applies the first preset and saves it" \
+check "next without state applies Herdr's spaces, the first in the list, and saves it" \
   "$(echo "rc=$rc"; reqs; preset_in_state)" \
   "rc=0
-agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
-\"attention\""
-check "next tells the user which preset is active" "$(grep -c 'notification show.*attention' "$tmp/calls")" "1"
+agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
+\"spaces\""
+check "next tells the user which preset is active" "$(grep -c 'notification show.*spaces' "$tmp/calls")" "1"
 
 fresh; run next
-check "next moves to the following preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
+check "next moves on to Herdr's priority" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
+\"priority\""
+fresh; run next
+check "next moves from Herdr's sorts to the first preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
 \"recent\""
-fresh; run next; fresh; run next
-check "next wraps around after the last preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
-\"attention\""
+fresh; run next
+check "next wraps around after the last preset to Herdr's spaces" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
+\"spaces\""
+fresh; run restore
+check "restore re-applies a saved Herdr sort like any preset" "$(reqs)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}"
+
+fresh; echo '{"preset":"attention"}' > "$state"; run restore; rc=$?
+check "a saved attention, no longer a built-in, is reported gone once like any removed preset" \
+  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*attention.*no longer in the config' "$tmp/calls"; [ -e "$state" ] && echo "state kept" || echo "state removed")" "rc=0
+1
+state removed"
+fresh; run set attention; rc=$?
+check "set attention applies priority" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
+agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
+\"priority\""
+fresh; rm -f "$state"; echo 'default = "attention"' > "$cfg"; run restore; rc=$?
+check "a config that only sets default = attention still loads and means priority" "$(echo "rc=$rc"; reqs)" "rc=0
+agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}"
+rm -f "$cfg"
 
 fresh; run set workspace; rc=$?
+check "set workspace, an old built-in name, applies spaces" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
+agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
+\"spaces\""
+fresh; run set recent; rc=$?
 check "set applies the named preset" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
-agent.view.set {\"label\":\"workspace\",$WORKSPACE,$SRC}
-\"workspace\""
+agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
+\"recent\""
 
 fresh; run set nope; rc=$?
 check "set with an unknown name fails, names it, sends nothing and keeps the state" \
   "$(echo "rc=$rc"; reqs; preset_in_state; grep -c nope "$tmp/err")" "rc=1
-\"workspace\"
+\"recent\"
 1"
 
 fresh; run clear; rc=$?
@@ -144,8 +168,8 @@ null
 fresh; echo '{"preset":null}' > "$state"
 
 fresh; run next
-check "next after clear starts again from the first preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"attention\",$ATTENTION,$SRC}
-\"attention\""
+check "next after clear starts again from the first in the list" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
+\"spaces\""
 
 fresh; run set recent; fresh; run restore; rc=$?
 check "restore applies the saved preset" "$(echo "rc=$rc"; reqs)" "rc=0
@@ -173,7 +197,9 @@ name = "repo"
 sort = [{ token = "repo" }]
 TOML
 run presets
-check "a config replaces the built-in presets" "$(cat "$tmp/out")" "prio
+check "a config replaces the built-in presets and keeps Herdr's sorts first" "$(cat "$tmp/out")" "spaces
+priority
+prio
 repo"
 run restore; rc=$?
 check "restore with no state applies the config default, mixing tokens and fields, order defaulting to asc, filter passed through" \
@@ -225,6 +251,9 @@ sort = [{ field = "agent" }]
 [[sort_presets]]
 name = "x"
 sort = [{ field = "seen" }]' 'duplicate'
+bad "a preset named like one of Herdr's sorts is a config error" '[[sort_presets]]
+name = "priority"
+sort = [{ field = "agent" }]' 'preset name "priority" is taken by Herdr'
 bad "a default that names no preset is a config error" 'default = "y"
 [[sort_presets]]
 name = "x"
@@ -285,24 +314,25 @@ check "edit writes a commented template when there is no config" \
 written
 commented"
 run presets
-check "the template holds the built-in presets" "$(cat "$tmp/out")" "attention
-recent
-workspace"
+check "the template holds the built-in preset" "$(cat "$tmp/out")" "spaces
+priority
+recent"
 echo '# my own line' >> "$cfg"
 cp "$cfg" "$tmp/template"
 fresh; EDITOR=true VISUAL= run edit
 check "edit leaves an existing config alone" "$(cmp -s "$cfg" "$tmp/template" && echo same)" "same"
 
+
 reset
-echo '{"preset":"attention"}' > "$state"
+echo '{"preset":"mine"}' > "$state"
 cat > "$tmp/editor" <<'SH'
 #!/bin/sh
-printf '[[sort_presets]]\nname = "attention"\nsort = [{ token = "prio", order = "desc" }]\n' > "$1"
+printf '[[sort_presets]]\nname = "mine"\nsort = [{ token = "prio", order = "desc" }]\n' > "$1"
 SH
 chmod +x "$tmp/editor"
 VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit runs \$VISUAL over \$EDITOR, then reapplies the active preset from the new config" "$(echo "rc=$rc"; reqs)" "rc=0
-agent.view.set {\"label\":\"attention\",\"sort\":[{\"field\":{\"token\":\"prio\"},\"order\":\"desc\"}],$SRC}"
+agent.view.set {\"label\":\"mine\",\"sort\":[{\"field\":{\"token\":\"prio\"},\"order\":\"desc\"}],$SRC}"
 
 fresh
 cat > "$tmp/editor" <<'SH'
@@ -311,7 +341,7 @@ printf '[[sort_presets]]\nname = "other"\nsort = [{ field = "agent" }]\n' > "$1"
 SH
 VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit that drops the active preset with no default takes our view down and says so" \
-  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*attention.*gone' "$tmp/calls"; [ -e "$state" ] && echo "state kept" || echo "state removed")" "rc=0
+  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*mine.*gone' "$tmp/calls"; [ -e "$state" ] && echo "state kept" || echo "state removed")" "rc=0
 agent.view.clear {$SRC}
 1
 state removed"
@@ -325,14 +355,14 @@ VISUAL=false run edit; rc=$?
 check "an editor that fails is an error and applies nothing" "$(echo "rc=$rc"; reqs; grep -c 'editor' "$tmp/err")" "rc=1
 1"
 
-fresh; echo '{"preset":"attention"}' > "$state"
+fresh; echo '{"preset":"mine"}' > "$state"
 cat > "$tmp/editor" <<'SH'
 #!/bin/sh
 printf 'default = "other"\n[[sort_presets]]\nname = "first"\nsort = [{ field = "seen" }]\n[[sort_presets]]\nname = "other"\nsort = [{ field = "agent" }]\n' > "$1"
 SH
 VISUAL="$tmp/editor" EDITOR=false run edit; rc=$?
 check "edit that drops the active preset applies the default, says both, and forgets the name" \
-  "$(echo "rc=$rc"; reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show.*attention.*gone.*other' "$tmp/calls"; preset_in_state)" "rc=0
+  "$(echo "rc=$rc"; reqs | grep -o '"label":"[a-z]*"'; grep -c 'notification show.*mine.*gone.*other' "$tmp/calls"; preset_in_state)" "rc=0
 \"label\":\"other\"
 1
 no state"

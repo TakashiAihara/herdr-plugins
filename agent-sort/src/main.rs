@@ -222,7 +222,7 @@ fn next(env: &Env) -> Res<()> {
 
 fn set(env: &Env, name: &str) -> Res<()> {
     let cfg = env.config().map_err(|e| notified(env, e))?;
-    let Some(preset) = cfg.preset(name) else {
+    let Some(preset) = cfg.preset(cfg.resolve(name)) else {
         return Err(notified(env, format!("unknown preset {name:?}")));
     };
     apply(env, preset)
