@@ -658,6 +658,38 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_sort_presets_list_shows_herdrs_two_sorts_without_an_error() {
+        let dir = crate::testutil::unique_dir("ui-empty-presets");
+        let cfg_dir = dir.join("cfg");
+        std::fs::create_dir_all(&cfg_dir).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(cfg_dir.join("config.toml"), "sort_presets = []")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let env = Env::test(
+            &cfg_dir.to_string_lossy(),
+            &dir.join("state").to_string_lossy(),
+        );
+        let loaded = load(&env);
+        let mut app = loaded.app;
+        let names: Vec<&str> = app.presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["spaces", "priority"]);
+        assert_eq!(app.status, "");
+        handle_key(
+            &mut app,
+            &loaded.binds,
+            key(KeyCode::Down, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            handle_key(
+                &mut app,
+                &loaded.binds,
+                key(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            Action::Apply(1)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_key_error_falls_back_to_all_default_binds() {
         let dir = crate::testutil::unique_dir("ui-keys");
         let cfg_dir = dir.join("cfg");

@@ -221,9 +221,6 @@ fn parse(path: &str, text: &str) -> Result<Config, String> {
     let presets = match doc.get("sort_presets") {
         None => listed(builtins()),
         Some(toml::Value::Array(items)) => {
-            if items.is_empty() {
-                return Err(format!("{path}: sort_presets must not be empty"));
-            }
             let presets = items
                 .iter()
                 .enumerate()
@@ -473,7 +470,9 @@ pub const TEMPLATE: &str = r#"# agent-sort configuration.
 # Herdr's own two orders are built in, so they are not written here. For
 # reference, as presets they would read as below (Herdr 0.9.5; Herdr may change
 # how it sorts). Their names are taken and the two stay listed: for a variation
-# of one, copy it under another name.
+# of one, copy it under another name. To list only these two, delete every
+# [[sort_presets]] entry in this file and write a single `sort_presets = []`
+# line above any [keys] table.
 #
 # [[sort_presets]]
 # name = "spaces"
@@ -736,7 +735,6 @@ sort = [{ token = "repo" }]
                 "[[sort_presets]]\nname = \"x\"\nsort = [{ field = \"agent\" }]\nbogus = 1",
                 "unknown key \"bogus\"",
             ),
-            ("sort_presets = []", "sort_presets must not be empty"),
             ("bogus = 1", "unknown key \"bogus\""),
             (
                 "[[sort_presets]]\nname = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nsort = [{ field = \"agent\" }]",
@@ -789,6 +787,16 @@ sort = [{ token = "repo" }]
             "a".repeat(33)
         );
         assert!(err(&bad).contains("invalid token"), "{}", err(&bad));
+    }
+
+    #[test]
+    fn an_empty_sort_presets_list_leaves_only_herdrs_sorts() {
+        let cfg = parse("config.toml", "sort_presets = []").unwrap_or_else(|e| panic!("{e}"));
+        let names: Vec<&str> = cfg.presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["spaces", "priority"]);
+        assert_eq!(cfg.default, None);
+        let e = err("default = \"recent\"\nsort_presets = []");
+        assert!(e.contains("default \"recent\" is not a sort preset"), "{e}");
     }
 
     #[test]
