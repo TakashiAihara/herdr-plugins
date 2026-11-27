@@ -95,9 +95,10 @@ impl Config {
         self.presets.iter().find(|p| p.name == name)
     }
 
-    // The name to look up for a name from a config default, a saved state or `set`: "attention"
-    // was a built-in preset with the sort Herdr's "priority" has, so where no preset carries
-    // that name anymore it means "priority".
+    // The name to look up for a name from a config default or `set`: "attention" was a built-in
+    // preset with the sort Herdr's "priority" has, and the template suggested it as the default,
+    // so where no preset carries that name it means "priority". A saved state is not read this
+    // way: an "attention" there goes the way of any preset gone from the config.
     pub fn resolve<'a>(&self, name: &'a str) -> &'a str {
         if name == "attention" && self.preset(name).is_none() {
             "priority"

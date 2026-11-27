@@ -171,23 +171,6 @@ fn current<'a>(cfg: &'a Config, saved: &'a Saved) -> Option<&'a str> {
     }
 }
 
-// The state file as this config reads it: a saved name goes through `Config::resolve`. A name
-// that resolved to another is saved under the new one, so the old name is read this way once and
-// a preset given that name later does not take the state over. A failed write changes nothing:
-// the next read resolves it again.
-fn saved(env: &Env, cfg: &Config) -> Saved {
-    match state::read(&env.state_path) {
-        Saved::Named(n) => {
-            let name = cfg.resolve(&n);
-            if name != n {
-                let _ = state::write(&env.state_dir, &env.state_path, Some(name));
-            }
-            Saved::Named(name.to_string())
-        }
-        other => other,
-    }
-}
-
 // Sends the set request, then saves the preset now that Herdr accepted it.
 fn apply_raw(env: &Env, preset: &Preset) -> Res<()> {
     env.call(&request::set(&env.plugin_id, preset))?;
@@ -233,7 +216,7 @@ fn next_preset<'a>(cfg: &'a Config, saved: &Saved) -> &'a Preset {
 
 fn next(env: &Env) -> Res<()> {
     let cfg = env.config().map_err(|e| notified(env, e))?;
-    let saved = saved(env, &cfg);
+    let saved = state::read(&env.state_path);
     apply(env, next_preset(&cfg, &saved))
 }
 
@@ -319,7 +302,7 @@ fn restore_plan<'a>(cfg: &'a Config, saved: &Saved) -> (Option<&'a Preset>, Opti
 // state file is removed, then the config default is applied when there is one.
 fn restore(env: &Env) -> Res<()> {
     let cfg = env.config().map_err(|e| notified(env, e))?;
-    let saved = saved(env, &cfg);
+    let saved = state::read(&env.state_path);
     let (preset, warn) = restore_plan(&cfg, &saved);
     if let Some(w) = warn {
         env.notify_error(&w);
@@ -400,7 +383,7 @@ fn edit_flow(env: &Env) -> Res<EditResult> {
     }
     run_editor(env)?;
     let cfg = env.config()?;
-    let saved = saved(env, &cfg);
+    let saved = state::read(&env.state_path);
     // current() falls back to the default for a dropped state name; report the drop itself.
     let dropped = match &saved {
         Saved::Named(n) if cfg.preset(n).is_none() => Some(n.clone()),

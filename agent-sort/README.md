@@ -107,7 +107,7 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - `filter` is the filter object of the socket API's `agent.view.set`, converted from TOML to JSON untouched; it must be a table.
 - Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset or one of Herdr's two (`spaces`, `priority`).
 - `spaces` and `priority` are taken: a preset with one of those names is a config error; rename it.
-- `attention` used to be a built-in preset with the same sort as `priority`. Where no preset of yours has that name, `default = "attention"`, a saved `attention` and `agent-sort set attention` mean `priority`; a saved `attention` is rewritten to `priority` the first time it is read.
+- `attention` used to be a built-in preset with the same sort as `priority`. Where no preset of yours has that name, `default = "attention"` and `agent-sort set attention` mean `priority`. A saved `attention` is treated like any preset removed from the config: the next start says so once and applies the `default`, if there is one.
 - A `[[sort_presets]]` list replaces the two built-in presets whole; copy the ones you still want from [Built-in presets](#built-in-presets). `spaces` and `priority` stay in front of your list.
 
 ## Keys in the popup

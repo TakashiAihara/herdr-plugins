@@ -1,5 +1,6 @@
 use crate::config::Preset;
 use crate::keys::{self, Bind, KeySet};
+use crate::state;
 
 use crate::{current, edit_flow, notify_edit, Env, Res};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -152,7 +153,7 @@ fn load(env: &Env) -> Loaded {
     };
     let (sets, key_err) = key_sets(&env.config_path, &cfg);
     let status = key_err.clone().unwrap_or_default();
-    let current = current(&cfg, &crate::saved(env, &cfg)).map(String::from);
+    let current = current(&cfg, &state::read(&env.state_path)).map(String::from);
     Loaded {
         binds: Binds::new(&sets),
         app: App::new(cfg.presets, current, status, help_line(&sets)),
@@ -655,23 +656,6 @@ mod tests {
         );
         assert_eq!(wrapped_height("aaa\nbbb", 10), 2);
         assert_eq!(wrapped_height("anything", 0), 0);
-    }
-
-    #[test]
-    fn a_saved_attention_without_such_a_preset_shows_priority_as_current() {
-        let dir = crate::testutil::unique_dir("ui-attention");
-        let state_dir = dir.join("state");
-        std::fs::create_dir_all(&state_dir).unwrap_or_else(|e| panic!("{e}"));
-        std::fs::write(state_dir.join("state.json"), "{\"preset\":\"attention\"}")
-            .unwrap_or_else(|e| panic!("{e}"));
-        let env = Env::test(
-            &dir.join("cfg").to_string_lossy(),
-            &state_dir.to_string_lossy(),
-        );
-        let app = load(&env).app;
-        assert_eq!(app.current.as_deref(), Some("priority"));
-        assert_eq!(app.cur, 1, "the cursor is on priority, after spaces");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

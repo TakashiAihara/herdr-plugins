@@ -123,17 +123,10 @@ fresh; run restore
 check "restore re-applies a saved Herdr sort like any preset" "$(reqs)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}"
 
 fresh; echo '{"preset":"attention"}' > "$state"; run restore; rc=$?
-check "a saved attention, the old built-in name, restores as priority without a notification and is saved as priority" \
-  "$(echo "rc=$rc"; reqs; grep -c 'notification show' "$tmp/calls"; preset_in_state)" "rc=0
-agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
-0
-\"priority\""
-fresh; printf '{ "preset" : "recent" }' > "$state"; run restore
-check "a saved name that needs no rewriting leaves the state file untouched" "$(cat "$state")" '{ "preset" : "recent" }'
-echo '{"preset":"priority"}' > "$state"
-fresh; run next
-check "next from a saved attention continues after priority" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
-\"recent\""
+check "a saved attention, no longer a built-in, is reported gone once like any removed preset" \
+  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*attention.*no longer in the config' "$tmp/calls"; [ -e "$state" ] && echo "state kept" || echo "state removed")" "rc=0
+1
+state removed"
 fresh; run set attention; rc=$?
 check "set attention applies priority" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
 agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
@@ -330,12 +323,6 @@ cp "$cfg" "$tmp/template"
 fresh; EDITOR=true VISUAL= run edit
 check "edit leaves an existing config alone" "$(cmp -s "$cfg" "$tmp/template" && echo same)" "same"
 
-fresh; echo '{"preset":"attention"}' > "$state"; EDITOR=true VISUAL= run edit; rc=$?
-check "edit with a saved attention re-applies priority instead of reporting it gone" \
-  "$(echo "rc=$rc"; reqs; grep -c 'notification show.*gone' "$tmp/calls"; [ -e "$state" ] && echo "state kept")" "rc=0
-agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
-0
-state kept"
 
 reset
 echo '{"preset":"mine"}' > "$state"
