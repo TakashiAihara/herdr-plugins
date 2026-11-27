@@ -50,8 +50,8 @@ mod testutil {
         );
     }
 
-    // Tests that run a fake herdr take this lock: some of them assert on elapsed time, and
-    // processes started by other tests at the same moment would add to it.
+    // The tests that take this lock run one at a time: several of them start processes and
+    // assert on elapsed time, and side by side they would add to each other's.
     pub fn serial() -> MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -209,21 +209,31 @@ mod tests {
     #[test]
     fn a_fake_herdr_runs_while_other_threads_start_processes() {
         use std::sync::atomic::{AtomicBool, Ordering};
+        // Set when dropped, so a panic below still ends the threads the scope waits for.
+        struct Stop<'a>(&'a AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let _g = serial();
         let stop = AtomicBool::new(false);
         let failed = std::thread::scope(|s| {
+            let _stop = Stop(&stop);
             for _ in 0..4 {
                 s.spawn(|| {
                     while !stop.load(Ordering::Relaxed) {
-                        let _ = std::process::Command::new("true").status();
+                        std::process::Command::new("true").status().unwrap();
                     }
                 });
             }
-            let failed = (0..200).find_map(|_| {
+            (0..200).find_map(|_| {
                 let f = fake_herdr(&[]);
-                std::process::Command::new(&f.bin).status().err()
-            });
-            stop.store(true, Ordering::Relaxed);
-            failed
+                match std::process::Command::new(&f.bin).status() {
+                    Ok(status) if status.success() => None,
+                    other => Some(format!("{other:?}")),
+                }
+            })
         });
         assert!(failed.is_none(), "{failed:?}");
     }
