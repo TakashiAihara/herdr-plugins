@@ -470,9 +470,9 @@ pub const TEMPLATE: &str = r#"# agent-sort configuration.
 # Herdr's own two orders are built in, so they are not written here. For
 # reference, as presets they would read as below (Herdr 0.9.5; Herdr may change
 # how it sorts). Their names are taken and the two stay listed: for a variation
-# of one, copy it under another name. To list only these two, replace every
-# [[sort_presets]] entry in this file with the line `sort_presets = []`, placed
-# above any [keys] table.
+# of one, copy it under another name. To list only these two, delete every
+# [[sort_presets]] entry in this file and write a single `sort_presets = []`
+# line above any [keys] table.
 #
 # [[sort_presets]]
 # name = "spaces"
@@ -792,7 +792,8 @@ sort = [{ token = "repo" }]
     #[test]
     fn an_empty_sort_presets_list_leaves_only_herdrs_sorts() {
         let cfg = parse("config.toml", "sort_presets = []").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(cfg.presets, herdr_sorts());
+        let names: Vec<&str> = cfg.presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["spaces", "priority"]);
         assert_eq!(cfg.default, None);
         let e = err("default = \"recent\"\nsort_presets = []");
         assert!(e.contains("default \"recent\" is not a sort preset"), "{e}");

@@ -230,8 +230,11 @@ run presets; rc=$?
 check "an empty sort_presets list leaves only Herdr's sorts" "$(echo "rc=$rc"; cat "$tmp/out")" "rc=0
 spaces
 priority"
-run next; fresh; run next; fresh; run next
-check "next cycles through Herdr's two sorts alone and wraps to spaces" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
+fresh; run next; rc1=$?; run next; rc2=$?; run next; rc3=$?
+check "next cycles through Herdr's two sorts alone and wraps to spaces" "$(echo "rc=$rc1 $rc2 $rc3"; reqs; preset_in_state)" "rc=0 0 0
+agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
+agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}
+agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
 \"spaces\""
 
 bad() { # bad <description> <config> <text the error must contain>

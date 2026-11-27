@@ -107,7 +107,7 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset or one of Herdr's two (`spaces`, `priority`).
 - `spaces` and `priority` are taken: a preset with one of those names is a config error; rename it.
 - `attention` and `workspace` used to be built-in presets. `attention` sorted exactly like `priority`; `workspace` sorted by tab and pane number, which is the `spaces` order except where a pane was split off an earlier one (`spaces` follows the layout, pane numbers follow creation). Where no preset of yours has the name, `default = "attention"` and `agent-sort set attention` mean `priority`, and `workspace` means `spaces` the same way. A saved `attention` or `workspace` is treated like any preset removed from the config: the next start says so once and applies the `default`, if there is one.
-- A `[[sort_presets]]` list replaces the built-in preset; copy it from [Built-in presets](#built-in-presets) if you still want it. `spaces` and `priority` stay in front of your list. To list only those two, write `sort_presets = []` in place of every `[[sort_presets]]` entry, above any `[keys]` table (below it, TOML reads the line as a key of `[keys]`).
+- A `[[sort_presets]]` list replaces the built-in preset; copy it from [Built-in presets](#built-in-presets) if you still want it. `spaces` and `priority` stay in front of your list. To list only those two, delete every `[[sort_presets]]` entry and write a single `sort_presets = []` line above any `[keys]` table (below it, TOML reads the line as a key of `[keys]`).
 
 ## Keys in the popup
 
