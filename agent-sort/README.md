@@ -46,7 +46,7 @@ Then come the presets. Without a config file there is one, so `next` cycles `spa
 |---|---|---|
 | `recent` | `state_change_seq` desc | The agent whose state changed most recently (started, finished, got blocked), whatever that state is |
 
-`spaces` and `priority` are views the plugin applies, like any preset: they show Herdr's order (as Herdr 0.9.5 sorts it) whatever `ui.agent_panel_sort` is set to, and `restore` puts the chosen one back at every start. `0` in the popup (or `agent-sort clear`) drops the plugin's view altogether, and the value of `ui.agent_panel_sort` in Herdr's config applies again.
+`spaces` and `priority` are views the plugin applies, like any preset: they show Herdr's order (as Herdr 0.9.5 sorts it) whatever `ui.agent_panel_sort` is set to, and `restore` puts the chosen one back at every start. `0` in the popup (or `agent-sort clear`) drops the plugin's view altogether, and the value of `ui.agent_panel_sort` in Herdr's config applies again (unless another source has set the view; see [Limits](#limits)).
 
 ## Fields
 

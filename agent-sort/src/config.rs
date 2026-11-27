@@ -469,8 +469,8 @@ pub const TEMPLATE: &str = r#"# agent-sort configuration.
 #
 # Herdr's own two orders are built in, so they are not written here. For
 # reference, as presets they would read as below (Herdr 0.9.5; Herdr may change
-# how it sorts). Their names are taken: to change one, copy it under another
-# name.
+# how it sorts). Their names are taken and the two stay listed: for a variation
+# of one, copy it under another name.
 #
 # [[sort_presets]]
 # name = "spaces"

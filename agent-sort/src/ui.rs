@@ -1,7 +1,6 @@
 use crate::config::Preset;
 use crate::keys::{self, Bind, KeySet};
 use crate::state;
-
 use crate::{current, edit_flow, notify_edit, Env, Res};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
