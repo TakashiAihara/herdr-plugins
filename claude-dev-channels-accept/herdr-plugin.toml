@@ -2,7 +2,7 @@ id = "takashiaihara.claude-dev-channels-accept"
 name = "Claude dev channels accept"
 version = "0.1.0"
 min_herdr_version = "0.9.3"
-description = "Answer Claude Code's development-channels warning dialog so claude can be started without a wrapper"
+description = "Answer Claude Code's development-channels warning dialog so claude can be started without a wrapper. Installing it accepts that warning for you on every start"
 platforms = ["linux", "macos"]
 
 [[events]]
