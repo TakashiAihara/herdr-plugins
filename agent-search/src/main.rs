@@ -890,6 +890,24 @@ mod tests {
         assert_eq!(tokens(&keeps), json!({"repo": "a", "prio": "2"}));
     }
 
+    // An executable written by a child process, never by this one: a fork in another test thread
+    // would inherit this process's write descriptor for a moment, and executing the file while
+    // that copy is open fails with "Text file busy".
+    fn write_exec(path: &std::path::Path, script: &str) {
+        use std::io::Write;
+        let mut sh = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let wrote = sh.stdin.take().unwrap().write_all(script.as_bytes());
+        assert!(
+            sh.wait().unwrap().success() && wrote.is_ok(),
+            "cannot write {path:?}"
+        );
+    }
+
     fn env_with(dir: &str, panes: Value, saved: Value) -> Env {
         let dir = testutil::unique_dir(&format!("act-{dir}"));
         let list = dir.join("list.json");
@@ -969,7 +987,6 @@ mod tests {
 
     #[test]
     fn an_act_on_one_pane_keeps_the_priorities_just_merged_from_other_panes() {
-        use std::os::unix::fs::PermissionsExt;
         let panes = json!([
             {"pane_id": "p1", "agent": "claude", "tokens": {"prio": "4"}},
             {"pane_id": "p2", "agent": "claude"}
@@ -977,9 +994,7 @@ mod tests {
         let mut env = env_with("actmerge", panes, json!({}));
         // A herdr that accepts every report-metadata call, so act prio and act clear succeed.
         let herdr = std::path::PathBuf::from(&env.state_dir).join("herdr");
-        std::fs::write(&herdr, "#!/bin/sh\nexit 0\n").unwrap_or_else(|e| panic!("{e}"));
-        std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|e| panic!("{e}"));
+        write_exec(&herdr, "#!/bin/sh\nexit 0\n");
         env.herdr = herdr.to_string_lossy().into_owned();
         let cfg = env.config().unwrap_or_else(|e| panic!("{e}"));
 
@@ -1483,7 +1498,6 @@ mod tests {
 
     #[test]
     fn restore_skips_a_saved_priority_that_changed_after_it_read_the_state() {
-        use std::os::unix::fs::PermissionsExt;
         let panes = json!([
             {"pane_id": "p1", "agent": "claude"},
             {"pane_id": "p2", "agent": "claude"}
@@ -1495,18 +1509,15 @@ mod tests {
         // report-metadata call, the saved priority of p2 becomes 9, so restore must not send p2's
         // old value 3.
         let herdr = dir.join("herdr");
-        std::fs::write(
+        write_exec(
             &herdr,
-            format!(
+            &format!(
                 "#!/bin/sh\necho \"$*\" >> \"{}\"\n[ \"$3\" = \"p1\" ] && printf %s '{}' > \"{}\"\nexit 0\n",
                 calls.display(),
                 r#"{"prio":{"p1":4,"p2":9}}"#,
                 env.state_path,
             ),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-        std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|e| panic!("{e}"));
+        );
         env.herdr = herdr.to_string_lossy().into_owned();
         assert!(restore(&env).is_ok());
         assert_eq!(

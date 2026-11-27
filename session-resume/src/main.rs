@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod testutil {
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, MutexGuard};
 
     // A fresh directory made with `create_dir`, which fails if the name exists, so a test never
@@ -33,9 +32,26 @@ mod testutil {
         panic!("no free test directory name for {name}");
     }
 
-    // Tests that write an executable and spawn processes take this lock. A fork in one test
-    // inherits the descriptor another test is still writing its script through, and executing
-    // that script then fails with "Text file busy".
+    // An executable written by a child process, never by this one: a fork in another test thread
+    // would inherit this process's write descriptor for a moment, and executing the file while
+    // that copy is open fails with "Text file busy".
+    pub fn write_exec(path: &std::path::Path, script: &str) {
+        use std::io::Write;
+        let mut sh = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let wrote = sh.stdin.take().unwrap().write_all(script.as_bytes());
+        assert!(
+            sh.wait().unwrap().success() && wrote.is_ok(),
+            "cannot write {path:?}"
+        );
+    }
+
+    // Tests that run a fake herdr take this lock: some of them assert on elapsed time, and
+    // processes started by other tests at the same moment would add to it.
     pub fn serial() -> MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -61,8 +77,7 @@ mod testutil {
         }
         script.push_str("esac\nexit 0\n");
         let bin = dir.join("herdr");
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_exec(&bin, &script);
         Fake {
             bin: bin.to_str().unwrap().to_string(),
             dir,
@@ -267,6 +282,28 @@ fn main() {
 mod tests {
     use super::*;
     use crate::testutil::{fake_herdr, serial, unique_dir};
+
+    #[test]
+    fn a_fake_herdr_runs_while_other_threads_start_processes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = AtomicBool::new(false);
+        let failed = std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = std::process::Command::new("true").status();
+                    }
+                });
+            }
+            let failed = (0..200).find_map(|_| {
+                let f = fake_herdr(&[]);
+                std::process::Command::new(&f.bin).status().err()
+            });
+            stop.store(true, Ordering::Relaxed);
+            failed
+        });
+        assert!(failed.is_none(), "{failed:?}");
+    }
 
     fn env_in(dir: &std::path::Path, herdr: &str) -> Env {
         Env {
