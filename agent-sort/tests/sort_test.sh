@@ -84,7 +84,7 @@ preset_in_state() { python3 -c 'import json,sys; print(json.dumps(json.load(open
 ATTENTION='"sort":[{"field":"attention","order":"desc"},{"field":"state_change_seq","order":"desc"}]'
 RECENT='"sort":[{"field":"state_change_seq","order":"desc"}]'
 SPACES='"sort":[{"field":"workspace_order","order":"asc"}]'
-WORKSPACE='"sort":[{"field":"workspace_order","order":"asc"},{"field":"tab_order","order":"asc"},{"field":"pane_order","order":"asc"}]'
+
 SRC='"source":"plugin:test.agent-sort"'
 
 reset
@@ -93,10 +93,9 @@ check "probe answers ok without touching Herdr" "$(cat "$tmp/out"; reqs; cat "$t
 
 reset
 run presets
-check "without a config Herdr's sorts are listed, then the built-in presets" "$(cat "$tmp/out")" "spaces
+check "without a config Herdr's sorts are listed, then the built-in preset" "$(cat "$tmp/out")" "spaces
 priority
-recent
-workspace"
+recent"
 
 reset
 run next; rc=$?
@@ -113,9 +112,6 @@ check "next moves on to Herdr's priority" "$(reqs; preset_in_state)" "agent.view
 fresh; run next
 check "next moves from Herdr's sorts to the first preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
 \"recent\""
-fresh; run next
-check "next moves to the following preset" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"workspace\",$WORKSPACE,$SRC}
-\"workspace\""
 fresh; run next
 check "next wraps around after the last preset to Herdr's spaces" "$(reqs; preset_in_state)" "agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
 \"spaces\""
@@ -137,14 +133,18 @@ agent.view.set {\"label\":\"priority\",$ATTENTION,$SRC}"
 rm -f "$cfg"
 
 fresh; run set workspace; rc=$?
+check "set workspace, an old built-in name, applies spaces" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
+agent.view.set {\"label\":\"spaces\",$SPACES,$SRC}
+\"spaces\""
+fresh; run set recent; rc=$?
 check "set applies the named preset" "$(echo "rc=$rc"; reqs; preset_in_state)" "rc=0
-agent.view.set {\"label\":\"workspace\",$WORKSPACE,$SRC}
-\"workspace\""
+agent.view.set {\"label\":\"recent\",$RECENT,$SRC}
+\"recent\""
 
 fresh; run set nope; rc=$?
 check "set with an unknown name fails, names it, sends nothing and keeps the state" \
   "$(echo "rc=$rc"; reqs; preset_in_state; grep -c nope "$tmp/err")" "rc=1
-\"workspace\"
+\"recent\"
 1"
 
 fresh; run clear; rc=$?
@@ -314,10 +314,9 @@ check "edit writes a commented template when there is no config" \
 written
 commented"
 run presets
-check "the template holds the built-in presets" "$(cat "$tmp/out")" "spaces
+check "the template holds the built-in preset" "$(cat "$tmp/out")" "spaces
 priority
-recent
-workspace"
+recent"
 echo '# my own line' >> "$cfg"
 cp "$cfg" "$tmp/template"
 fresh; EDITOR=true VISUAL= run edit
