@@ -45,7 +45,7 @@ Then come the presets. Without a config file they are these two, so `next` cycle
 | Preset | Sort | What you see on top |
 |---|---|---|
 | `recent` | `state_change_seq` desc | The agent whose state changed most recently (started, finished, got blocked), whatever that state is |
-| `workspace` | `workspace_order`, `tab_order`, `pane_order`, all asc | Herdr's own layout order: workspaces, then tabs, then panes as they are arranged |
+| `workspace` | `workspace_order`, `tab_order`, `pane_order`, all asc | Workspaces, then tabs and panes by their numbers. Usually the same order as `spaces`, which keeps Herdr's arrangement instead of sorting by number |
 
 `spaces` and `priority` are views the plugin applies, like any preset: they show Herdr's order (as Herdr 0.9.5 sorts it) whatever `ui.agent_panel_sort` is set to, and `restore` puts the chosen one back at every start. `0` in the popup (or `agent-sort clear`) drops the plugin's view altogether, and the value of `ui.agent_panel_sort` in Herdr's config applies again.
 
