@@ -96,10 +96,11 @@ impl Config {
     }
 
     // The name to look up for a name from a config default or `set`. "attention" and "workspace"
-    // were built-in presets that showed what Herdr's "priority" and "spaces" show, and a config
-    // could name them as the default without defining them; where no preset carries the name it
-    // means Herdr's sort. A saved state is not read this way: an old name there goes the way of
-    // any preset gone from the config.
+    // were built-in presets: the first sorted exactly like Herdr's "priority", the second by tab
+    // and pane number, the layout order "spaces" shows up to panes split out of creation order.
+    // A config could name them as the default without defining them; where no preset carries the
+    // name it means Herdr's sort. A saved state is not read this way: an old name there goes the
+    // way of any preset gone from the config.
     pub fn resolve<'a>(&self, name: &'a str) -> &'a str {
         let herdr = match name {
             "attention" => "priority",
@@ -137,8 +138,10 @@ impl Config {
 // Herdr's own two orders (`ui.agent_panel_sort`), always first in the list: a config replaces the
 // presets after them, never these. Each is the view that reproduces Herdr's order whatever the
 // config says (Herdr 0.9.5 `apply_agent_view`): "priority" is Herdr's own two keys, and "spaces"
-// is the order agents are collected in — workspaces, then tabs, then panes — which a stable sort
-// on the workspace alone leaves as it is.
+// is the order agents are collected in — workspaces, then tabs, then panes by their place in the
+// layout — which a stable sort on the workspace alone leaves as it is. Adding `tab_order` and
+// `pane_order` would not be the same order: a pane's number is the order it was created in, so a
+// pane split off an earlier one sits before later-numbered panes on screen and in "spaces".
 fn herdr_sorts() -> Vec<Preset> {
     let field = SortEntry::field;
     let preset = |name: &str, sort: Vec<SortEntry>| Preset {
@@ -519,6 +522,14 @@ mod tests {
         let names: Vec<String> = listed(builtins()).iter().map(|p| p.name.clone()).collect();
         assert_eq!(names, ["spaces", "priority", "recent"]);
         let herdr = herdr_sorts();
+        assert_eq!(herdr[0].sort, [SortEntry::field("workspace_order", false)]);
+        assert_eq!(
+            herdr[1].sort,
+            [
+                SortEntry::field("attention", true),
+                SortEntry::field("state_change_seq", true)
+            ]
+        );
         assert_eq!(herdr[0].describe(), "workspace_order asc");
         assert_eq!(herdr[1].describe(), "attention desc, state_change_seq desc");
         assert!(herdr.iter().all(|p| p.filter.is_none()));

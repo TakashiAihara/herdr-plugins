@@ -37,7 +37,7 @@ The list always starts with Herdr's own two orders, the values of `ui.agent_pane
 
 | Entry | Sort | What you see |
 |---|---|---|
-| `spaces` | `workspace_order` asc | Herdr's `"spaces"`: agents as workspaces, tabs and panes are arranged |
+| `spaces` | `workspace_order` asc | Herdr's `"spaces"`: agents as workspaces, tabs and panes are arranged. Only the workspace is a sort key, so tabs and panes keep the order Herdr lists them in |
 | `priority` | `attention` desc, then `state_change_seq` desc | Herdr's `"priority"`: agents that need you: blocked first, then done (finished, not looked at yet), then working, then idle you have already seen. Within each, the one whose state changed most recently |
 
 Then come the presets. Without a config file there is one, so `next` cycles `spaces` → `priority` → `recent` → `spaces`:
@@ -106,7 +106,7 @@ filter = { op = "in", field = "status", values = ["blocked", "done"] }
 - `filter` is the filter object of the socket API's `agent.view.set`, converted from TOML to JSON untouched; it must be a table.
 - Preset names must be non-empty, unique, and at most 32 characters (Herdr's label limit); `sort` must be non-empty with at most 8 entries (Herdr's sort-field limit); `default` must name a preset or one of Herdr's two (`spaces`, `priority`).
 - `spaces` and `priority` are taken: a preset with one of those names is a config error; rename it.
-- `attention` and `workspace` used to be built-in presets showing what `priority` and `spaces` show. Where no preset of yours has the name, `default = "attention"` and `agent-sort set attention` mean `priority`, and `workspace` means `spaces` the same way. A saved `attention` or `workspace` is treated like any preset removed from the config: the next start says so once and applies the `default`, if there is one.
+- `attention` and `workspace` used to be built-in presets. `attention` sorted exactly like `priority`; `workspace` sorted by tab and pane number, which is the `spaces` order except where a pane was split off an earlier one (`spaces` follows the layout, pane numbers follow creation). Where no preset of yours has the name, `default = "attention"` and `agent-sort set attention` mean `priority`, and `workspace` means `spaces` the same way. A saved `attention` or `workspace` is treated like any preset removed from the config: the next start says so once and applies the `default`, if there is one.
 - A `[[sort_presets]]` list replaces the built-in preset; copy it from [Built-in presets](#built-in-presets) if you still want it. `spaces` and `priority` stay in front of your list.
 
 ## Keys in the popup
